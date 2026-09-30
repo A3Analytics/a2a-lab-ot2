@@ -32,6 +32,10 @@ run = "cargo nextest run --workspace"
 description = "Run formatting, compile, clippy, and test checks"
 run = "bash .mise/scripts/quality.sh"
 
+[start]
+description = "Start the OT-2 simulator and lab agent together"
+run = "bash .mise/scripts/start.sh"
+
 [serve]
 description = "Serve the lab agent over A2A and MCP"
 run = "cargo run --bin a2a-lab-sdk-example"
@@ -55,3 +59,7 @@ run = "bash .mise/scripts/simulator-health.sh"
 [simulator-clean]
 description = "Remove the cached Opentrons checkout"
 run = "bash .mise/scripts/simulator-clean.sh"
+
+[smoke]
+description = "Live smoke test against the pinned robot-server simulator"
+run = "bash .mise/scripts/smoke.sh"
