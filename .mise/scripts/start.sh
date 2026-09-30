@@ -33,6 +33,6 @@ curl -fsS -H 'Opentrons-Version: *' http://127.0.0.1:31950/health >/dev/null
 printf 'simulator  http://127.0.0.1:31950\n'
 printf 'A2A        http://127.0.0.1:31000\n'
 printf 'MCP        http://127.0.0.1:31001/mcp\n'
-printf 'in another terminal: mise run a2a-lab -- list-workflows\n'
+printf 'in another terminal: mise run ot2-simulation && mise run a2a-lab-example\n'
 
 cargo run --bin a2a-lab-sdk-example

@@ -64,7 +64,10 @@ fn router(state: Mock) -> Router {
         .route("/protocols", post(upload_protocol))
         .route("/protocols/{id}", get(get_protocol))
         .route("/runs", get(list_runs).post(create_run))
-        .route("/runs/{id}", get(get_run).delete(delete_run))
+        .route(
+            "/runs/{id}",
+            get(get_run).patch(patch_run).delete(delete_run),
+        )
         .route("/runs/{id}/actions", post(run_action))
         .route("/runs/{id}/commands", get(run_commands))
         .route("/commands", post(stateless_command))
@@ -169,6 +172,21 @@ async fn get_run(State(mock): State<Mock>, Path(id): Path<String>) -> Response {
         Some(run) => json!({ "data": run }).to_string().into_response(),
         None => not_found("run"),
     }
+}
+
+async fn patch_run(
+    State(mock): State<Mock>,
+    Path(id): Path<String>,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let mut inner = mock.inner.lock().await;
+    let Some(run) = inner.runs.get_mut(&id) else {
+        return not_found("run");
+    };
+    if body["data"]["current"] == false {
+        run["current"] = json!(false);
+    }
+    json!({ "data": run.clone() }).to_string().into_response()
 }
 
 async fn delete_run(State(mock): State<Mock>, Path(id): Path<String>) -> Response {

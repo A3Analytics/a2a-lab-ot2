@@ -44,6 +44,14 @@ run = "cargo run --bin a2a-lab-sdk-example"
 description = "Call a2a-lab log, metric, and workflow operations"
 run = "cargo run --bin a2a-lab --"
 
+[a2a-lab-example]
+description = "Call a2a-lab list and query operations"
+run = "bash .mise/scripts/a2a-lab-example.sh"
+
+[ot2-simulation]
+description = "Load and play the OT-2 protocol so a2a-lab has run data to query"
+run = "bash .mise/scripts/ot2-simulation.sh"
+
 [simulator-setup]
 description = "Clone Opentrons v10.0.0 and install robot-server dependencies"
 run = "bash .mise/scripts/simulator-setup.sh"

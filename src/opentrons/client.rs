@@ -77,8 +77,9 @@ impl OpentronsClient {
         ))
     }
 
-    /// `POST /runs`.
+    /// `POST /runs`. Dismisses any current run first; robot-server allows only one.
     pub async fn create_run(&self, protocol_id: &str) -> Result<Run, SdkError> {
+        self.release_current().await?;
         self.send_json(
             Method::POST,
             "runs",
@@ -157,6 +158,32 @@ impl OpentronsClient {
             })),
         )
         .await
+    }
+
+    async fn release_current(&self) -> Result<(), SdkError> {
+        for run in self.runs().await? {
+            if !run.current {
+                continue;
+            }
+            if matches!(
+                run.status.as_str(),
+                "running"
+                    | "paused"
+                    | "pause-requested"
+                    | "blocked-by-open-door"
+                    | "awaiting-recovery"
+            ) {
+                let _ = self.run_action(&run.id, "stop").await;
+            }
+            let _: Run = self
+                .send_json(
+                    Method::PATCH,
+                    &format!("runs/{}", run.id),
+                    Some(json!({ "data": { "current": false } })),
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     async fn send_json<T>(

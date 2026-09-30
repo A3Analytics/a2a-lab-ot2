@@ -21,13 +21,22 @@ mise run simulator-setup
 
 ## Run
 
-One command starts the simulator and the lab agent:
+Start the OT-2 simulator and lab agent (leave this terminal running):
 
 ```bash
 mise run start
 ```
 
-Ctrl-C stops both. In a second terminal, call the a2a-lab operations:
+Ctrl-C stops both. In a second terminal, optionally seed a paused serial-dilution run, then walk through the a2a-lab list and query operations:
+
+```bash
+mise run ot2-simulation
+mise run a2a-lab-example
+```
+
+`ot2-simulation` talks to robot-server only. `a2a-lab-example` calls `list_workflows`, `list_log_sources`, `list_metrics`, `query_logs`, and `query_metric`. Pause, resume, stop, and `start_workflow` depend on run state, so they are not part of the walkthrough.
+
+Call the same operations yourself:
 
 ```bash
 mise run a2a-lab -- list-workflows
@@ -45,7 +54,7 @@ mise run a2a-lab -- home
 mise run a2a-lab -- command home '{}'
 ```
 
-To run the processes in separate terminals instead:
+To run the simulator and agent in separate terminals instead of `mise run start`:
 
 ```bash
 mise run simulator
@@ -71,7 +80,7 @@ mise run test
 mise run quality
 ```
 
-`mise run smoke` starts the live simulator, exercises pause/resume/stop/home, and tears the processes down. It is opt-in and slower than the unit suite.
+`mise run ot2-simulation` plays the bundled protocol on the live simulator so logs and metrics have data. `mise run a2a-lab-example` runs the list and query operations. `mise run smoke` is a pass/fail check against the same simulator. All three are opt-in and slower than the unit suite.
 
 ## Opentrons App
 
