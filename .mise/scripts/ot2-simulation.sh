@@ -127,4 +127,4 @@ status="$(ot "$ot_url/runs/$run_id" | data_status)"
 printf 'run_id %s\n' "$run_id"
 printf 'status %s\n' "$status"
 printf 'query with: mise run a2a-lab-ot2 -- query-logs\n'
-printf '             mise run a2a-lab-ot2 -- get-workflow-status %s\n' "$run_id"
+printf '             mise run a2a-lab-ot2 -- get-task-status %s\n' "$run_id"

@@ -58,17 +58,17 @@ for _ in $(seq 1 30); do
 done
 curl -fsS http://127.0.0.1:31000/.well-known/agent-card.json >/dev/null
 
-cargo run --quiet --bin a2a-lab-ot2 -- list-workflows
+cargo run --quiet --bin a2a-lab-ot2 -- list-tasks
 cargo run --quiet --bin a2a-lab-ot2 -- list-log-sources
 cargo run --quiet --bin a2a-lab-ot2 -- list-metrics
-run_out="$(cargo run --quiet --bin a2a-lab-ot2 -- start-workflow)"
+run_out="$(cargo run --quiet --bin a2a-lab-ot2 -- start-task)"
 printf '%s\n' "$run_out"
 run_id="$(printf '%s\n' "$run_out" | awk '/^run_id / { print $2; exit }')"
 if [[ -z "$run_id" ]]; then
-  printf 'a2a-lab-ot2 start-workflow did not print a run_id\n' >&2
+  printf 'a2a-lab-ot2 start-task did not print a run_id\n' >&2
   exit 1
 fi
-cargo run --quiet --bin a2a-lab-ot2 -- get-workflow-status "$run_id"
+cargo run --quiet --bin a2a-lab-ot2 -- get-task-status "$run_id"
 cargo run --quiet --bin a2a-lab-ot2 -- pause "$run_id" || true
 cargo run --quiet --bin a2a-lab-ot2 -- resume "$run_id" || true
 cargo run --quiet --bin a2a-lab-ot2 -- stop "$run_id" || true

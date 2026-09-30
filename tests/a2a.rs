@@ -5,9 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use a2a_lab_sdk::{
-    A2aClient, A2aServer, GetWorkflowStatusRequest, JsonObject, LabApi, LabResult, LabService,
-    ListWorkflowsRequest, PageRequest, RunState, StartWorkflowRequest, TaskState, WorkflowId,
-    bind_local,
+    A2aClient, A2aServer, GetTaskStatusRequest, JsonObject, LabApi, LabResult, LabService,
+    ListTasksRequest, PageRequest, StartTaskRequest, TaskId, TaskState, bind_local,
 };
 use a2a_lab_sdk_example::OpentronsLab;
 use support::Mock;
@@ -34,35 +33,35 @@ async fn a2a_run_pause_resume_and_status() {
     let service = LabService::new(lab.clone(), lab.clone(), lab).share();
     let client = A2aClient::new(&serve(Arc::clone(&service)).await).unwrap();
 
-    let workflows = client
-        .list_workflows(ListWorkflowsRequest {
+    let tasks = client
+        .list_tasks(ListTasksRequest {
             page: PageRequest::new(None, 20).unwrap(),
         })
         .await
         .unwrap();
     assert!(
-        workflows
+        tasks
             .items()
             .iter()
             .any(|item| item.id.as_str() == "run_serial_dilution")
     );
 
     let started = client
-        .start_workflow(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("run_serial_dilution").unwrap(),
+        .start_task(StartTaskRequest {
+            task_id: TaskId::new("run_serial_dilution").unwrap(),
             input: JsonObject::empty(),
         })
         .await
         .unwrap();
     assert_eq!(started.state, TaskState::Working);
-    let LabResult::StartWorkflow(run) = started.result else {
+    let LabResult::StartTask(run) = started.result else {
         panic!("start result");
     };
     let run_id = run.id;
 
     let paused = client
-        .start_workflow(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("pause_run").unwrap(),
+        .start_task(StartTaskRequest {
+            task_id: TaskId::new("pause_run").unwrap(),
             input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
         })
         .await
@@ -70,8 +69,8 @@ async fn a2a_run_pause_resume_and_status() {
     assert_eq!(paused.state, TaskState::Completed);
 
     let resumed = client
-        .start_workflow(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("resume_run").unwrap(),
+        .start_task(StartTaskRequest {
+            task_id: TaskId::new("resume_run").unwrap(),
             input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
         })
         .await
@@ -79,10 +78,10 @@ async fn a2a_run_pause_resume_and_status() {
     assert_eq!(resumed.state, TaskState::Completed);
 
     let status = client
-        .workflow_status(GetWorkflowStatusRequest { run_id })
+        .task_status(GetTaskStatusRequest { id: run_id })
         .await
         .unwrap();
-    assert_eq!(status.state, RunState::Working);
+    assert_eq!(status.state, TaskState::Working);
 
     let logs = client
         .query_logs(a2a_lab_sdk::QueryLogsRequest {

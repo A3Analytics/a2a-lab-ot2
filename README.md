@@ -45,11 +45,11 @@ mise run a2a-lab-ot2-example
 Call the same operations yourself (point `--opentrons-url` at robot-server; default is `http://127.0.0.1:31950`):
 
 ```bash
-mise run a2a-lab-ot2 -- list-workflows
+mise run a2a-lab-ot2 -- list-tasks
 mise run a2a-lab-ot2 -- list-log-sources
 mise run a2a-lab-ot2 -- list-metrics
-mise run a2a-lab-ot2 -- start-workflow
-mise run a2a-lab-ot2 -- get-workflow-status <run_id>
+mise run a2a-lab-ot2 -- start-task
+mise run a2a-lab-ot2 -- get-task-status <run_id>
 mise run a2a-lab-ot2 -- pause <run_id>
 mise run a2a-lab-ot2 -- resume <run_id>
 mise run a2a-lab-ot2 -- stop <run_id>
@@ -70,7 +70,7 @@ mise run a2a-lab-ot2 -- command home '{}'
 | A2A                    | `http://127.0.0.1:31000` (`/.well-known/agent-card.json`, `POST /message:send`) |
 | MCP                    | `http://127.0.0.1:31001/mcp`                                                    |
 
-Workflows include `run_serial_dilution`, `pause_run`, `resume_run`, `stop_run`, `delete_run`, recovery actions, and `execute_command` for Protocol Engine commands such as `home`. Administrative, networking, and update endpoints are not exposed.
+Tasks include `run_serial_dilution`, `pause_run`, `resume_run`, `stop_run`, `delete_run`, recovery actions, and `execute_command` for Protocol Engine commands such as `home`. Administrative, networking, and update endpoints are not exposed.
 
 ## Tests
 

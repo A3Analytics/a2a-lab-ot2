@@ -76,10 +76,10 @@ else
   start_stack
 fi
 
-printf 'showcase: list_workflows list_log_sources list_metrics query_logs query_metric start_workflow get_workflow_status\n'
+printf 'showcase: list_tasks list_log_sources list_metrics query_logs query_metric start_task get_task_status\n'
 
-section "list_workflows"
-lab list-workflows
+section "list_tasks"
+lab list-tasks
 section "list_log_sources"
 lab list-log-sources
 section "list_metrics"
@@ -88,20 +88,20 @@ lab list-metrics
 section "query_metric healthy"
 lab query-metrics healthy
 
-section "start_workflow execute_command home"
+section "start_task execute_command home"
 lab home
 
-section "start_workflow run_serial_dilution"
-run_out="$(lab start-workflow run_serial_dilution)"
+section "start_task run_serial_dilution"
+run_out="$(lab start-task run_serial_dilution)"
 printf '%s\n' "$run_out"
 run_id="$(printf '%s\n' "$run_out" | awk '/^run_id / { print $2; exit }')"
 if [[ -z "$run_id" ]]; then
-  printf 'start_workflow did not print a run_id\n' >&2
+  printf 'start_task did not print a run_id\n' >&2
   exit 1
 fi
 
-section "get_workflow_status"
-lab get-workflow-status "$run_id"
+section "get_task_status"
+lab get-task-status "$run_id"
 
 section "query_logs run_commands"
 lab query-logs run_commands
@@ -110,20 +110,20 @@ lab query-metrics run_progress_percent
 section "query_metric run_command_count"
 lab query-metrics run_command_count
 
-section "start_workflow pause_run"
+section "start_task pause_run"
 lab pause "$run_id" || true
-section "get_workflow_status"
-lab get-workflow-status "$run_id"
+section "get_task_status"
+lab get-task-status "$run_id"
 
 terminal=""
 for _ in $(seq 1 8); do
-  status_out="$(lab get-workflow-status "$run_id")"
+  status_out="$(lab get-task-status "$run_id")"
   printf '%s\n' "$status_out"
   terminal="$(printf '%s\n' "$status_out" | awk '/^state / { print $2; exit }')"
   if [[ "$terminal" == "completed" || "$terminal" == "failed" || "$terminal" == "canceled" ]]; then
     break
   fi
-  section "start_workflow resume_run"
+  section "start_task resume_run"
   lab resume "$run_id" || true
   sleep 0.5
   section "query_metric run_progress_percent"
@@ -138,14 +138,14 @@ section "query_metric run_command_count"
 lab query-metrics run_command_count
 
 if [[ "$terminal" != "completed" && "$terminal" != "failed" && "$terminal" != "canceled" ]]; then
-  section "start_workflow stop_run"
+  section "start_task stop_run"
   lab stop "$run_id" || true
-  section "get_workflow_status"
-  lab get-workflow-status "$run_id"
+  section "get_task_status"
+  lab get-task-status "$run_id"
 fi
 
-section "start_workflow delete_run"
-lab start-workflow delete_run --input "$(printf '{"run_id":"%s"}' "$run_id")" || true
+section "start_task delete_run"
+lab start-task delete_run --input "$(printf '{"run_id":"%s"}' "$run_id")" || true
 
-printf '\nrecovery workflows are advertised by list_workflows; this protocol does not enter awaiting-recovery\n'
+printf '\nrecovery tasks are advertised by list_tasks; this protocol does not enter awaiting-recovery\n'
 printf 'a2a-lab-ot2 example ok (run_id %s)\n' "$run_id"

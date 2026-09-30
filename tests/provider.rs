@@ -3,10 +3,9 @@ mod support;
 use std::path::PathBuf;
 
 use a2a_lab_sdk::{
-    GetWorkflowStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest,
-    ListWorkflowsRequest, LogLevel, LogProvider, MetricProvider, PageRequest, QueryLogsRequest,
-    QueryMetricRequest, RunId, RunState, SourceId, StartWorkflowRequest, TimeRange, UtcTimestamp,
-    WorkflowId, WorkflowProvider,
+    GetTaskStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest,
+    LogLevel, LogProvider, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest,
+    RunId, SourceId, StartTaskRequest, TaskId, TaskProvider, TaskState, TimeRange, UtcTimestamp,
 };
 use a2a_lab_sdk_example::OpentronsLab;
 use support::Mock;
@@ -34,20 +33,20 @@ async fn lab() -> (OpentronsLab, Mock) {
 }
 
 #[tokio::test]
-async fn lists_workflows_sources_and_metrics() {
+async fn lists_tasks_sources_and_metrics() {
     let (lab, _) = lab().await;
-    let workflows = lab
-        .list_workflows(ListWorkflowsRequest { page: page() })
+    let tasks = lab
+        .list_tasks(ListTasksRequest { page: page() })
         .await
         .unwrap();
     assert!(
-        workflows
+        tasks
             .items()
             .iter()
             .any(|item| item.id.as_str() == "run_serial_dilution")
     );
     assert!(
-        workflows
+        tasks
             .items()
             .iter()
             .any(|item| item.id.as_str() == "execute_command")
@@ -81,62 +80,62 @@ async fn lists_workflows_sources_and_metrics() {
 async fn runs_serial_dilution_and_maps_status() {
     let (lab, mock) = lab().await;
     let started = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("run_serial_dilution").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("run_serial_dilution").unwrap(),
             input: JsonObject::empty(),
         })
         .await
         .unwrap();
-    assert_eq!(started.state, RunState::Working);
+    assert_eq!(started.state, TaskState::Working);
     assert_eq!(started.message.as_deref(), Some("running"));
     let actions = mock.actions().await;
     assert!(actions.iter().any(|(_, action)| action == "play"));
     let status = lab
-        .status(GetWorkflowStatusRequest {
-            run_id: started.id.clone(),
+        .status(GetTaskStatusRequest {
+            id: started.id.clone(),
         })
         .await
         .unwrap();
-    assert_eq!(status.state, RunState::Working);
+    assert_eq!(status.state, TaskState::Working);
 }
 
 #[tokio::test]
 async fn pauses_resumes_stops_and_deletes() {
     let (lab, mock) = lab().await;
     let started = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("run_serial_dilution").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("run_serial_dilution").unwrap(),
             input: JsonObject::empty(),
         })
         .await
         .unwrap();
     let run_id = started.id.as_str();
     let paused = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("pause_run").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("pause_run").unwrap(),
             input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
         })
         .await
         .unwrap();
-    assert_eq!(paused.state, RunState::Completed);
+    assert_eq!(paused.state, TaskState::Completed);
     let resumed = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("resume_run").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("resume_run").unwrap(),
             input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
         })
         .await
         .unwrap();
-    assert_eq!(resumed.state, RunState::Completed);
+    assert_eq!(resumed.state, TaskState::Completed);
     let stopped = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("stop_run").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("stop_run").unwrap(),
             input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
         })
         .await
         .unwrap();
-    assert_eq!(stopped.state, RunState::Completed);
-    lab.start(StartWorkflowRequest {
-        workflow_id: WorkflowId::new("delete_run").unwrap(),
+    assert_eq!(stopped.state, TaskState::Completed);
+    lab.start(StartTaskRequest {
+        task_id: TaskId::new("delete_run").unwrap(),
         input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
     })
     .await
@@ -152,28 +151,28 @@ async fn pauses_resumes_stops_and_deletes() {
 async fn recovery_and_stateless_commands() {
     let (lab, _) = lab().await;
     let started = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("run_serial_dilution").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("run_serial_dilution").unwrap(),
             input: JsonObject::empty(),
         })
         .await
         .unwrap();
     let recovered = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("resume_from_recovery").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("resume_from_recovery").unwrap(),
             input: JsonObject::parse(&format!(r#"{{"run_id":"{}"}}"#, started.id)).unwrap(),
         })
         .await
         .unwrap();
-    assert_eq!(recovered.state, RunState::Completed);
+    assert_eq!(recovered.state, TaskState::Completed);
     let command = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("execute_command").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("execute_command").unwrap(),
             input: JsonObject::parse(r#"{"commandType":"home","params":{}}"#).unwrap(),
         })
         .await
         .unwrap();
-    assert_eq!(command.state, RunState::Completed);
+    assert_eq!(command.state, TaskState::Completed);
     assert!(command.id.as_str().starts_with("cmd-"));
 }
 
@@ -181,32 +180,32 @@ async fn recovery_and_stateless_commands() {
 async fn rejects_bad_input_and_unknown_ids() {
     let (lab, _) = lab().await;
     let missing = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("missing").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("missing").unwrap(),
             input: JsonObject::empty(),
         })
         .await
         .unwrap_err();
     assert_eq!(missing.code(), "not_found");
     let bad_pause = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("pause_run").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("pause_run").unwrap(),
             input: JsonObject::empty(),
         })
         .await
         .unwrap_err();
     assert_eq!(bad_pause.code(), "invalid");
     let bad_command = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new("execute_command").unwrap(),
+        .start(StartTaskRequest {
+            task_id: TaskId::new("execute_command").unwrap(),
             input: JsonObject::parse(r#"{"params":[]}"#).unwrap(),
         })
         .await
         .unwrap_err();
     assert_eq!(bad_command.code(), "invalid");
     let missing_run = lab
-        .status(GetWorkflowStatusRequest {
-            run_id: RunId::new("run-999").unwrap(),
+        .status(GetTaskStatusRequest {
+            id: RunId::new("run-999").unwrap(),
         })
         .await
         .unwrap_err();
@@ -227,8 +226,8 @@ async fn rejects_bad_input_and_unknown_ids() {
 #[tokio::test]
 async fn queries_logs_and_metrics() {
     let (lab, _) = lab().await;
-    lab.start(StartWorkflowRequest {
-        workflow_id: WorkflowId::new("run_serial_dilution").unwrap(),
+    lab.start(StartTaskRequest {
+        task_id: TaskId::new("run_serial_dilution").unwrap(),
         input: JsonObject::empty(),
     })
     .await
@@ -314,10 +313,10 @@ async fn queries_logs_and_metrics() {
 }
 
 #[tokio::test]
-async fn paginates_workflow_list() {
+async fn paginates_task_list() {
     let (lab, _) = lab().await;
     let first = lab
-        .list_workflows(ListWorkflowsRequest {
+        .list_tasks(ListTasksRequest {
             page: PageRequest::new(None, 2).unwrap(),
         })
         .await
@@ -325,7 +324,7 @@ async fn paginates_workflow_list() {
     assert_eq!(first.items().len(), 2);
     assert!(first.next_cursor().is_some());
     let second = lab
-        .list_workflows(ListWorkflowsRequest {
+        .list_tasks(ListTasksRequest {
             page: PageRequest::new(first.next_cursor().map(str::to_owned), 20).unwrap(),
         })
         .await

@@ -5,11 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a2a_lab_sdk::{
-    GetWorkflowStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest,
-    ListWorkflowsRequest, LogLevel, LogProvider, LogRecord, LogSource, MetricDescriptor, MetricId,
-    MetricPoint, MetricProvider, Page, QueryLogsRequest, QueryMetricRequest, RunId, RunState,
-    SdkError, SourceId, StartWorkflowRequest, UtcTimestamp, WorkflowDefinition, WorkflowId,
-    WorkflowProvider, WorkflowRun,
+    GetTaskStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest,
+    LogLevel, LogProvider, LogRecord, LogSource, MetricDescriptor, MetricId, MetricPoint,
+    MetricProvider, Page, QueryLogsRequest, QueryMetricRequest, RunId, SdkError, SourceId,
+    StartTaskRequest, TaskDefinition, TaskId, TaskProvider, TaskRun, TaskState, UtcTimestamp,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -20,14 +19,14 @@ use crate::time::{now, parse_timestamp};
 use super::client::OpentronsClient;
 use super::model::{Command, Run};
 
-const RUN_WORKFLOW: &str = "run_serial_dilution";
-const PAUSE_WORKFLOW: &str = "pause_run";
-const RESUME_WORKFLOW: &str = "resume_run";
-const STOP_WORKFLOW: &str = "stop_run";
-const DELETE_WORKFLOW: &str = "delete_run";
-const RECOVERY_WORKFLOW: &str = "resume_from_recovery";
-const RECOVERY_FALSE_WORKFLOW: &str = "resume_from_recovery_assuming_false_positive";
-const COMMAND_WORKFLOW: &str = "execute_command";
+const RUN_TASK: &str = "run_serial_dilution";
+const PAUSE_TASK: &str = "pause_run";
+const RESUME_TASK: &str = "resume_run";
+const STOP_TASK: &str = "stop_run";
+const DELETE_TASK: &str = "delete_run";
+const RECOVERY_TASK: &str = "resume_from_recovery";
+const RECOVERY_FALSE_TASK: &str = "resume_from_recovery_assuming_false_positive";
+const COMMAND_TASK: &str = "execute_command";
 const COMMANDS_SOURCE: &str = "run_commands";
 const TROUBLESHOOTING_LOGS: &[&str] = &["api.log", "serial.log", "server.log", "update_server.log"];
 const HEALTH_METRIC: &str = "healthy";
@@ -39,7 +38,7 @@ const COUNT_METRIC: &str = "run_command_count";
 pub struct OpentronsLab {
     client: OpentronsClient,
     protocol_path: PathBuf,
-    local: Arc<Mutex<BTreeMap<String, WorkflowRun>>>,
+    local: Arc<Mutex<BTreeMap<String, TaskRun>>>,
 }
 
 impl OpentronsLab {
@@ -64,7 +63,7 @@ impl OpentronsLab {
         &self.protocol_path
     }
 
-    async fn store(&self, run: WorkflowRun) -> WorkflowRun {
+    async fn store(&self, run: TaskRun) -> TaskRun {
         self.local
             .lock()
             .await
@@ -73,24 +72,24 @@ impl OpentronsLab {
     }
 }
 
-impl WorkflowProvider for OpentronsLab {
+impl TaskProvider for OpentronsLab {
     #[allow(clippy::unused_async_trait_impl)]
-    async fn list_workflows(
+    async fn list_tasks(
         &self,
-        request: ListWorkflowsRequest,
-    ) -> Result<Page<WorkflowDefinition>, SdkError> {
+        request: ListTasksRequest,
+    ) -> Result<Page<TaskDefinition>, SdkError> {
         slice_page(&definitions(), &request.page)
     }
 
-    async fn start(&self, request: StartWorkflowRequest) -> Result<WorkflowRun, SdkError> {
-        match request.workflow_id.as_str() {
-            RUN_WORKFLOW => start_dilution(self, request.input).await,
-            PAUSE_WORKFLOW => control(self, request, "pause", "pause").await,
-            RESUME_WORKFLOW => control(self, request, "play", "resume").await,
-            STOP_WORKFLOW => control(self, request, "stop", "stop").await,
-            DELETE_WORKFLOW => delete_run(self, request).await,
-            RECOVERY_WORKFLOW => control(self, request, "resume-from-recovery", "recovery").await,
-            RECOVERY_FALSE_WORKFLOW => {
+    async fn start(&self, request: StartTaskRequest) -> Result<TaskRun, SdkError> {
+        match request.task_id.as_str() {
+            RUN_TASK => start_dilution(self, request.input).await,
+            PAUSE_TASK => control(self, request, "pause", "pause").await,
+            RESUME_TASK => control(self, request, "play", "resume").await,
+            STOP_TASK => control(self, request, "stop", "stop").await,
+            DELETE_TASK => delete_run(self, request).await,
+            RECOVERY_TASK => control(self, request, "resume-from-recovery", "recovery").await,
+            RECOVERY_FALSE_TASK => {
                 control(
                     self,
                     request,
@@ -99,26 +98,17 @@ impl WorkflowProvider for OpentronsLab {
                 )
                 .await
             }
-            COMMAND_WORKFLOW => execute_command(self, request.input).await,
-            _ => Err(SdkError::not_found(
-                "workflow",
-                request.workflow_id.to_string(),
-            )),
+            COMMAND_TASK => execute_command(self, request.input).await,
+            _ => Err(SdkError::not_found("task", request.task_id.to_string())),
         }
     }
 
-    async fn status(&self, request: GetWorkflowStatusRequest) -> Result<WorkflowRun, SdkError> {
-        if let Some(run) = self
-            .local
-            .lock()
-            .await
-            .get(request.run_id.as_str())
-            .cloned()
-        {
+    async fn status(&self, request: GetTaskStatusRequest) -> Result<TaskRun, SdkError> {
+        if let Some(run) = self.local.lock().await.get(request.id.as_str()).cloned() {
             return Ok(run);
         }
-        let run = self.client.run(request.run_id.as_str()).await?;
-        Ok(workflow_from_run(&run, JsonObject::empty()))
+        let run = self.client.run(request.id.as_str()).await?;
+        Ok(task_from_run(&run, JsonObject::empty()))
     }
 }
 
@@ -165,48 +155,48 @@ impl MetricProvider for OpentronsLab {
     }
 }
 
-fn definitions() -> Vec<WorkflowDefinition> {
-    let mut items: Vec<WorkflowDefinition> = [
+fn definitions() -> Vec<TaskDefinition> {
+    let mut items: Vec<TaskDefinition> = [
         (
-            RUN_WORKFLOW,
+            RUN_TASK,
             "Run serial dilution",
             "Upload the bundled OT-2 protocol, create a run, and play it. The protocol fails mid-run after dropping a tip.",
         ),
         (
-            PAUSE_WORKFLOW,
+            PAUSE_TASK,
             "Pause run",
             "Pause an in-progress Opentrons run.",
         ),
         (
-            RESUME_WORKFLOW,
+            RESUME_TASK,
             "Resume run",
             "Resume a paused Opentrons run.",
         ),
-        (STOP_WORKFLOW, "Stop run", "Stop (cancel) an Opentrons run."),
+        (STOP_TASK, "Stop run", "Stop (cancel) an Opentrons run."),
         (
-            DELETE_WORKFLOW,
+            DELETE_TASK,
             "Delete run",
             "Delete an Opentrons run resource.",
         ),
         (
-            RECOVERY_WORKFLOW,
+            RECOVERY_TASK,
             "Resume from recovery",
             "Resume protocol execution after error recovery.",
         ),
         (
-            RECOVERY_FALSE_WORKFLOW,
+            RECOVERY_FALSE_TASK,
             "Resume from recovery assuming false positive",
             "Resume after error recovery treating the error as a false positive.",
         ),
         (
-            COMMAND_WORKFLOW,
+            COMMAND_TASK,
             "Execute command",
             "Issue a Protocol Engine command to the simulator.",
         ),
     ]
     .into_iter()
-    .map(|(id, name, description)| WorkflowDefinition {
-        id: WorkflowId::new(id).expect("workflow id"),
+    .map(|(id, name, description)| TaskDefinition {
+        id: TaskId::new(id).expect("task id"),
         name: name.to_owned(),
         description: description.to_owned(),
         asset_id: Some("opentrons-ot2".to_owned()),
@@ -293,7 +283,7 @@ fn metrics() -> Vec<MetricDescriptor> {
     items
 }
 
-async fn start_dilution(lab: &OpentronsLab, input: JsonObject) -> Result<WorkflowRun, SdkError> {
+async fn start_dilution(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRun, SdkError> {
     let bytes = tokio::fs::read(&lab.protocol_path)
         .await
         .map_err(|error| SdkError::unavailable(error.to_string()))?;
@@ -307,44 +297,41 @@ async fn start_dilution(lab: &OpentronsLab, input: JsonObject) -> Result<Workflo
     let run = lab.client.create_run(&protocol.id).await?;
     lab.client.run_action(&run.id, "play").await?;
     let run = lab.client.run(&run.id).await?;
-    Ok(workflow_from_run(&run, input))
+    Ok(task_from_run(&run, input))
 }
 
 async fn control(
     lab: &OpentronsLab,
-    request: StartWorkflowRequest,
+    request: StartTaskRequest,
     action: &str,
     prefix: &str,
-) -> Result<WorkflowRun, SdkError> {
+) -> Result<TaskRun, SdkError> {
     let run_id = string_field(request.input.as_map(), "run_id")?;
     lab.client.run_action(run_id, action).await?;
     Ok(lab
         .store(completed_run(
             &format!("{prefix}-{run_id}"),
-            request.workflow_id,
+            request.task_id,
             request.input,
             Some(format!("{action} accepted")),
         )?)
         .await)
 }
 
-async fn delete_run(
-    lab: &OpentronsLab,
-    request: StartWorkflowRequest,
-) -> Result<WorkflowRun, SdkError> {
+async fn delete_run(lab: &OpentronsLab, request: StartTaskRequest) -> Result<TaskRun, SdkError> {
     let run_id = string_field(request.input.as_map(), "run_id")?;
     lab.client.delete_run(run_id).await?;
     Ok(lab
         .store(completed_run(
             &format!("delete-{run_id}"),
-            request.workflow_id,
+            request.task_id,
             request.input,
             Some("deleted".to_owned()),
         )?)
         .await)
 }
 
-async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<WorkflowRun, SdkError> {
+async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRun, SdkError> {
     let command_type = string_field(input.as_map(), "commandType")
         .or_else(|_| string_field(input.as_map(), "command_type"))?;
     if command_type.is_empty() {
@@ -360,13 +347,13 @@ async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<Workfl
     }
     let command = lab.client.execute_command(command_type, params).await?;
     let state = if command.status == "failed" {
-        RunState::Failed
+        TaskState::Failed
     } else {
-        RunState::Completed
+        TaskState::Completed
     };
-    let run = WorkflowRun {
+    let run = TaskRun {
         id: RunId::new(format!("cmd-{}", command.id))?,
-        workflow_id: WorkflowId::new(COMMAND_WORKFLOW)?,
+        task_id: TaskId::new(COMMAND_TASK)?,
         state,
         input,
         message: Some(format!("{} {}", command.kind, command.status)),
@@ -855,10 +842,10 @@ async fn current_run(client: &OpentronsClient) -> Result<Option<Run>, SdkError> 
     Ok(client.runs().await?.into_iter().find(|run| run.current))
 }
 
-fn workflow_from_run(run: &Run, input: JsonObject) -> WorkflowRun {
-    WorkflowRun {
+fn task_from_run(run: &Run, input: JsonObject) -> TaskRun {
+    TaskRun {
         id: RunId::new(&run.id).expect("opentrons run id"),
-        workflow_id: WorkflowId::new(RUN_WORKFLOW).expect("workflow id"),
+        task_id: TaskId::new(RUN_TASK).expect("task id"),
         state: map_status(&run.status),
         input,
         message: Some(run.status.clone()),
@@ -867,26 +854,26 @@ fn workflow_from_run(run: &Run, input: JsonObject) -> WorkflowRun {
 
 fn completed_run(
     id: &str,
-    workflow_id: WorkflowId,
+    task_id: TaskId,
     input: JsonObject,
     message: Option<String>,
-) -> Result<WorkflowRun, SdkError> {
-    Ok(WorkflowRun {
+) -> Result<TaskRun, SdkError> {
+    Ok(TaskRun {
         id: RunId::new(id)?,
-        workflow_id,
-        state: RunState::Completed,
+        task_id,
+        state: TaskState::Completed,
         input,
         message,
     })
 }
 
-fn map_status(status: &str) -> RunState {
+fn map_status(status: &str) -> TaskState {
     match status {
-        "idle" => RunState::Submitted,
-        "succeeded" => RunState::Completed,
-        "failed" => RunState::Failed,
-        "stopped" | "stop-requested" => RunState::Canceled,
-        _ => RunState::Working,
+        "idle" => TaskState::Submitted,
+        "succeeded" => TaskState::Completed,
+        "failed" => TaskState::Failed,
+        "stopped" | "stop-requested" => TaskState::Canceled,
+        _ => TaskState::Working,
     }
 }
 

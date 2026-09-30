@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use a2a_lab_sdk::{
-    A2aServer, GetWorkflowStatusRequest, JsonObject, LabService, ListLogSourcesRequest,
-    ListMetricsRequest, ListWorkflowsRequest, LogLevel, LogProvider, LogRecord, McpServer,
-    MetricId, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, RunState,
-    SourceId, StartWorkflowRequest, TimeRange, UtcTimestamp, WorkflowId, WorkflowProvider,
+    A2aServer, GetTaskStatusRequest, JsonObject, LabService, ListLogSourcesRequest,
+    ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider, LogRecord, McpServer, MetricId,
+    MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
+    StartTaskRequest, TaskId, TaskProvider, TaskState, TimeRange, UtcTimestamp,
 };
 use a2a_lab_sdk_example::{OpentronsLab, default_protocol};
 use clap::{Parser, Subcommand};
@@ -21,7 +21,7 @@ struct Cli {
     /// Robot-server HTTP base URL (`GET /health`, `/runs`, `/logs`, …)
     #[arg(long, env = "OPENTRONS_URL", default_value = "http://127.0.0.1:31950")]
     opentrons_url: String,
-    /// Protocol file for `start-workflow run_serial_dilution`
+    /// Protocol file for `start-task run_serial_dilution`
     #[arg(long, env = "OPENTRONS_PROTOCOL")]
     protocol: Option<PathBuf>,
     #[command(subcommand)]
@@ -33,8 +33,8 @@ enum Command {
     /// Serve A2A and MCP backed by the OT-2 HTTP API
     #[default]
     Serve,
-    /// `list_workflows`
-    ListWorkflows,
+    /// `list_tasks`
+    ListTasks,
     /// `list_log_sources`
     ListLogSources,
     /// `list_metrics`
@@ -43,24 +43,24 @@ enum Command {
     QueryLogs { source_ids: Vec<String> },
     /// `query_metric` (omit to query every metric)
     QueryMetrics { metric_id: Option<String> },
-    /// `start_workflow` (defaults to `run_serial_dilution`)
-    StartWorkflow {
+    /// `start_task` (defaults to `run_serial_dilution`)
+    StartTask {
         #[arg(default_value = "run_serial_dilution")]
-        workflow_id: String,
+        task_id: String,
         #[arg(long, default_value = "{}")]
         input: String,
     },
-    /// `get_workflow_status`
-    GetWorkflowStatus { run_id: String },
-    /// `start_workflow pause_run`
+    /// `get_task_status`
+    GetTaskStatus { run_id: String },
+    /// `start_task pause_run`
     Pause { run_id: String },
-    /// `start_workflow resume_run`
+    /// `start_task resume_run`
     Resume { run_id: String },
-    /// `start_workflow stop_run`
+    /// `start_task stop_run`
     Stop { run_id: String },
-    /// `start_workflow execute_command` with `home`
+    /// `start_task execute_command` with `home`
     Home,
-    /// `start_workflow execute_command`
+    /// `start_task execute_command`
     #[command(name = "command")]
     Engine {
         command_type: String,
@@ -75,15 +75,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lab = connect(&cli)?;
     match cli.command.unwrap_or_default() {
         Command::Serve => serve(lab, &cli.opentrons_url).await?,
-        Command::ListWorkflows => list_workflows(&lab).await?,
+        Command::ListTasks => list_tasks(&lab).await?,
         Command::ListLogSources => list_log_sources(&lab).await?,
         Command::ListMetrics => list_metrics(&lab).await?,
         Command::QueryLogs { source_ids } => query_logs(&lab, &source_ids).await?,
         Command::QueryMetrics { metric_id } => query_metrics(&lab, metric_id.as_deref()).await?,
-        Command::StartWorkflow { workflow_id, input } => {
-            start(&lab, &workflow_id, JsonObject::parse(&input)?).await?;
+        Command::StartTask { task_id, input } => {
+            start(&lab, &task_id, JsonObject::parse(&input)?).await?;
         }
-        Command::GetWorkflowStatus { run_id } => get_workflow_status(&lab, &run_id).await?,
+        Command::GetTaskStatus { run_id } => get_task_status(&lab, &run_id).await?,
         Command::Pause { run_id } => action(&lab, "pause_run", &run_id).await?,
         Command::Resume { run_id } => action(&lab, "resume_run", &run_id).await?,
         Command::Stop { run_id } => action(&lab, "stop_run", &run_id).await?,
@@ -125,15 +125,15 @@ async fn serve(lab: OpentronsLab, opentrons_url: &str) -> Result<(), Box<dyn std
     Ok(())
 }
 
-async fn list_workflows(lab: &OpentronsLab) -> Result<(), Box<dyn std::error::Error>> {
+async fn list_tasks(lab: &OpentronsLab) -> Result<(), Box<dyn std::error::Error>> {
     let page = lab
-        .list_workflows(ListWorkflowsRequest {
+        .list_tasks(ListTasksRequest {
             page: PageRequest::new(None, 50)?,
         })
         .await?;
-    println!("a2a-lab list_workflows");
-    for workflow in page.items() {
-        println!("{}\t{}", workflow.id, workflow.name);
+    println!("a2a-lab list_tasks");
+    for task in page.items() {
+        println!("{}\t{}", task.id, task.name);
     }
     Ok(())
 }
@@ -168,13 +168,13 @@ async fn list_metrics(lab: &OpentronsLab) -> Result<(), Box<dyn std::error::Erro
 
 async fn start(
     lab: &OpentronsLab,
-    workflow: &str,
+    task: &str,
     input: JsonObject,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("a2a-lab start_workflow {workflow}");
+    println!("a2a-lab start_task {task}");
     let run = lab
-        .start(StartWorkflowRequest {
-            workflow_id: WorkflowId::new(workflow)?,
+        .start(StartTaskRequest {
+            task_id: TaskId::new(task)?,
             input,
         })
         .await?;
@@ -186,14 +186,14 @@ async fn start(
     Ok(())
 }
 
-async fn get_workflow_status(
+async fn get_task_status(
     lab: &OpentronsLab,
     run_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("a2a-lab get_workflow_status");
+    println!("a2a-lab get_task_status");
     let run = lab
-        .status(GetWorkflowStatusRequest {
-            run_id: RunId::new(run_id)?,
+        .status(GetTaskStatusRequest {
+            id: RunId::new(run_id)?,
         })
         .await?;
     println!("run_id {}", run.id);
@@ -206,11 +206,11 @@ async fn get_workflow_status(
 
 async fn action(
     lab: &OpentronsLab,
-    workflow: &str,
+    task: &str,
     run_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input = JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#))?;
-    start(lab, workflow, input).await
+    start(lab, task, input).await
 }
 
 async fn query_logs(
@@ -384,12 +384,12 @@ fn severity_text(level: LogLevel) -> &'static str {
     }
 }
 
-fn run_state(state: RunState) -> &'static str {
+fn run_state(state: TaskState) -> &'static str {
     match state {
-        RunState::Submitted => "submitted",
-        RunState::Working => "working",
-        RunState::Completed => "completed",
-        RunState::Failed => "failed",
-        RunState::Canceled => "canceled",
+        TaskState::Submitted => "submitted",
+        TaskState::Working => "working",
+        TaskState::Completed => "completed",
+        TaskState::Failed => "failed",
+        TaskState::Canceled => "canceled",
     }
 }
