@@ -38,8 +38,9 @@ mise run a2a-lab -- get-workflow-status <run_id>
 mise run a2a-lab -- pause <run_id>
 mise run a2a-lab -- resume <run_id>
 mise run a2a-lab -- stop <run_id>
-mise run a2a-lab -- query-logs
-mise run a2a-lab -- query-metrics
+mise run a2a-lab -- query-logs run_commands
+mise run a2a-lab -- query-logs command_errors
+mise run a2a-lab -- query-metrics run_progress_percent
 mise run a2a-lab -- home
 mise run a2a-lab -- command home '{}'
 ```

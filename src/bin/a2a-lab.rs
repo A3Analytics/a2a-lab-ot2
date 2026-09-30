@@ -2,8 +2,9 @@
 
 use a2a_lab_sdk::{
     A2aClient, GetWorkflowStatusRequest, JsonObject, LabResult, ListLogSourcesRequest,
-    ListMetricsRequest, ListWorkflowsRequest, PageRequest, QueryLogsRequest, QueryMetricRequest,
-    RunId, RunState, SourceId, StartWorkflowRequest, TimeRange, UtcTimestamp, WorkflowId,
+    ListMetricsRequest, ListWorkflowsRequest, MetricId, PageRequest, QueryLogsRequest,
+    QueryMetricRequest, RunId, RunState, SourceId, StartWorkflowRequest, TimeRange, UtcTimestamp,
+    WorkflowId,
 };
 use clap::{Parser, Subcommand};
 
@@ -27,10 +28,10 @@ enum Command {
     ListLogSources,
     /// `list_metrics`
     ListMetrics,
-    /// `query_logs` for every advertised source
-    QueryLogs,
-    /// `query_metric` for every advertised metric
-    QueryMetrics,
+    /// `query_logs` (`run_commands` or `command_errors`; omit to query every source)
+    QueryLogs { source_id: Option<String> },
+    /// `query_metric` (omit to query every metric)
+    QueryMetrics { metric_id: Option<String> },
     /// `start_workflow` (defaults to `run_serial_dilution`)
     StartWorkflow {
         #[arg(default_value = "run_serial_dilution")]
@@ -65,8 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::ListWorkflows => list_workflows(&client).await?,
         Command::ListLogSources => list_log_sources(&client).await?,
         Command::ListMetrics => list_metrics(&client).await?,
-        Command::QueryLogs => query_logs(&client).await?,
-        Command::QueryMetrics => query_metrics(&client).await?,
+        Command::QueryLogs { source_id } => query_logs(&client, source_id.as_deref()).await?,
+        Command::QueryMetrics { metric_id } => query_metrics(&client, metric_id.as_deref()).await?,
         Command::StartWorkflow { workflow_id, input } => {
             start(&client, &workflow_id, JsonObject::parse(&input)?).await?;
         }
@@ -182,26 +183,33 @@ async fn action(
     start(client, workflow, input).await
 }
 
-async fn query_logs(client: &A2aClient) -> Result<(), Box<dyn std::error::Error>> {
+async fn query_logs(
+    client: &A2aClient,
+    source_id: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("a2a-lab query_logs");
-    let sources = client
-        .list_log_sources(ListLogSourcesRequest {
-            page: PageRequest::new(None, 10)?,
-        })
-        .await?;
-    let range = TimeRange::new(
-        UtcTimestamp::parse("1970-01-01T00:00:00Z")?,
-        UtcTimestamp::parse("2099-01-01T00:00:00Z")?,
-    )?;
-    for source in sources.items() {
+    let sources = match source_id {
+        Some(id) => vec![id.to_owned()],
+        None => client
+            .list_log_sources(ListLogSourcesRequest {
+                page: PageRequest::new(None, 10)?,
+            })
+            .await?
+            .items()
+            .iter()
+            .map(|source| source.id.as_str().to_owned())
+            .collect(),
+    };
+    let range = all_time()?;
+    for id in sources {
         let page = client
             .query_logs(QueryLogsRequest {
-                source_id: SourceId::new(source.id.as_str())?,
+                source_id: SourceId::new(&id)?,
                 range,
                 page: PageRequest::new(None, 20)?,
             })
             .await?;
-        println!("{} ({} records)", source.id, page.items().len());
+        println!("{} ({} records)", id, page.items().len());
         for record in page.items() {
             println!("  {} {}", record.timestamp, record.message);
         }
@@ -209,21 +217,28 @@ async fn query_logs(client: &A2aClient) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-async fn query_metrics(client: &A2aClient) -> Result<(), Box<dyn std::error::Error>> {
+async fn query_metrics(
+    client: &A2aClient,
+    metric_id: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("a2a-lab query_metric");
-    let descriptors = client
-        .list_metrics(ListMetricsRequest {
-            page: PageRequest::new(None, 10)?,
-        })
-        .await?;
-    let range = TimeRange::new(
-        UtcTimestamp::parse("1970-01-01T00:00:00Z")?,
-        UtcTimestamp::parse("2099-01-01T00:00:00Z")?,
-    )?;
-    for metric in descriptors.items() {
+    let metrics = match metric_id {
+        Some(id) => vec![MetricId::new(id)?],
+        None => client
+            .list_metrics(ListMetricsRequest {
+                page: PageRequest::new(None, 10)?,
+            })
+            .await?
+            .items()
+            .iter()
+            .map(|metric| metric.id.clone())
+            .collect(),
+    };
+    let range = all_time()?;
+    for id in metrics {
         let page = client
             .query_metric(QueryMetricRequest {
-                metric_id: metric.id.clone(),
+                metric_id: id.clone(),
                 range,
                 page: PageRequest::new(None, 10)?,
             })
@@ -232,9 +247,16 @@ async fn query_metrics(client: &A2aClient) -> Result<(), Box<dyn std::error::Err
             .items()
             .first()
             .map_or_else(|| "-".to_owned(), |point| point.value.to_string());
-        println!("{} {} {}", metric.id, metric.unit, value);
+        println!("{id} {value}");
     }
     Ok(())
+}
+
+fn all_time() -> Result<TimeRange, Box<dyn std::error::Error>> {
+    Ok(TimeRange::new(
+        UtcTimestamp::parse("1970-01-01T00:00:00Z")?,
+        UtcTimestamp::parse("2099-01-01T00:00:00Z")?,
+    )?)
 }
 
 fn run_state(state: RunState) -> &'static str {
