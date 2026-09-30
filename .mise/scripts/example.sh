@@ -145,8 +145,8 @@ done
 
 section "query_logs run_commands"
 lab query-logs run_commands
-section "query_logs command_errors"
-lab query-logs command_errors
+section "query_logs api.log"
+lab query-logs api.log
 section "query_metric run_command_count"
 lab query-metrics run_command_count
 

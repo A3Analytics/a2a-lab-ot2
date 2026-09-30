@@ -205,14 +205,7 @@ async fn query_logs(
     let range = all_time()?;
     let mut records = Vec::new();
     for id in sources {
-        let page = client
-            .query_logs(QueryLogsRequest {
-                source_id: SourceId::new(&id)?,
-                range,
-                page: PageRequest::new(None, 100)?,
-            })
-            .await?;
-        records.extend(page.items().iter().cloned());
+        records.extend(all_log_pages(client, &id, range).await?);
     }
     records.sort_by(|left, right| {
         left.timestamp
@@ -224,6 +217,30 @@ async fn query_logs(
         println!("{}", serde_json::to_string(&otel_log_record(&record)?)?);
     }
     Ok(())
+}
+
+async fn all_log_pages(
+    client: &A2aClient,
+    source_id: &str,
+    range: TimeRange,
+) -> Result<Vec<LogRecord>, Box<dyn std::error::Error>> {
+    let mut cursor = None;
+    let mut records = Vec::new();
+    loop {
+        let page = client
+            .query_logs(QueryLogsRequest {
+                source_id: SourceId::new(source_id)?,
+                range,
+                page: PageRequest::new(cursor, 1_000)?,
+            })
+            .await?;
+        records.extend(page.items().iter().cloned());
+        match page.next_cursor() {
+            Some(next) => cursor = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    Ok(records)
 }
 
 async fn query_metrics(

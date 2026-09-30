@@ -49,7 +49,7 @@ description = "Print advertised log sources as one OTEL log stream"
 run = "bash .mise/scripts/a2a-lab-example.sh"
 
 [ot2-simulation]
-description = "Load and play the OT-2 protocol so a2a-lab has run data to query"
+description = "Play the OT-2 protocol into a mid-run tip error so a2a-lab has command and error logs"
 run = "bash .mise/scripts/ot2-simulation.sh"
 
 [simulator-setup]

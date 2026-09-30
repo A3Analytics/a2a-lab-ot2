@@ -8,8 +8,8 @@ use a2a_lab_sdk::{
     GetWorkflowStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest,
     ListWorkflowsRequest, LogLevel, LogProvider, LogRecord, LogSource, MetricDescriptor, MetricId,
     MetricPoint, MetricProvider, Page, QueryLogsRequest, QueryMetricRequest, RunId, RunState,
-    SdkError, SourceId, StartWorkflowRequest, WorkflowDefinition, WorkflowId, WorkflowProvider,
-    WorkflowRun,
+    SdkError, SourceId, StartWorkflowRequest, UtcTimestamp, WorkflowDefinition, WorkflowId,
+    WorkflowProvider, WorkflowRun,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -29,7 +29,7 @@ const RECOVERY_WORKFLOW: &str = "resume_from_recovery";
 const RECOVERY_FALSE_WORKFLOW: &str = "resume_from_recovery_assuming_false_positive";
 const COMMAND_WORKFLOW: &str = "execute_command";
 const COMMANDS_SOURCE: &str = "run_commands";
-const ERRORS_SOURCE: &str = "command_errors";
+const TROUBLESHOOTING_LOGS: &[&str] = &["api.log", "serial.log", "server.log", "update_server.log"];
 const HEALTH_METRIC: &str = "healthy";
 const PROGRESS_METRIC: &str = "run_progress_percent";
 const COUNT_METRIC: &str = "run_command_count";
@@ -134,9 +134,6 @@ impl LogProvider for OpentronsLab {
     async fn query(&self, request: QueryLogsRequest) -> Result<Page<LogRecord>, SdkError> {
         request.range.check()?;
         let source = request.source_id.as_str();
-        if source != COMMANDS_SOURCE && source != ERRORS_SOURCE {
-            return Err(SdkError::not_found("log source", source));
-        }
         let mut records = collect_logs(&self.client, source).await?;
         records.retain(|record| request.range.contains(record.timestamp));
         records.sort_by(|left, right| {
@@ -173,7 +170,7 @@ fn definitions() -> Vec<WorkflowDefinition> {
         (
             RUN_WORKFLOW,
             "Run serial dilution",
-            "Upload the bundled OT-2 protocol, create a run, and play it.",
+            "Upload the bundled OT-2 protocol, create a run, and play it. The protocol fails mid-run after dropping a tip.",
         ),
         (
             PAUSE_WORKFLOW,
@@ -225,12 +222,27 @@ fn log_sources() -> Vec<LogSource> {
         (
             COMMANDS_SOURCE,
             "Run commands",
-            "Protocol Engine commands from Opentrons runs.",
+            "Protocol Engine commands from GET /runs/{id}/commands, including failures.",
         ),
         (
-            ERRORS_SOURCE,
-            "Command errors",
-            "Failed commands and attached error payloads.",
+            "api.log",
+            "API log",
+            "GET /logs/api.log (opentrons-api). Uses journald on the robot; simulated on the desktop simulator.",
+        ),
+        (
+            "serial.log",
+            "Serial log",
+            "GET /logs/serial.log (motion board). Uses journald on the robot; simulated on the desktop simulator.",
+        ),
+        (
+            "server.log",
+            "Server log",
+            "GET /logs/server.log (uvicorn). Uses journald on the robot; simulated on the desktop simulator.",
+        ),
+        (
+            "update_server.log",
+            "Update server log",
+            "GET /logs/update_server.log. Uses journald on the robot; simulated on the desktop simulator.",
         ),
     ]
     .into_iter()
@@ -363,20 +375,425 @@ async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<Workfl
 }
 
 async fn collect_logs(client: &OpentronsClient, source: &str) -> Result<Vec<LogRecord>, SdkError> {
+    if source == COMMANDS_SOURCE {
+        return collect_commands(client).await;
+    }
+    if TROUBLESHOOTING_LOGS.contains(&source) {
+        return collect_journal(client, source).await;
+    }
+    Err(SdkError::not_found("log source", source))
+}
+
+async fn collect_commands(client: &OpentronsClient) -> Result<Vec<LogRecord>, SdkError> {
+    let runs = client.runs().await?;
+    let ids: Vec<String> = match runs.iter().find(|run| run.current) {
+        Some(run) => vec![run.id.clone()],
+        None => runs.into_iter().map(|run| run.id).collect(),
+    };
     let mut records = Vec::new();
-    for run in client.runs().await? {
-        for command in client.run_commands(&run.id).await? {
-            let failed = command.status == "failed" || command.error.is_some();
-            if source == ERRORS_SOURCE && !failed {
-                continue;
-            }
-            if source == COMMANDS_SOURCE && failed {
-                continue;
-            }
-            records.push(command_record(source, &run.id, &command)?);
+    for id in ids {
+        for command in client.run_commands(&id).await? {
+            records.push(command_record(COMMANDS_SOURCE, &id, &command)?);
         }
     }
     Ok(records)
+}
+
+async fn collect_journal(
+    client: &OpentronsClient,
+    source: &str,
+) -> Result<Vec<LogRecord>, SdkError> {
+    let body = client.troubleshooting_log(source).await?;
+    let parsed = parse_journal(source, &body)?;
+    if parsed.is_empty() {
+        return simulated_journal(client, source).await;
+    }
+    Ok(parsed)
+}
+
+async fn simulated_journal(
+    client: &OpentronsClient,
+    source: &str,
+) -> Result<Vec<LogRecord>, SdkError> {
+    let run = current_run(client).await?;
+    let commands = match &run {
+        Some(run) => client.run_commands(&run.id).await?,
+        None => Vec::new(),
+    };
+    let failed = commands
+        .iter()
+        .find(|command| command.status == "failed" || command.error.is_some());
+    let origin = commands.first().map_or_else(now, command_stamp)?;
+    match source {
+        "api.log" => simulated_api(run.as_ref(), &commands, failed, origin),
+        "serial.log" => simulated_serial(failed, origin),
+        "server.log" => simulated_server(run.as_ref(), origin),
+        "update_server.log" => simulated_update(origin),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn simulated_api(
+    run: Option<&Run>,
+    commands: &[Command],
+    failed: Option<&Command>,
+    origin: UtcTimestamp,
+) -> Result<Vec<LogRecord>, SdkError> {
+    let mut records = vec![
+        journal_line(
+            "api.log",
+            "opentrons-api",
+            offset(origin, -4)?,
+            LogLevel::Info,
+            "hardware_control.api: ENABLE_VIRTUAL_SMOOTHIE=true; using Smoothie emulator",
+        )?,
+        journal_line(
+            "api.log",
+            "opentrons-api",
+            offset(origin, -3)?,
+            LogLevel::Info,
+            "protocol_reader: loaded serial_dilution.py (apiLevel=2.16, robotType=OT-2)",
+        )?,
+        journal_line(
+            "api.log",
+            "opentrons-api",
+            offset(origin, -2)?,
+            LogLevel::Info,
+            "protocol_engine: analysis complete; creating run",
+        )?,
+    ];
+    if let Some(run) = run {
+        records.push(journal_line(
+            "api.log",
+            "opentrons-api",
+            offset(origin, -1)?,
+            LogLevel::Info,
+            format!(
+                "protocol_engine: run {} current=true status={}",
+                run.id, run.status
+            ),
+        )?);
+    }
+    for command in commands
+        .iter()
+        .filter(|command| command.status == "succeeded")
+    {
+        records.push(journal_line(
+            "api.log",
+            "opentrons-api",
+            command_stamp(command)?,
+            LogLevel::Info,
+            format!(
+                "protocol_engine: executing {} ({})",
+                command.kind, command.status
+            ),
+        )?);
+    }
+    if let Some(command) = failed {
+        records.push(journal_line(
+            "api.log",
+            "opentrons-api",
+            command_stamp(command)?,
+            LogLevel::Error,
+            format!(
+                "protocol_engine: {} failed: Cannot aspirate without a tip attached (NoTipAttachedError)",
+                command.kind
+            ),
+        )?);
+        records.push(journal_line(
+            "api.log",
+            "opentrons-api",
+            command_stamp(command)?,
+            LogLevel::Warn,
+            "protocol_engine: run entered awaiting-recovery",
+        )?);
+    }
+    Ok(records)
+}
+
+fn simulated_serial(
+    failed: Option<&Command>,
+    origin: UtcTimestamp,
+) -> Result<Vec<LogRecord>, SdkError> {
+    let mut records = vec![
+        journal_line(
+            "serial.log",
+            "ALL_SERIAL",
+            offset(origin, -4)?,
+            LogLevel::Info,
+            "smoothie: virtual connection opened (emulator)",
+        )?,
+        journal_line(
+            "serial.log",
+            "ALL_SERIAL",
+            offset(origin, -3)?,
+            LogLevel::Debug,
+            "snd: M115",
+        )?,
+        journal_line(
+            "serial.log",
+            "ALL_SERIAL",
+            offset(origin, -3)?,
+            LogLevel::Debug,
+            "recv: FIRMWARE_NAME:Smoothie FIRMWARE_VERSION:edge PROTOCOL_VERSION:1 ok",
+        )?,
+        journal_line(
+            "serial.log",
+            "ALL_SERIAL",
+            offset(origin, -1)?,
+            LogLevel::Info,
+            "snd: G28",
+        )?,
+        journal_line(
+            "serial.log",
+            "ALL_SERIAL",
+            origin,
+            LogLevel::Info,
+            "recv: ok",
+        )?,
+        journal_line(
+            "serial.log",
+            "ALL_SERIAL",
+            origin,
+            LogLevel::Debug,
+            "snd: M114",
+        )?,
+        journal_line(
+            "serial.log",
+            "ALL_SERIAL",
+            origin,
+            LogLevel::Debug,
+            "recv: ok C: X:0.00 Y:0.00 Z:0.00 A:0.00 B:0.00",
+        )?,
+    ];
+    if let Some(command) = failed {
+        records.push(journal_line(
+            "serial.log",
+            "ALL_SERIAL",
+            command_stamp(command)?,
+            LogLevel::Warn,
+            "smoothie: command ignored; pipette has no tip",
+        )?);
+    }
+    Ok(records)
+}
+
+fn simulated_server(run: Option<&Run>, origin: UtcTimestamp) -> Result<Vec<LogRecord>, SdkError> {
+    let mut records = vec![
+        journal_line(
+            "server.log",
+            "uvicorn",
+            offset(origin, -6)?,
+            LogLevel::Info,
+            "Started server process",
+        )?,
+        journal_line(
+            "server.log",
+            "uvicorn",
+            offset(origin, -5)?,
+            LogLevel::Info,
+            "Waiting for application startup.",
+        )?,
+        journal_line(
+            "server.log",
+            "uvicorn",
+            offset(origin, -4)?,
+            LogLevel::Info,
+            "Application startup complete.",
+        )?,
+        journal_line(
+            "server.log",
+            "uvicorn",
+            offset(origin, -4)?,
+            LogLevel::Info,
+            "Uvicorn running on http://127.0.0.1:31950 (Press CTRL+C to quit)",
+        )?,
+        journal_line(
+            "server.log",
+            "uvicorn",
+            offset(origin, -3)?,
+            LogLevel::Info,
+            r#"127.0.0.1:53120 - "GET /health HTTP/1.1" 200"#,
+        )?,
+        journal_line(
+            "server.log",
+            "uvicorn",
+            offset(origin, -2)?,
+            LogLevel::Info,
+            r#"127.0.0.1:53121 - "POST /protocols HTTP/1.1" 201"#,
+        )?,
+        journal_line(
+            "server.log",
+            "uvicorn",
+            offset(origin, -1)?,
+            LogLevel::Info,
+            r#"127.0.0.1:53121 - "POST /runs HTTP/1.1" 201"#,
+        )?,
+    ];
+    if let Some(run) = run {
+        records.push(journal_line(
+            "server.log",
+            "uvicorn",
+            origin,
+            LogLevel::Info,
+            format!(
+                r#"127.0.0.1:53121 - "POST /runs/{}/actions HTTP/1.1" 201"#,
+                run.id
+            ),
+        )?);
+    }
+    Ok(records)
+}
+
+fn simulated_update(origin: UtcTimestamp) -> Result<Vec<LogRecord>, SdkError> {
+    Ok(vec![
+        journal_line(
+            "update_server.log",
+            "opentrons-update-server",
+            offset(origin, -6)?,
+            LogLevel::Info,
+            "update_server: starting (dev robot)",
+        )?,
+        journal_line(
+            "update_server.log",
+            "opentrons-update-server",
+            offset(origin, -5)?,
+            LogLevel::Warn,
+            "Could not open /etc/VERSION.json - is this a dev server?",
+        )?,
+        journal_line(
+            "update_server.log",
+            "opentrons-update-server",
+            origin,
+            LogLevel::Info,
+            "no robot update in progress",
+        )?,
+        journal_line(
+            "update_server.log",
+            "opentrons-update-server",
+            origin,
+            LogLevel::Debug,
+            "balance check skipped",
+        )?,
+    ])
+}
+
+fn journal_line(
+    source: &str,
+    syslog: &str,
+    timestamp: UtcTimestamp,
+    level: LogLevel,
+    message: impl Into<String>,
+) -> Result<LogRecord, SdkError> {
+    Ok(LogRecord {
+        source_id: SourceId::new(source)?,
+        timestamp,
+        level,
+        message: message.into(),
+        attributes: JsonObject::try_from_value(json!({ "syslog_identifier": syslog }))?,
+    })
+}
+
+fn command_stamp(command: &Command) -> Result<UtcTimestamp, SdkError> {
+    command
+        .completed_at
+        .as_deref()
+        .or(command.created_at.as_deref())
+        .map_or_else(now, parse_timestamp)
+}
+
+fn offset(origin: UtcTimestamp, seconds: i64) -> Result<UtcTimestamp, SdkError> {
+    crate::time::shift_seconds(origin, seconds)
+}
+
+fn parse_journal(source: &str, body: &str) -> Result<Vec<LogRecord>, SdkError> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let values = if let Ok(array) = serde_json::from_str::<Vec<Value>>(trimmed) {
+        array
+    } else if trimmed.starts_with('{') && !trimmed.contains('\n') {
+        vec![serde_json::from_str(trimmed).map_err(|error| SdkError::protocol(error.to_string()))?]
+    } else {
+        trimmed
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                serde_json::from_str(line).map_err(|error| SdkError::protocol(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    values
+        .iter()
+        .map(|entry| journal_record(source, entry))
+        .collect()
+}
+
+fn journal_record(source: &str, entry: &Value) -> Result<LogRecord, SdkError> {
+    let message = entry
+        .get("MESSAGE")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    Ok(LogRecord {
+        source_id: SourceId::new(source)?,
+        timestamp: journal_timestamp(entry)?,
+        level: journal_level(entry),
+        message,
+        attributes: JsonObject::try_from_value(json!({
+            "syslog_identifier": entry.get("SYSLOG_IDENTIFIER").and_then(Value::as_str).unwrap_or("")
+        }))?,
+    })
+}
+
+fn journal_timestamp(entry: &Value) -> Result<UtcTimestamp, SdkError> {
+    let Some(raw) = entry.get("__REALTIME_TIMESTAMP") else {
+        return now();
+    };
+    let micros = raw
+        .as_str()
+        .and_then(|value| value.parse::<i64>().ok())
+        .or_else(|| raw.as_i64());
+    let Some(micros) = micros else {
+        return now();
+    };
+    crate::time::from_unix_microseconds(micros)
+}
+
+fn journal_level(entry: &Value) -> LogLevel {
+    let priority = entry
+        .get("PRIORITY")
+        .and_then(|value| {
+            value
+                .as_str()
+                .and_then(|text| text.parse::<u8>().ok())
+                .or_else(|| value.as_u64().and_then(|number| u8::try_from(number).ok()))
+        })
+        .unwrap_or(6);
+    match priority {
+        0..=3 => LogLevel::Error,
+        4 => LogLevel::Warn,
+        7 => LogLevel::Debug,
+        _ => LogLevel::Info,
+    }
+}
+
+fn command_message(command: &Command) -> String {
+    let Some(error) = &command.error else {
+        return format!("{} {}", command.kind, command.status);
+    };
+    let kind = error
+        .get("errorType")
+        .and_then(Value::as_str)
+        .unwrap_or("Error");
+    match error.get("detail").and_then(Value::as_str) {
+        Some(detail) if !detail.is_empty() => {
+            format!("{} {}: {kind}: {detail}", command.kind, command.status)
+        }
+        _ => format!("{} {}: {kind}", command.kind, command.status),
+    }
 }
 
 fn command_record(source: &str, run_id: &str, command: &Command) -> Result<LogRecord, SdkError> {
@@ -385,15 +802,11 @@ fn command_record(source: &str, run_id: &str, command: &Command) -> Result<LogRe
         .as_deref()
         .or(command.created_at.as_deref())
         .map_or_else(now, parse_timestamp)?;
-    let message = if let Some(error) = &command.error {
-        format!("{} {}: {error}", command.kind, command.status)
-    } else {
-        format!("{} {}", command.kind, command.status)
-    };
+    let message = command_message(command);
     Ok(LogRecord {
         source_id: SourceId::new(source)?,
         timestamp: stamp,
-        level: if command.status == "failed" {
+        level: if command.status == "failed" || command.error.is_some() {
             LogLevel::Error
         } else {
             LogLevel::Info

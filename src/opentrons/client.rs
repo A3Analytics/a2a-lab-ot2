@@ -1,5 +1,6 @@
 //! Typed HTTP client for a local Opentrons robot-server.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use a2a_lab_sdk::SdkError;
@@ -23,8 +24,10 @@ impl OpentronsClient {
     pub fn new(base: &str) -> Result<Self, SdkError> {
         let base = Url::parse(base).map_err(|error| SdkError::invalid("url", error.to_string()))?;
         let http = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|error| SdkError::transport(error.to_string()))?;
+            .map_err(|error| transport(&error))?;
         Ok(Self { http, base })
     }
 
@@ -51,7 +54,7 @@ impl OpentronsClient {
             .multipart(form)
             .send()
             .await
-            .map_err(|error| SdkError::transport(error.to_string()))?;
+            .map_err(|error| transport(&error))?;
         self.read_data(response).await
     }
 
@@ -103,12 +106,12 @@ impl OpentronsClient {
     /// `DELETE /runs/{id}`.
     pub async fn delete_run(&self, run_id: &str) -> Result<(), SdkError> {
         let response = self
-            .http
-            .delete(self.url(&format!("runs/{run_id}"))?)
-            .header(VERSION_HEADER, VERSION)
-            .send()
-            .await
-            .map_err(|error| SdkError::transport(error.to_string()))?;
+            .send_raw(
+                self.http
+                    .delete(self.url(&format!("runs/{run_id}"))?)
+                    .header(VERSION_HEADER, VERSION),
+            )
+            .await?;
         if response.status().is_success() {
             Ok(())
         } else {
@@ -139,6 +142,30 @@ impl OpentronsClient {
             None,
         )
         .await
+    }
+
+    /// `GET /logs/{identifier}?format=json`. Missing or empty journals yield an empty string.
+    ///
+    /// Skips the HTTP call when `journalctl` is not on PATH. On macOS the
+    /// simulator's `/logs` handler otherwise crashes with `FileNotFoundError`.
+    pub async fn troubleshooting_log(&self, identifier: &str) -> Result<String, SdkError> {
+        if !journalctl_available() {
+            return Ok(String::new());
+        }
+        let Ok(response) = self
+            .send_raw(
+                self.http
+                    .get(self.url(&format!("logs/{identifier}?format=json&records=100"))?)
+                    .header(VERSION_HEADER, VERSION),
+            )
+            .await
+        else {
+            return Ok(String::new());
+        };
+        if !response.status().is_success() {
+            return Ok(String::new());
+        }
+        Ok(response.text().await.unwrap_or_default())
     }
 
     /// `POST /commands?waitUntilComplete=true`.
@@ -202,11 +229,22 @@ impl OpentronsClient {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| SdkError::transport(error.to_string()))?;
+        let response = self.send_raw(request).await?;
         self.read_data(response).await
+    }
+
+    async fn send_raw(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, SdkError> {
+        let retry = request.try_clone();
+        match request.send().await {
+            Ok(response) => Ok(response),
+            Err(first) => match retry {
+                Some(retry) => retry.send().await.map_err(|error| transport(&error)),
+                None => Err(transport(&first)),
+            },
+        }
     }
 
     async fn read_data<T>(&self, response: reqwest::Response) -> Result<T, SdkError>
@@ -214,10 +252,7 @@ impl OpentronsClient {
         T: serde::de::DeserializeOwned,
     {
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| SdkError::transport(error.to_string()))?;
+        let body = response.text().await.map_err(|error| transport(&error))?;
         if !status.is_success() {
             return Err(status_error(status, &body));
         }
@@ -233,6 +268,20 @@ impl OpentronsClient {
         base.push_str(path.trim_start_matches('/'));
         Url::parse(&base).map_err(|error| SdkError::invalid("url", error.to_string()))
     }
+}
+
+fn journalctl_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .any(|dir| dir.join("journalctl").is_file())
+    })
+}
+
+fn transport(error: &reqwest::Error) -> SdkError {
+    SdkError::unavailable(format!(
+        "robot-server is unreachable ({error}); keep `mise run start` running"
+    ))
 }
 
 fn analysis_ready(summary: &AnalysisSummary) -> bool {

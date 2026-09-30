@@ -1,8 +1,8 @@
 from opentrons import protocol_api
 
 metadata = {
-    "protocolName": "Serial Dilution",
-    "description": "Short OT-2 serial dilution used by a2a-lab-sdk-example.",
+    "protocolName": "Serial Dilution (missing tip)",
+    "description": "OT-2 serial dilution that fails mid-run: diluent and stock mix succeed, then the next aspirate runs without a tip.",
     "author": "A3 Analytics",
 }
 
@@ -19,10 +19,11 @@ def run(protocol: protocol_api.ProtocolContext) -> None:
     stock = reservoir["A2"]
     row = plate.rows()[0][:3]
 
-    protocol.pause("waiting to start serial dilution")
-    pipette.transfer(100, diluent, row)
-    protocol.pause("diluent dispensed")
-    pipette.transfer(50, stock, row[0], mix_after=(3, 40))
-    protocol.pause("stock mixed")
-    pipette.transfer(50, row[0], row[1], mix_after=(3, 40))
-    pipette.transfer(50, row[1], row[2], mix_after=(3, 40))
+    pipette.pick_up_tip()
+    pipette.transfer(100, diluent, row, new_tip="never")
+    pipette.transfer(50, stock, row[0], new_tip="never", mix_after=(3, 40))
+    pipette.drop_tip()
+    pipette.aspirate(50, row[0])
+    pipette.dispense(50, row[1])
+    pipette.mix(3, 40, row[1])
+    pipette.transfer(50, row[1], row[2], new_tip="never", mix_after=(3, 40))

@@ -73,11 +73,10 @@ if [[ -z "$run_id" ]]; then
 fi
 cargo run --quiet --bin a2a-lab -- get-workflow-status "$run_id"
 cargo run --quiet --bin a2a-lab -- pause "$run_id" || true
-cargo run --quiet --bin a2a-lab -- resume "$run_id"
-cargo run --quiet --bin a2a-lab -- pause "$run_id" || true
-cargo run --quiet --bin a2a-lab -- stop "$run_id"
+cargo run --quiet --bin a2a-lab -- resume "$run_id" || true
+cargo run --quiet --bin a2a-lab -- stop "$run_id" || true
 cargo run --quiet --bin a2a-lab -- home
-cargo run --quiet --bin a2a-lab -- query-logs run_commands
+cargo run --quiet --bin a2a-lab -- query-logs
 cargo run --quiet --bin a2a-lab -- query-metrics run_command_count
 curl -fsS -H 'Opentrons-Version: *' http://127.0.0.1:31950/health >/dev/null
 printf 'smoke ok\n'

@@ -27,14 +27,14 @@ Start the OT-2 simulator and lab agent (leave this terminal running):
 mise run start
 ```
 
-Ctrl-C stops both. In a second terminal, optionally seed a paused serial-dilution run, then print logs as one OTEL stream:
+Ctrl-C stops both. In a second terminal, seed a serial-dilution run that fails mid-protocol (missing tip), then print logs as one OTEL stream:
 
 ```bash
 mise run ot2-simulation
 mise run a2a-lab-example
 ```
 
-`ot2-simulation` talks to robot-server only. `a2a-lab-example` calls `query_logs` for every advertised source and prints merged OTLP JSON log records (one per line), not grouped by source.
+`ot2-simulation` talks to robot-server only and leaves a failed or awaiting-recovery run. Failed protocol steps stay in `run_commands` as error-level records. `api.log`, `serial.log`, `server.log`, and `update_server.log` map to the robot's journald logs. The desktop simulator has no `journalctl`, so the adapter fills those sources with realistic OT-2 records for the current run. `a2a-lab-example` calls `query_logs` for every advertised source and prints merged OTLP JSON log records (one per line).
 
 Call the same operations yourself:
 
@@ -48,7 +48,7 @@ mise run a2a-lab -- pause <run_id>
 mise run a2a-lab -- resume <run_id>
 mise run a2a-lab -- stop <run_id>
 mise run a2a-lab -- query-logs
-mise run a2a-lab -- query-logs run_commands command_errors
+mise run a2a-lab -- query-logs run_commands api.log
 mise run a2a-lab -- query-metrics run_progress_percent
 mise run a2a-lab -- home
 mise run a2a-lab -- command home '{}'
@@ -80,7 +80,7 @@ mise run test
 mise run quality
 ```
 
-`mise run ot2-simulation` plays the bundled protocol on the live simulator so logs and metrics have data. `mise run a2a-lab-example` prints `query_logs` as one OTEL log stream. `mise run smoke` is a pass/fail check against the same simulator. All three are opt-in and slower than the unit suite.
+`mise run ot2-simulation` plays the bundled protocol until a missing-tip error so `run_commands` includes both succeeded and failed steps. `mise run a2a-lab-example` prints `query_logs` as one OTEL log stream. `mise run smoke` is a pass/fail check against the same simulator. All three are opt-in and slower than the unit suite.
 
 ## Opentrons App
 

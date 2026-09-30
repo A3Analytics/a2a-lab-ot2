@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use a2a_lab_sdk::{
     GetWorkflowStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest,
-    ListWorkflowsRequest, LogProvider, MetricProvider, PageRequest, QueryLogsRequest,
+    ListWorkflowsRequest, LogLevel, LogProvider, MetricProvider, PageRequest, QueryLogsRequest,
     QueryMetricRequest, RunId, RunState, SourceId, StartWorkflowRequest, TimeRange, UtcTimestamp,
     WorkflowId, WorkflowProvider,
 };
@@ -56,7 +56,15 @@ async fn lists_workflows_sources_and_metrics() {
         .list_sources(ListLogSourcesRequest { page: page() })
         .await
         .unwrap();
-    assert_eq!(sources.items()[0].id.as_str(), "command_errors");
+    let ids: Vec<_> = sources
+        .items()
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    assert!(ids.contains(&"run_commands"));
+    assert!(ids.contains(&"api.log"));
+    assert!(ids.contains(&"serial.log"));
+    assert!(!ids.contains(&"command_errors"));
     let metrics = lab
         .list_metrics(ListMetricsRequest { page: page() })
         .await
@@ -236,6 +244,46 @@ async fn queries_logs_and_metrics() {
     .await
     .unwrap();
     assert!(!logs.items().is_empty());
+    assert!(logs.items().iter().any(|record| {
+        record.level == LogLevel::Error
+            && (record.message.contains("TipNotAttachedError")
+                || record.message.contains("NoTipAttachedError"))
+    }));
+    assert!(
+        logs.items()
+            .iter()
+            .all(|record| !record.message.contains("errorCode"))
+    );
+    assert!(
+        logs.items()
+            .iter()
+            .any(|record| record.level == LogLevel::Info)
+    );
+    let journal = LogProvider::query(
+        &lab,
+        QueryLogsRequest {
+            source_id: SourceId::new("api.log").unwrap(),
+            range: range(),
+            page: page(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!journal.items().is_empty());
+    assert!(
+        journal
+            .items()
+            .iter()
+            .any(|record| record.message.contains("Virtual Smoothie")
+                || record.message.contains("ENABLE_VIRTUAL_SMOOTHIE")
+                || record.message.contains("protocol_engine"))
+    );
+    assert!(
+        journal
+            .items()
+            .iter()
+            .any(|record| record.level == LogLevel::Error)
+    );
     let health = MetricProvider::query(
         &lab,
         QueryMetricRequest {

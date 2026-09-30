@@ -155,13 +155,23 @@ async fn create_run(State(mock): State<Mock>, axum::Json(body): axum::Json<Value
     inner.runs.insert(id.clone(), run.clone());
     inner.commands.insert(
         id.clone(),
-        vec![json!({
-            "id": "cmd-setup",
-            "commandType": "loadLabware",
-            "status": "succeeded",
-            "createdAt": "2026-01-01T00:00:00Z",
-            "completedAt": "2026-01-01T00:00:01Z"
-        })],
+        vec![
+            json!({
+                "id": "cmd-setup",
+                "commandType": "loadLabware",
+                "status": "succeeded",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "completedAt": "2026-01-01T00:00:01Z"
+            }),
+            json!({
+                "id": "cmd-fail",
+                "commandType": "aspirate",
+                "status": "failed",
+                "error": { "errorType": "NoTipAttachedError", "detail": "no tip attached" },
+                "createdAt": "2026-01-01T00:00:02Z",
+                "completedAt": "2026-01-01T00:00:03Z"
+            }),
+        ],
     );
     json!({ "data": run }).to_string().into_response()
 }

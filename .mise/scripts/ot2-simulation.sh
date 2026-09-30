@@ -56,16 +56,19 @@ wait_health() {
 
 wait_run() {
   local run_id="$1"
-  local want="$2"
-  local _ status=""
-  for _ in $(seq 1 50); do
+  shift
+  local status="" _
+  local want
+  for _ in $(seq 1 80); do
     status="$(ot "$ot_url/runs/$run_id" | data_status)"
-    if [[ "$status" == "$want" ]]; then
-      return 0
-    fi
-    sleep 0.2
+    for want in "$@"; do
+      if [[ "$status" == "$want" ]]; then
+        return 0
+      fi
+    done
+    sleep 0.25
   done
-  printf 'run %s status is %s, wanted %s\n' "$run_id" "$status" "$want" >&2
+  printf 'run %s status is %s, wanted one of: %s\n' "$run_id" "$status" "$*" >&2
   return 1
 }
 
@@ -118,12 +121,10 @@ run_id="$(
 )"
 
 play "$run_id"
-wait_run "$run_id" paused
-play "$run_id"
-wait_run "$run_id" paused
+wait_run "$run_id" failed awaiting-recovery awaiting-recovery-paused
 
 status="$(ot "$ot_url/runs/$run_id" | data_status)"
 printf 'run_id %s\n' "$run_id"
 printf 'status %s\n' "$status"
-printf 'query with: mise run a2a-lab -- query-logs run_commands\n'
+printf 'query with: mise run a2a-lab -- query-logs\n'
 printf '             mise run a2a-lab -- get-workflow-status %s\n' "$run_id"
