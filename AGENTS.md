@@ -4,9 +4,7 @@ Operating guide for AI agents working in this repository.
 
 ## What this repo is
 
-`new-repo-template` — a bootstrap template for creating repositories standardized on **mise** (tooling + tasks), **Backlog.md** (task + doc management), and **Cursor** (agent skills). Select it from "Start with a template", then run `backlog init "<project name>"` and build on top.
-
-It ships empty on purpose: no application code, no tasks, no docs. Human setup steps live in `README.md`.
+`a2a-lab-sdk-example` — an example lab agent that wraps a persistent Opentrons OT-2 `robot-server` development simulator with the sibling `a2a-lab-sdk` crate. It serves the seven lab operations over A2A and MCP.
 
 ## Tooling
 
@@ -15,10 +13,12 @@ Everything runs through `mise`. The `backlog` binary is provided by mise and is 
 - Install tools: `mise install`
 - List tasks: `mise tasks`
 - Run a task: `mise run <task>`
-- Configured tools: Backlog.md (`mise.toml`)
-- Configured tasks: `backlog-browser` (`.mise/run.toml`) — visual task board
+- Configured tools: Rust 1.98.1, Python 3.12, uv, cargo-nextest, and Backlog.md (`mise.toml`)
+- Quality gate: `mise run quality`
 
-Add tools under `[tools]` in `mise.toml`; add tasks in `.mise/run.toml`.
+Do not run `cargo`, `uv`, `make`, or `curl` from README/CI instructions. Use `mise run` or `mise exec --`. Internal `.mise/scripts/` may call pinned tools.
+
+Simulator pin: Opentrons git tag `v10.0.0` only. Never `edge`, `latest`, or a branch.
 
 ## Cursor skills
 
@@ -28,11 +28,11 @@ Repo-specific agent skills live in `.cursor/skills/`:
 - `doc` — author backlog docs
 - `work` — implement a task to done
 
-The skills include examples referencing a downstream app (`apps/web`, TanStack Start, shadcn). Those describe a target project built *from* this template, not files present here — ignore app-specific paths until such an app exists.
+Ignore `apps/web` examples in those skills. This repository is a Rust lab-agent example.
 
 ## Documentation policy
 
-No loose markdown files anywhere in the repo. All docs go through Backlog.md under `backlog/docs/`.
+No loose markdown files anywhere in the repo except `README.md` and `AGENTS.md`. All other docs go through Backlog.md under `backlog/docs/`.
 
 - `mise exec -- backlog doc list`
 - `mise exec -- backlog doc view <id>`
@@ -68,11 +68,11 @@ For multi-line values use ANSI-C quoting: `--notes $'Line 1\nLine 2'`.
 
 - Atomic (one PR), independent, and testable — acceptance criteria are observable outcomes, not implementation steps.
 - Never reference a higher-numbered task.
-- Description = the *why/what*; Implementation Plan (added only after starting) = the *how*.
+- Description = the _why/what_; Implementation Plan (added only after starting) = the _how_.
 
 ### Definition of Done
 
-All acceptance criteria checked · Implementation Notes written · Final Summary added · tests/lint clean · status set to `Done` via CLI.
+All acceptance criteria checked · Implementation Notes written · Final Summary added · `mise run quality` passes · status set to `Done` via CLI.
 
 Full CLI reference: `mise exec -- backlog --help`.
 

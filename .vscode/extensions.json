@@ -2,6 +2,7 @@
     "recommendations": [
         "hverlin.mise-vscode",
         "cnshenj.vscode-task-manager",
-        "tombi-toml.tombi"
+        "tombi-toml.tombi",
+        "rust-lang.rust-analyzer"
     ]
 }

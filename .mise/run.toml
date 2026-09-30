@@ -1,3 +1,37 @@
 [backlog-browser]
 description = "Start the backlog browser web interface for visual task management"
 run = "mise exec -- backlog browser"
+
+[build]
+description = "Compile the crate"
+run = "cargo check --workspace"
+
+[fmt]
+description = "Format Rust sources"
+run = "cargo fmt"
+
+[fmt-check]
+description = "Check Rust formatting without changing files"
+run = "cargo fmt --check"
+
+[check]
+description = "Type-check the crate with warnings denied"
+env = { CARGO_TARGET_DIR = "{{config_root}}/../target/quality", RUSTFLAGS = "-D warnings" }
+run = "cargo check --workspace"
+
+[clippy]
+description = "Lint all targets with warnings denied"
+env = { CARGO_TARGET_DIR = "{{config_root}}/../target/quality" }
+run = "cargo clippy --all-targets -- -D warnings"
+
+[test]
+description = "Run the workspace test suite"
+run = "cargo nextest run --workspace"
+
+[quality]
+description = "Run formatting, compile, clippy, and test checks"
+run = "bash .mise/scripts/quality.sh"
+
+[serve]
+description = "Serve the lab agent over A2A and MCP"
+run = "cargo run --bin a2a-lab-sdk-example"
