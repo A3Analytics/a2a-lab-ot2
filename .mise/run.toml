@@ -35,3 +35,19 @@ run = "bash .mise/scripts/quality.sh"
 [serve]
 description = "Serve the lab agent over A2A and MCP"
 run = "cargo run --bin a2a-lab-sdk-example"
+
+[simulator-setup]
+description = "Clone Opentrons v10.0.0 and install robot-server dependencies"
+run = "bash .mise/scripts/simulator-setup.sh"
+
+[simulator]
+description = "Run the pinned OT-2 robot-server simulator on 127.0.0.1:31950"
+run = "bash .mise/scripts/simulator.sh"
+
+[simulator-health]
+description = "Check robot-server /health"
+run = "bash .mise/scripts/simulator-health.sh"
+
+[simulator-clean]
+description = "Remove the cached Opentrons checkout"
+run = "bash .mise/scripts/simulator-clean.sh"
