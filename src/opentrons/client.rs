@@ -1,6 +1,5 @@
 //! Typed HTTP client for a local Opentrons robot-server.
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use a2a_lab_sdk::SdkError;
@@ -145,13 +144,7 @@ impl OpentronsClient {
     }
 
     /// `GET /logs/{identifier}?format=json`. Missing or empty journals yield an empty string.
-    ///
-    /// Skips the HTTP call when `journalctl` is not on PATH. On macOS the
-    /// simulator's `/logs` handler otherwise crashes with `FileNotFoundError`.
     pub async fn troubleshooting_log(&self, identifier: &str) -> Result<String, SdkError> {
-        if !journalctl_available() {
-            return Ok(String::new());
-        }
         let Ok(response) = self
             .send_raw(
                 self.http
@@ -270,17 +263,9 @@ impl OpentronsClient {
     }
 }
 
-fn journalctl_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .any(|dir| dir.join("journalctl").is_file())
-    })
-}
-
 fn transport(error: &reqwest::Error) -> SdkError {
     SdkError::unavailable(format!(
-        "robot-server is unreachable ({error}); keep `mise run start` running"
+        "robot-server is unreachable ({error}); keep `mise run ot2-simulator` running"
     ))
 }
 

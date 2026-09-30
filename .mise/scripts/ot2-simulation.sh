@@ -50,7 +50,7 @@ wait_health() {
     fi
     sleep 2
   done
-  printf 'OT-2 simulator is not running at %s. Start it with: mise run start\n' "$ot_url" >&2
+  printf 'OT-2 simulator is not running at %s. Start it with: mise run ot2-simulator\n' "$ot_url" >&2
   return 1
 }
 
@@ -126,5 +126,5 @@ wait_run "$run_id" failed awaiting-recovery awaiting-recovery-paused
 status="$(ot "$ot_url/runs/$run_id" | data_status)"
 printf 'run_id %s\n' "$run_id"
 printf 'status %s\n' "$status"
-printf 'query with: mise run a2a-lab -- query-logs\n'
-printf '             mise run a2a-lab -- get-workflow-status %s\n' "$run_id"
+printf 'query with: mise run a2a-lab-ot2 -- query-logs\n'
+printf '             mise run a2a-lab-ot2 -- get-workflow-status %s\n' "$run_id"

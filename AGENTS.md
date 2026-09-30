@@ -4,7 +4,7 @@ Operating guide for AI agents working in this repository.
 
 ## What this repo is
 
-`a2a-lab-sdk-example` — an example lab agent that wraps a persistent Opentrons OT-2 `robot-server` development simulator with the sibling `a2a-lab-sdk` crate. It serves the seven lab operations over A2A and MCP.
+`a2a-lab-sdk-example` — an example lab agent that wraps a persistent Opentrons OT-2 `robot-server` development simulator with the sibling `a2a-lab-sdk` crate. The `a2a-lab-ot2` executable talks to the OT-2 HTTP API. With no subcommand it also serves those operations over A2A and MCP.
 
 ## Tooling
 
@@ -16,9 +16,9 @@ Everything runs through `mise`. The `backlog` binary is provided by mise and is 
 - Configured tools: Rust 1.98.1, Python 3.12, uv, cargo-nextest, and Backlog.md (`mise.toml`)
 - Quality gate: `mise run quality`
 
-Do not run `cargo`, `uv`, `make`, or `curl` from README/CI instructions. Use `mise run` or `mise exec --`. Internal `.mise/scripts/` may call pinned tools.
+Do not run `cargo`, `uv`, `make`, or `curl` from README/CI instructions. Use `mise run` or `mise exec --`. Internal `.mise/scripts/` may call pinned tools and `docker`.
 
-Simulator pin: Opentrons git tag `v10.0.0` only. Never `edge`, `latest`, or a branch.
+Simulator pin: Opentrons git tag `v10.0.0` only. Never `edge`, `latest`, or a branch. The simulator runs as a Linux Docker image so robot-server has `journalctl` / journald.
 
 ## Cursor skills
 

@@ -4,20 +4,14 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 
-a2a_url="${A2A_URL:-http://127.0.0.1:31000}"
+ot_url="${OPENTRONS_URL:-http://127.0.0.1:31950}"
 started_here=0
 sim_pid=""
-agent_pid=""
 server_log=""
-agent_log=""
 
 cleanup() {
   if [[ "$started_here" -eq 0 ]]; then
     return
-  fi
-  if [[ -n "$agent_pid" ]] && kill -0 "$agent_pid" 2>/dev/null; then
-    kill "$agent_pid" 2>/dev/null || true
-    wait "$agent_pid" 2>/dev/null || true
   fi
   if [[ -n "$sim_pid" ]] && kill -0 "$sim_pid" 2>/dev/null; then
     kill "$sim_pid" 2>/dev/null || true
@@ -26,18 +20,15 @@ cleanup() {
   if [[ -n "$server_log" ]]; then
     rm -f "$server_log"
   fi
-  if [[ -n "$agent_log" ]]; then
-    rm -f "$agent_log"
-  fi
 }
 trap cleanup EXIT INT TERM
 
 lab() {
-  cargo run --quiet --bin a2a-lab -- --a2a "$a2a_url" "$@"
+  cargo run --quiet --bin a2a-lab-ot2 -- --opentrons-url "$ot_url" "$@"
 }
 
 section() {
-  printf '\n==> a2a-lab %s\n' "$1"
+  printf '\n==> a2a-lab-ot2 %s\n' "$1"
 }
 
 wait_http() {
@@ -72,20 +63,16 @@ wait_http() {
 start_stack() {
   started_here=1
   server_log="$(mktemp)"
-  agent_log="$(mktemp)"
-  bash "$root/.mise/scripts/simulator-setup.sh"
-  bash "$root/.mise/scripts/simulator.sh" >"$server_log" 2>&1 &
+  bash "$root/.mise/scripts/ot2-simulator-setup.sh"
+  bash "$root/.mise/scripts/ot2-simulator.sh" >"$server_log" 2>&1 &
   sim_pid=$!
-  wait_http "http://127.0.0.1:31950/health" "Opentrons-Version: *" 90 "$sim_pid" "$server_log" 2
-  cargo run --quiet --bin a2a-lab-sdk-example >"$agent_log" 2>&1 &
-  agent_pid=$!
-  wait_http "$a2a_url/.well-known/agent-card.json" "" 30 "$agent_pid" "$agent_log" 1
+  wait_http "$ot_url/health" "Opentrons-Version: *" 90 "$sim_pid" "$server_log" 2
 }
 
-if curl -fsS "$a2a_url/.well-known/agent-card.json" >/dev/null 2>&1; then
-  printf 'using A2A at %s\n' "$a2a_url"
+if curl -fsS -H 'Opentrons-Version: *' "$ot_url/health" >/dev/null 2>&1; then
+  printf 'using OT-2 HTTP at %s\n' "$ot_url"
 else
-  printf 'A2A is down; starting simulator and lab agent\n'
+  printf 'OT-2 is down; starting ot2-simulator\n'
   start_stack
 fi
 
@@ -161,4 +148,4 @@ section "start_workflow delete_run"
 lab start-workflow delete_run --input "$(printf '{"run_id":"%s"}' "$run_id")" || true
 
 printf '\nrecovery workflows are advertised by list_workflows; this protocol does not enter awaiting-recovery\n'
-printf 'a2a-lab example ok (run_id %s)\n' "$run_id"
+printf 'a2a-lab-ot2 example ok (run_id %s)\n' "$run_id"

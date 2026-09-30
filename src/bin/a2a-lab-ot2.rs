@@ -1,29 +1,38 @@
-//! A2A lab client for the seven lab operations.
+//! a2a-lab operations against an OT-2 robot-server HTTP API.
 
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use a2a_lab_sdk::{
-    A2aClient, GetWorkflowStatusRequest, JsonObject, LabResult, ListLogSourcesRequest,
-    ListMetricsRequest, ListWorkflowsRequest, LogLevel, LogRecord, MetricId, PageRequest,
-    QueryLogsRequest, QueryMetricRequest, RunId, RunState, SourceId, StartWorkflowRequest,
-    TimeRange, UtcTimestamp, WorkflowId,
+    A2aServer, GetWorkflowStatusRequest, JsonObject, LabService, ListLogSourcesRequest,
+    ListMetricsRequest, ListWorkflowsRequest, LogLevel, LogProvider, LogRecord, McpServer,
+    MetricId, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, RunState,
+    SourceId, StartWorkflowRequest, TimeRange, UtcTimestamp, WorkflowId, WorkflowProvider,
 };
+use a2a_lab_sdk_example::{OpentronsLab, default_protocol};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "a2a-lab",
-    about = "Call the a2a-lab operations: logs, metrics, and workflows"
+    name = "a2a-lab-ot2",
+    about = "Call a2a-lab operations against an OT-2 robot-server HTTP API"
 )]
 struct Cli {
-    #[arg(long, default_value = "http://127.0.0.1:31000")]
-    a2a: String,
+    /// Robot-server HTTP base URL (`GET /health`, `/runs`, `/logs`, …)
+    #[arg(long, env = "OPENTRONS_URL", default_value = "http://127.0.0.1:31950")]
+    opentrons_url: String,
+    /// Protocol file for `start-workflow run_serial_dilution`
+    #[arg(long, env = "OPENTRONS_PROTOCOL")]
+    protocol: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Default)]
 enum Command {
+    /// Serve A2A and MCP backed by the OT-2 HTTP API
+    #[default]
+    Serve,
     /// `list_workflows`
     ListWorkflows,
     /// `list_log_sources`
@@ -63,23 +72,24 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let client = A2aClient::new(&cli.a2a)?;
-    match cli.command {
-        Command::ListWorkflows => list_workflows(&client).await?,
-        Command::ListLogSources => list_log_sources(&client).await?,
-        Command::ListMetrics => list_metrics(&client).await?,
-        Command::QueryLogs { source_ids } => query_logs(&client, &source_ids).await?,
-        Command::QueryMetrics { metric_id } => query_metrics(&client, metric_id.as_deref()).await?,
+    let lab = connect(&cli)?;
+    match cli.command.unwrap_or_default() {
+        Command::Serve => serve(lab, &cli.opentrons_url).await?,
+        Command::ListWorkflows => list_workflows(&lab).await?,
+        Command::ListLogSources => list_log_sources(&lab).await?,
+        Command::ListMetrics => list_metrics(&lab).await?,
+        Command::QueryLogs { source_ids } => query_logs(&lab, &source_ids).await?,
+        Command::QueryMetrics { metric_id } => query_metrics(&lab, metric_id.as_deref()).await?,
         Command::StartWorkflow { workflow_id, input } => {
-            start(&client, &workflow_id, JsonObject::parse(&input)?).await?;
+            start(&lab, &workflow_id, JsonObject::parse(&input)?).await?;
         }
-        Command::GetWorkflowStatus { run_id } => get_workflow_status(&client, &run_id).await?,
-        Command::Pause { run_id } => action(&client, "pause_run", &run_id).await?,
-        Command::Resume { run_id } => action(&client, "resume_run", &run_id).await?,
-        Command::Stop { run_id } => action(&client, "stop_run", &run_id).await?,
+        Command::GetWorkflowStatus { run_id } => get_workflow_status(&lab, &run_id).await?,
+        Command::Pause { run_id } => action(&lab, "pause_run", &run_id).await?,
+        Command::Resume { run_id } => action(&lab, "resume_run", &run_id).await?,
+        Command::Stop { run_id } => action(&lab, "stop_run", &run_id).await?,
         Command::Home => {
             start(
-                &client,
+                &lab,
                 "execute_command",
                 JsonObject::parse(r#"{"commandType":"home","params":{}}"#)?,
             )
@@ -90,66 +100,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             params,
         } => {
             let input = format!(r#"{{"commandType":"{command_type}","params":{params}}}"#);
-            start(&client, "execute_command", JsonObject::parse(&input)?).await?;
+            start(&lab, "execute_command", JsonObject::parse(&input)?).await?;
         }
     }
     Ok(())
 }
 
-async fn list_workflows(client: &A2aClient) -> Result<(), Box<dyn std::error::Error>> {
-    let page = client
+fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
+    Ok(OpentronsLab::new(
+        &cli.opentrons_url,
+        cli.protocol.clone().unwrap_or_else(default_protocol),
+    )?)
+}
+
+async fn serve(lab: OpentronsLab, opentrons_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    lab.client().health().await?;
+    let service = LabService::new(lab.clone(), lab.clone(), lab).share();
+    let a2a = A2aServer::new(&service);
+    let mcp = McpServer::new(&service);
+    println!("connected to {opentrons_url}");
+    println!("A2A          http://127.0.0.1:31000");
+    println!("MCP          http://127.0.0.1:31001/mcp");
+    tokio::try_join!(a2a.listen(None), mcp.serve_http(None))?;
+    Ok(())
+}
+
+async fn list_workflows(lab: &OpentronsLab) -> Result<(), Box<dyn std::error::Error>> {
+    let page = lab
         .list_workflows(ListWorkflowsRequest {
             page: PageRequest::new(None, 50)?,
         })
         .await?;
     println!("a2a-lab list_workflows");
     for workflow in page.items() {
-        println!("{}	{}", workflow.id, workflow.name);
+        println!("{}\t{}", workflow.id, workflow.name);
     }
     Ok(())
 }
 
-async fn list_log_sources(client: &A2aClient) -> Result<(), Box<dyn std::error::Error>> {
-    let page = client
-        .list_log_sources(ListLogSourcesRequest {
+async fn list_log_sources(lab: &OpentronsLab) -> Result<(), Box<dyn std::error::Error>> {
+    let page = LogProvider::list_sources(
+        lab,
+        ListLogSourcesRequest {
             page: PageRequest::new(None, 50)?,
-        })
-        .await?;
+        },
+    )
+    .await?;
     println!("a2a-lab list_log_sources");
     for source in page.items() {
-        println!("{}	{}", source.id, source.name);
+        println!("{}\t{}", source.id, source.name);
     }
     Ok(())
 }
 
-async fn list_metrics(client: &A2aClient) -> Result<(), Box<dyn std::error::Error>> {
-    let page = client
+async fn list_metrics(lab: &OpentronsLab) -> Result<(), Box<dyn std::error::Error>> {
+    let page = lab
         .list_metrics(ListMetricsRequest {
             page: PageRequest::new(None, 50)?,
         })
         .await?;
     println!("a2a-lab list_metrics");
     for metric in page.items() {
-        println!("{}	{}	{}", metric.id, metric.unit, metric.name);
+        println!("{}\t{}\t{}", metric.id, metric.unit, metric.name);
     }
     Ok(())
 }
 
 async fn start(
-    client: &A2aClient,
+    lab: &OpentronsLab,
     workflow: &str,
     input: JsonObject,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("a2a-lab start_workflow {workflow}");
-    let snapshot = client
-        .start_workflow(StartWorkflowRequest {
+    let run = lab
+        .start(StartWorkflowRequest {
             workflow_id: WorkflowId::new(workflow)?,
             input,
         })
         .await?;
-    let LabResult::StartWorkflow(run) = snapshot.result else {
-        return Err("unexpected start result".into());
-    };
     println!("run_id {}", run.id);
     println!("state {}", run_state(run.state));
     if let Some(message) = run.message {
@@ -159,12 +187,12 @@ async fn start(
 }
 
 async fn get_workflow_status(
-    client: &A2aClient,
+    lab: &OpentronsLab,
     run_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("a2a-lab get_workflow_status");
-    let run = client
-        .workflow_status(GetWorkflowStatusRequest {
+    let run = lab
+        .status(GetWorkflowStatusRequest {
             run_id: RunId::new(run_id)?,
         })
         .await?;
@@ -177,35 +205,37 @@ async fn get_workflow_status(
 }
 
 async fn action(
-    client: &A2aClient,
+    lab: &OpentronsLab,
     workflow: &str,
     run_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input = JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#))?;
-    start(client, workflow, input).await
+    start(lab, workflow, input).await
 }
 
 async fn query_logs(
-    client: &A2aClient,
+    lab: &OpentronsLab,
     source_ids: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sources = if source_ids.is_empty() {
-        client
-            .list_log_sources(ListLogSourcesRequest {
+        LogProvider::list_sources(
+            lab,
+            ListLogSourcesRequest {
                 page: PageRequest::new(None, 50)?,
-            })
-            .await?
-            .items()
-            .iter()
-            .map(|source| source.id.as_str().to_owned())
-            .collect()
+            },
+        )
+        .await?
+        .items()
+        .iter()
+        .map(|source| source.id.as_str().to_owned())
+        .collect()
     } else {
         source_ids.to_vec()
     };
     let range = all_time()?;
     let mut records = Vec::new();
     for id in sources {
-        records.extend(all_log_pages(client, &id, range).await?);
+        records.extend(all_log_pages(lab, &id, range).await?);
     }
     records.sort_by(|left, right| {
         left.timestamp
@@ -220,20 +250,22 @@ async fn query_logs(
 }
 
 async fn all_log_pages(
-    client: &A2aClient,
+    lab: &OpentronsLab,
     source_id: &str,
     range: TimeRange,
 ) -> Result<Vec<LogRecord>, Box<dyn std::error::Error>> {
     let mut cursor = None;
     let mut records = Vec::new();
     loop {
-        let page = client
-            .query_logs(QueryLogsRequest {
+        let page = LogProvider::query(
+            lab,
+            QueryLogsRequest {
                 source_id: SourceId::new(source_id)?,
                 range,
                 page: PageRequest::new(cursor, 1_000)?,
-            })
-            .await?;
+            },
+        )
+        .await?;
         records.extend(page.items().iter().cloned());
         match page.next_cursor() {
             Some(next) => cursor = Some(next.to_owned()),
@@ -244,13 +276,13 @@ async fn all_log_pages(
 }
 
 async fn query_metrics(
-    client: &A2aClient,
+    lab: &OpentronsLab,
     metric_id: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("a2a-lab query_metric");
     let metrics = match metric_id {
         Some(id) => vec![MetricId::new(id)?],
-        None => client
+        None => lab
             .list_metrics(ListMetricsRequest {
                 page: PageRequest::new(None, 10)?,
             })
@@ -262,13 +294,15 @@ async fn query_metrics(
     };
     let range = all_time()?;
     for id in metrics {
-        let page = client
-            .query_metric(QueryMetricRequest {
+        let page = MetricProvider::query(
+            lab,
+            QueryMetricRequest {
                 metric_id: id.clone(),
                 range,
                 page: PageRequest::new(None, 10)?,
-            })
-            .await?;
+            },
+        )
+        .await?;
         let value = page
             .items()
             .first()

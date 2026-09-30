@@ -1,6 +1,6 @@
 # a2a-lab-sdk-example
 
-Example lab agent that wraps a persistent Opentrons OT-2 `robot-server` simulator with [`a2a-lab-sdk`](https://github.com/A3Analytics/a2a-lab-sdk-rs). The same seven lab operations are served over A2A (`127.0.0.1:31000`) and MCP (`127.0.0.1:31001/mcp`).
+Example lab agent that wraps a persistent Opentrons OT-2 `robot-server` simulator with [`a2a-lab-sdk`](https://github.com/A3Analytics/a2a-lab-sdk-rs). The `a2a-lab-ot2` executable calls the seven lab operations against the OT-2 HTTP API (`127.0.0.1:31950`). With no subcommand it also serves those operations over A2A (`127.0.0.1:31000`) and MCP (`127.0.0.1:31001/mcp`).
 
 This is software simulation, not a physical robot. The simulator can also be discovered by the Opentrons App as a development robot at `127.0.0.1`.
 
@@ -10,58 +10,57 @@ All commands run through mise.
 
 - [mise](https://mise.jdx.dev/)
 - git
-- Docker is not required
+- [Docker](https://docs.docker.com/get-docker/) (Docker Desktop on macOS)
 
-First install takes several minutes: Rust, Python 3.12, uv, and a checkout of Opentrons `v10.0.0`.
+First install takes several minutes: Rust tooling plus a Docker image of Opentrons `v10.0.0` robot-server with journald.
 
 ```bash
 mise install
-mise run simulator-setup
+mise run ot2-simulator-setup
 ```
 
 ## Run
 
-Start the OT-2 simulator and lab agent (leave this terminal running):
+Start the OT-2 simulator (leave this terminal running):
+
+```bash
+mise run ot2-simulator
+```
+
+In another terminal, run `a2a-lab-ot2`. With no extra args it serves A2A and MCP:
 
 ```bash
 mise run start
 ```
 
-Ctrl-C stops both. In a second terminal, seed a serial-dilution run that fails mid-protocol (missing tip), then print logs as one OTEL stream:
+Ctrl-C stops what that terminal started. Seed a serial-dilution run that fails mid-protocol (missing tip), then print logs as one OTEL stream:
 
 ```bash
 mise run ot2-simulation
-mise run a2a-lab-example
+mise run a2a-lab-ot2-example
 ```
 
-`ot2-simulation` talks to robot-server only and leaves a failed or awaiting-recovery run. Failed protocol steps stay in `run_commands` as error-level records. `api.log`, `serial.log`, `server.log`, and `update_server.log` map to the robot's journald logs. The desktop simulator has no `journalctl`, so the adapter fills those sources with realistic OT-2 records for the current run. `a2a-lab-example` calls `query_logs` for every advertised source and prints merged OTLP JSON log records (one per line).
+`ot2-simulation` talks to robot-server only and leaves a failed or awaiting-recovery run. Failed protocol steps stay in `run_commands` as error-level records. `api.log`, `serial.log`, `server.log`, and `update_server.log` come from `GET /logs/...` (journald inside the simulator container). If a journal is empty, the adapter fills it with realistic OT-2 records for the current run. `a2a-lab-ot2` (and `a2a-lab-ot2-example`) call those operations on the OT-2 HTTP API and print merged OTLP JSON log records (one per line).
 
-Call the same operations yourself:
+Call the same operations yourself (point `--opentrons-url` at robot-server; default is `http://127.0.0.1:31950`):
 
 ```bash
-mise run a2a-lab -- list-workflows
-mise run a2a-lab -- list-log-sources
-mise run a2a-lab -- list-metrics
-mise run a2a-lab -- start-workflow
-mise run a2a-lab -- get-workflow-status <run_id>
-mise run a2a-lab -- pause <run_id>
-mise run a2a-lab -- resume <run_id>
-mise run a2a-lab -- stop <run_id>
-mise run a2a-lab -- query-logs
-mise run a2a-lab -- query-logs run_commands api.log
-mise run a2a-lab -- query-metrics run_progress_percent
-mise run a2a-lab -- home
-mise run a2a-lab -- command home '{}'
+mise run a2a-lab-ot2 -- list-workflows
+mise run a2a-lab-ot2 -- list-log-sources
+mise run a2a-lab-ot2 -- list-metrics
+mise run a2a-lab-ot2 -- start-workflow
+mise run a2a-lab-ot2 -- get-workflow-status <run_id>
+mise run a2a-lab-ot2 -- pause <run_id>
+mise run a2a-lab-ot2 -- resume <run_id>
+mise run a2a-lab-ot2 -- stop <run_id>
+mise run a2a-lab-ot2 -- query-logs
+mise run a2a-lab-ot2 -- query-logs run_commands api.log
+mise run a2a-lab-ot2 -- query-metrics run_progress_percent
+mise run a2a-lab-ot2 -- home
+mise run a2a-lab-ot2 -- command home '{}'
 ```
 
-To run the simulator and agent in separate terminals instead of `mise run start`:
-
-```bash
-mise run simulator
-mise run serve
-```
-
-`mise run simulator-health` checks `GET /health` on the simulator. `mise run simulator-clean` removes the cached Opentrons checkout.
+`mise run start` is `a2a-lab-ot2` (default: A2A and MCP). `mise run ot2-simulator-health` checks `GET /health` on the simulator. `mise run ot2-simulator-clean` removes the simulator container and image.
 
 ## Endpoints
 
@@ -80,7 +79,7 @@ mise run test
 mise run quality
 ```
 
-`mise run ot2-simulation` plays the bundled protocol until a missing-tip error so `run_commands` includes both succeeded and failed steps. `mise run a2a-lab-example` prints `query_logs` as one OTEL log stream. `mise run smoke` is a pass/fail check against the same simulator. All three are opt-in and slower than the unit suite.
+`mise run ot2-simulation` plays the bundled protocol until a missing-tip error so `run_commands` includes both succeeded and failed steps. `mise run a2a-lab-ot2-example` prints `query_logs` as one OTEL log stream. `mise run smoke` is a pass/fail check against the same simulator. All three are opt-in and slower than the unit suite.
 
 ## Opentrons App
 

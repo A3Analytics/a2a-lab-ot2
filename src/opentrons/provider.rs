@@ -227,22 +227,22 @@ fn log_sources() -> Vec<LogSource> {
         (
             "api.log",
             "API log",
-            "GET /logs/api.log (opentrons-api). Uses journald on the robot; simulated on the desktop simulator.",
+            "GET /logs/api.log (opentrons-api journald).",
         ),
         (
             "serial.log",
             "Serial log",
-            "GET /logs/serial.log (motion board). Uses journald on the robot; simulated on the desktop simulator.",
+            "GET /logs/serial.log (motion board journald).",
         ),
         (
             "server.log",
             "Server log",
-            "GET /logs/server.log (uvicorn). Uses journald on the robot; simulated on the desktop simulator.",
+            "GET /logs/server.log (uvicorn journald).",
         ),
         (
             "update_server.log",
             "Update server log",
-            "GET /logs/update_server.log. Uses journald on the robot; simulated on the desktop simulator.",
+            "GET /logs/update_server.log (opentrons-update-server journald).",
         ),
     ]
     .into_iter()
