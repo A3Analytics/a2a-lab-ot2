@@ -1,0 +1,16 @@
+# Mise configuration for this project
+# This file defines tools, environment variables, and tasks
+
+[tools]
+
+
+[tools."github:MrLesk/Backlog.md"]
+version = "latest"
+bin = "backlog"  # Rename backlog-bun to backlog
+
+# Example: Set environment variables
+# [env]
+# NODE_ENV = "development"
+
+[task_config]
+includes = [".mise/run.toml"]

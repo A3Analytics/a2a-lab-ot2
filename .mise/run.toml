@@ -1,0 +1,3 @@
+[backlog-browser]
+description = "Start the backlog browser web interface for visual task management"
+run = "mise exec -- backlog browser"
