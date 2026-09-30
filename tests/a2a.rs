@@ -35,7 +35,7 @@ async fn a2a_run_pause_resume_and_status() {
 
     let tasks = client
         .list_tasks(ListTasksRequest {
-            page: PageRequest::new(None, 20).unwrap(),
+            page: PageRequest::new(None, 1000).unwrap(),
         })
         .await
         .unwrap();
@@ -47,10 +47,13 @@ async fn a2a_run_pause_resume_and_status() {
     );
 
     let started = client
-        .start_task(StartTaskRequest {
-            task_id: TaskId::new("run_serial_dilution").unwrap(),
-            input: JsonObject::empty(),
-        })
+        .start_task(
+            StartTaskRequest::new(
+                TaskId::new("run_serial_dilution").unwrap(),
+                JsonObject::empty(),
+            )
+            .immediate(),
+        )
         .await
         .unwrap();
     assert_eq!(started.state, TaskState::Working);
@@ -60,19 +63,19 @@ async fn a2a_run_pause_resume_and_status() {
     let run_id = run.id;
 
     let paused = client
-        .start_task(StartTaskRequest {
-            task_id: TaskId::new("pause_run").unwrap(),
-            input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
-        })
+        .start_task(StartTaskRequest::new(
+            TaskId::new("pause_run").unwrap(),
+            JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
+        ))
         .await
         .unwrap();
     assert_eq!(paused.state, TaskState::Completed);
 
     let resumed = client
-        .start_task(StartTaskRequest {
-            task_id: TaskId::new("resume_run").unwrap(),
-            input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
-        })
+        .start_task(StartTaskRequest::new(
+            TaskId::new("resume_run").unwrap(),
+            JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
+        ))
         .await
         .unwrap();
     assert_eq!(resumed.state, TaskState::Completed);

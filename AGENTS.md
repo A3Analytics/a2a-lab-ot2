@@ -4,7 +4,7 @@ Operating guide for AI agents working in this repository.
 
 ## What this repo is
 
-`a2a-lab-sdk-example` — an example lab agent that wraps a persistent Opentrons OT-2 `robot-server` development simulator with the sibling `a2a-lab-sdk` crate. The `a2a-lab-ot2` executable talks to the OT-2 HTTP API. With no subcommand it also serves those operations over A2A and MCP.
+`a2a-lab-sdk-example` — an example lab agent that wraps a persistent Opentrons OT-2 `robot-server` development simulator with the sibling `a2a-lab-sdk` crate. The `a2a-lab-ot2` executable talks to the OT-2 HTTP API. With no subcommand it also serves those operations over A2A and MCP. Robot-server routes from the pinned `v10.0.0` OpenAPI are classified in `src/opentrons/inventory.rs` and advertised through `list-tasks`, `list-log-sources`, and `list-metrics` (see doc-1).
 
 ## Tooling
 

@@ -49,6 +49,8 @@ mise run a2a-lab-ot2 -- list-tasks
 mise run a2a-lab-ot2 -- list-log-sources
 mise run a2a-lab-ot2 -- list-metrics
 mise run a2a-lab-ot2 -- start-task
+mise run a2a-lab-ot2 -- start-task --no-wait
+mise run a2a-lab-ot2 -- start-task --timeout 120
 mise run a2a-lab-ot2 -- get-task-status <run_id>
 mise run a2a-lab-ot2 -- pause <run_id>
 mise run a2a-lab-ot2 -- resume <run_id>
@@ -70,7 +72,7 @@ mise run a2a-lab-ot2 -- command home '{}'
 | A2A                    | `http://127.0.0.1:31000` (`/.well-known/agent-card.json`, `POST /message:send`) |
 | MCP                    | `http://127.0.0.1:31001/mcp`                                                    |
 
-Tasks include `run_serial_dilution`, `pause_run`, `resume_run`, `stop_run`, `delete_run`, recovery actions, and `execute_command` for Protocol Engine commands such as `home`. Administrative, networking, and update endpoints are not exposed.
+`list-tasks` advertises composite helpers (`run_serial_dilution`, pause/resume/stop, recovery, `execute_command`) plus primitive robot-server HTTP operations from the pinned OT-2 v10.0.0 OpenAPI. Flex-only routes (estop, deck configuration, subsystems, live-stream settings) are omitted. `list-log-sources` includes run/analysis command streams and every `GET /logs/{identifier}` journal. `list-metrics` includes health, run progress, door, lights, pipette/instrument/module counts, and disk space. Path parameters and JSON bodies go in `start-task --input`.
 
 ## Tests
 

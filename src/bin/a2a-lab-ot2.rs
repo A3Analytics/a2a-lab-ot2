@@ -7,7 +7,7 @@ use a2a_lab_sdk::{
     A2aServer, GetTaskStatusRequest, JsonObject, LabService, ListLogSourcesRequest,
     ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider, LogRecord, McpServer, MetricId,
     MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
-    StartTaskRequest, TaskId, TaskProvider, TaskState, TimeRange, UtcTimestamp,
+    StartTaskRequest, TaskId, TaskProvider, TaskState, TimeRange, UtcTimestamp, start_run,
 };
 use a2a_lab_sdk_example::{OpentronsLab, default_protocol};
 use clap::{Parser, Subcommand};
@@ -49,6 +49,12 @@ enum Command {
         task_id: String,
         #[arg(long, default_value = "{}")]
         input: String,
+        /// Return as soon as the run is accepted
+        #[arg(long)]
+        no_wait: bool,
+        /// Seconds to wait for a terminal state (default 60)
+        #[arg(long)]
+        timeout: Option<u32>,
     },
     /// `get_task_status`
     GetTaskStatus { run_id: String },
@@ -80,8 +86,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::ListMetrics => list_metrics(&lab).await?,
         Command::QueryLogs { source_ids } => query_logs(&lab, &source_ids).await?,
         Command::QueryMetrics { metric_id } => query_metrics(&lab, metric_id.as_deref()).await?,
-        Command::StartTask { task_id, input } => {
-            start(&lab, &task_id, JsonObject::parse(&input)?).await?;
+        Command::StartTask {
+            task_id,
+            input,
+            no_wait,
+            timeout,
+        } => {
+            start(
+                &lab,
+                &task_id,
+                JsonObject::parse(&input)?,
+                !no_wait,
+                timeout,
+            )
+            .await?;
         }
         Command::GetTaskStatus { run_id } => get_task_status(&lab, &run_id).await?,
         Command::Pause { run_id } => action(&lab, "pause_run", &run_id).await?,
@@ -92,6 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &lab,
                 "execute_command",
                 JsonObject::parse(r#"{"commandType":"home","params":{}}"#)?,
+                true,
+                None,
             )
             .await?;
         }
@@ -100,7 +120,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             params,
         } => {
             let input = format!(r#"{{"commandType":"{command_type}","params":{params}}}"#);
-            start(&lab, "execute_command", JsonObject::parse(&input)?).await?;
+            start(
+                &lab,
+                "execute_command",
+                JsonObject::parse(&input)?,
+                true,
+                None,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -170,14 +197,14 @@ async fn start(
     lab: &OpentronsLab,
     task: &str,
     input: JsonObject,
+    wait: bool,
+    timeout: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("a2a-lab start_task {task}");
-    let run = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new(task)?,
-            input,
-        })
-        .await?;
+    let mut request = StartTaskRequest::new(TaskId::new(task)?, input);
+    request.wait = wait;
+    request.timeout_seconds = timeout;
+    let run = start_run(lab, request).await?;
     println!("run_id {}", run.id);
     println!("state {}", run_state(run.state));
     if let Some(message) = run.message {
@@ -210,7 +237,7 @@ async fn action(
     run_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input = JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#))?;
-    start(lab, task, input).await
+    start(lab, task, input, true, None).await
 }
 
 async fn query_logs(

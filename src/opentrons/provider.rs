@@ -17,6 +17,7 @@ use crate::page::slice_page;
 use crate::time::{now, parse_timestamp};
 
 use super::client::OpentronsClient;
+use super::inventory::{self, Entry, Kind};
 use super::model::{Command, Run};
 
 const RUN_TASK: &str = "run_serial_dilution";
@@ -27,11 +28,6 @@ const DELETE_TASK: &str = "delete_run";
 const RECOVERY_TASK: &str = "resume_from_recovery";
 const RECOVERY_FALSE_TASK: &str = "resume_from_recovery_assuming_false_positive";
 const COMMAND_TASK: &str = "execute_command";
-const COMMANDS_SOURCE: &str = "run_commands";
-const TROUBLESHOOTING_LOGS: &[&str] = &["api.log", "serial.log", "server.log", "update_server.log"];
-const HEALTH_METRIC: &str = "healthy";
-const PROGRESS_METRIC: &str = "run_progress_percent";
-const COUNT_METRIC: &str = "run_command_count";
 
 /// Shared Opentrons adapter implementing the three lab provider traits.
 #[derive(Clone)]
@@ -78,7 +74,7 @@ impl TaskProvider for OpentronsLab {
         &self,
         request: ListTasksRequest,
     ) -> Result<Page<TaskDefinition>, SdkError> {
-        slice_page(&definitions(), &request.page)
+        slice_page(&task_definitions(), &request.page)
     }
 
     async fn start(&self, request: StartTaskRequest) -> Result<TaskRun, SdkError> {
@@ -99,7 +95,10 @@ impl TaskProvider for OpentronsLab {
                 .await
             }
             COMMAND_TASK => execute_command(self, request.input).await,
-            _ => Err(SdkError::not_found("task", request.task_id.to_string())),
+            id => match inventory::task_entry(id) {
+                Some(entry) => http_task(self, entry, request).await,
+                None => Err(SdkError::not_found("task", request.task_id.to_string())),
+            },
         }
     }
 
@@ -118,7 +117,7 @@ impl LogProvider for OpentronsLab {
         &self,
         request: ListLogSourcesRequest,
     ) -> Result<Page<LogSource>, SdkError> {
-        slice_page(&log_sources(), &request.page)
+        slice_page(&catalog_sources(), &request.page)
     }
 
     async fn query(&self, request: QueryLogsRequest) -> Result<Page<LogRecord>, SdkError> {
@@ -141,7 +140,7 @@ impl MetricProvider for OpentronsLab {
         &self,
         request: ListMetricsRequest,
     ) -> Result<Page<MetricDescriptor>, SdkError> {
-        slice_page(&metrics(), &request.page)
+        slice_page(&catalog_metrics(), &request.page)
     }
 
     async fn query(&self, request: QueryMetricRequest) -> Result<Page<MetricPoint>, SdkError> {
@@ -153,6 +152,52 @@ impl MetricProvider for OpentronsLab {
         let value = metric_value(&self.client, request.metric_id.as_str()).await?;
         slice_page(&[MetricPoint::new(timestamp, value)?], &request.page)
     }
+}
+
+fn task_definitions() -> Vec<TaskDefinition> {
+    let mut items = definitions();
+    items.extend(inventory::of_kind(Kind::Task).map(entry_task));
+    items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    items
+}
+
+fn entry_task(entry: &Entry) -> TaskDefinition {
+    TaskDefinition {
+        id: TaskId::new(entry.id).expect("task id"),
+        name: entry.name.to_owned(),
+        description: entry.description.to_owned(),
+        asset_id: Some("opentrons-ot2".to_owned()),
+        semantic_id: Some("opentrons.robot-server".to_owned()),
+    }
+}
+
+fn catalog_sources() -> Vec<LogSource> {
+    let mut items: Vec<LogSource> = inventory::of_kind(Kind::Log)
+        .map(|entry| LogSource {
+            id: SourceId::new(entry.id).expect("source id"),
+            name: entry.name.to_owned(),
+            description: entry.description.to_owned(),
+            asset_id: Some("opentrons-ot2".to_owned()),
+            semantic_id: Some("opentrons.robot-server".to_owned()),
+        })
+        .collect();
+    items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    items
+}
+
+fn catalog_metrics() -> Vec<MetricDescriptor> {
+    let mut items: Vec<MetricDescriptor> = inventory::of_kind(Kind::Metric)
+        .map(|entry| MetricDescriptor {
+            id: MetricId::new(entry.id).expect("metric id"),
+            name: entry.name.to_owned(),
+            description: entry.description.to_owned(),
+            unit: entry.unit.to_owned(),
+            asset_id: Some("opentrons-ot2".to_owned()),
+            semantic_id: Some("opentrons.robot-server".to_owned()),
+        })
+        .collect();
+    items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    items
 }
 
 fn definitions() -> Vec<TaskDefinition> {
@@ -199,82 +244,6 @@ fn definitions() -> Vec<TaskDefinition> {
         id: TaskId::new(id).expect("task id"),
         name: name.to_owned(),
         description: description.to_owned(),
-        asset_id: Some("opentrons-ot2".to_owned()),
-        semantic_id: Some("opentrons.robot-server".to_owned()),
-    })
-    .collect();
-    items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
-    items
-}
-
-fn log_sources() -> Vec<LogSource> {
-    let mut items: Vec<LogSource> = [
-        (
-            COMMANDS_SOURCE,
-            "Run commands",
-            "Protocol Engine commands from GET /runs/{id}/commands, including failures.",
-        ),
-        (
-            "api.log",
-            "API log",
-            "GET /logs/api.log (opentrons-api journald).",
-        ),
-        (
-            "serial.log",
-            "Serial log",
-            "GET /logs/serial.log (motion board journald).",
-        ),
-        (
-            "server.log",
-            "Server log",
-            "GET /logs/server.log (uvicorn journald).",
-        ),
-        (
-            "update_server.log",
-            "Update server log",
-            "GET /logs/update_server.log (opentrons-update-server journald).",
-        ),
-    ]
-    .into_iter()
-    .map(|(id, name, description)| LogSource {
-        id: SourceId::new(id).expect("source id"),
-        name: name.to_owned(),
-        description: description.to_owned(),
-        asset_id: Some("opentrons-ot2".to_owned()),
-        semantic_id: Some("opentrons.robot-server".to_owned()),
-    })
-    .collect();
-    items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
-    items
-}
-
-fn metrics() -> Vec<MetricDescriptor> {
-    let mut items: Vec<MetricDescriptor> = [
-        (
-            HEALTH_METRIC,
-            "Healthy",
-            "1 when robot-server /health succeeds.",
-            "count",
-        ),
-        (
-            PROGRESS_METRIC,
-            "Run progress",
-            "Percent of current-run commands that have completed.",
-            "percent",
-        ),
-        (
-            COUNT_METRIC,
-            "Run command count",
-            "Number of commands on the current run.",
-            "count",
-        ),
-    ]
-    .into_iter()
-    .map(|(id, name, description, unit)| MetricDescriptor {
-        id: MetricId::new(id).expect("metric id"),
-        name: name.to_owned(),
-        description: description.to_owned(),
-        unit: unit.to_owned(),
         asset_id: Some("opentrons-ot2".to_owned()),
         semantic_id: Some("opentrons.robot-server".to_owned()),
     })
@@ -331,6 +300,272 @@ async fn delete_run(lab: &OpentronsLab, request: StartTaskRequest) -> Result<Tas
         .await)
 }
 
+async fn http_task(
+    lab: &OpentronsLab,
+    entry: &Entry,
+    request: StartTaskRequest,
+) -> Result<TaskRun, SdkError> {
+    match (entry.method, entry.path) {
+        ("POST", "/protocols") => {
+            upload_file_task(lab, entry, request, "files", "text/x-python").await
+        }
+        ("POST", "/dataFiles") => {
+            upload_file_task(lab, entry, request, "file", "application/octet-stream").await
+        }
+        ("POST", "/wifi/keys") => {
+            upload_file_task(lab, entry, request, "key", "application/octet-stream").await
+        }
+        _ => {
+            let path = fill_path(entry.path, request.input.as_map())?;
+            let path = with_query(entry.method, &path, request.input.as_map());
+            let body = http_body(entry.method, request.input.as_map());
+            let result = lab.client.call(entry.method, &path, body).await?;
+            complete_http(lab, entry, request, result).await
+        }
+    }
+}
+
+async fn upload_file_task(
+    lab: &OpentronsLab,
+    entry: &Entry,
+    request: StartTaskRequest,
+    field: &str,
+    mime: &str,
+) -> Result<TaskRun, SdkError> {
+    let map = request.input.as_map();
+    let file_path = map
+        .get("path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .or_else(|| (entry.path == "/protocols").then(|| lab.protocol_path.clone()))
+        .ok_or_else(|| SdkError::invalid("path", "file path required"))?;
+    let bytes = tokio::fs::read(&file_path)
+        .await
+        .map_err(|error| SdkError::unavailable(error.to_string()))?;
+    let filename = map
+        .get("filename")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            file_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .ok_or_else(|| SdkError::invalid("filename", "path must have a file name"))?;
+    let result = lab
+        .client
+        .upload_bytes::<Value>(
+            entry.path.trim_start_matches('/'),
+            field,
+            &filename,
+            bytes,
+            mime,
+        )
+        .await?;
+    complete_http(lab, entry, request, result).await
+}
+
+async fn complete_http(
+    lab: &OpentronsLab,
+    entry: &Entry,
+    request: StartTaskRequest,
+    result: Value,
+) -> Result<TaskRun, SdkError> {
+    let suffix = lab.local.lock().await.len() + 1;
+    Ok(lab
+        .store(completed_run(
+            &format!("{}-{suffix}", entry.id),
+            request.task_id,
+            request.input,
+            Some(result.to_string()),
+        )?)
+        .await)
+}
+
+fn fill_path(template: &str, input: &serde_json::Map<String, Value>) -> Result<String, SdkError> {
+    let mut path = template.trim_start_matches('/').to_owned();
+    while let Some(start) = path.find('{') {
+        let end = path[start..]
+            .find('}')
+            .map(|offset| start + offset)
+            .ok_or_else(|| SdkError::invalid("path", "unclosed path parameter"))?;
+        let name = &path[start + 1..end];
+        let value = path_param(input, name)?;
+        path.replace_range(start..=end, value);
+    }
+    Ok(path)
+}
+
+fn with_query(method: &str, path: &str, input: &serde_json::Map<String, Value>) -> String {
+    let mut pairs = Vec::new();
+    if let Some(query) = input.get("query").and_then(Value::as_object) {
+        for (key, value) in query {
+            if let Some(text) = query_value(value) {
+                pairs.push((key.clone(), text));
+            }
+        }
+    }
+    if let Some(seconds) = input.get("seconds").and_then(query_value) {
+        pairs.push(("seconds".to_owned(), seconds));
+    }
+    if matches!(method, "GET" | "DELETE") {
+        for (key, value) in input {
+            if reserved_input(key) {
+                continue;
+            }
+            if let Some(text) = query_value(value) {
+                pairs.push((key.clone(), text));
+            }
+        }
+    }
+    if pairs.is_empty() {
+        return path.to_owned();
+    }
+    let query = pairs
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", query_escape(&value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{path}?{query}")
+}
+
+fn reserved_input(key: &str) -> bool {
+    matches!(
+        key,
+        "body"
+            | "data"
+            | "query"
+            | "seconds"
+            | "path"
+            | "filename"
+            | "file"
+            | "id"
+            | "key"
+            | "serial"
+            | "key_uuid"
+            | "run_id"
+            | "protocol_id"
+            | "command_id"
+            | "analysis_id"
+            | "session_id"
+            | "pipette_id"
+            | "calibration_id"
+            | "data_file_id"
+            | "camera_id"
+            | "subsystem"
+    ) || key.ends_with("Id")
+}
+
+fn query_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+fn query_escape(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(byte));
+            }
+            _ => {
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("%{byte:02X}"));
+            }
+        }
+    }
+    out
+}
+
+fn path_param<'a>(
+    input: &'a serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<&'a str, SdkError> {
+    if let Ok(value) = string_field(input, name) {
+        return Ok(value);
+    }
+    let snake = snake_case(name);
+    if snake != name
+        && let Ok(value) = string_field(input, &snake)
+    {
+        return Ok(value);
+    }
+    if name.ends_with("Id") {
+        if let Ok(value) = string_field(input, "id") {
+            return Ok(value);
+        }
+        if let Ok(value) = string_field(input, "run_id") {
+            return Ok(value);
+        }
+    }
+    Err(SdkError::invalid(
+        "input",
+        format!("missing path parameter `{name}`"),
+    ))
+}
+
+fn snake_case(name: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn http_body(method: &str, input: &serde_json::Map<String, Value>) -> Option<Value> {
+    if matches!(method, "GET" | "DELETE") {
+        return None;
+    }
+    if let Some(body) = input.get("body") {
+        return Some(body.clone());
+    }
+    if let Some(data) = input.get("data") {
+        return Some(json!({ "data": data.clone() }));
+    }
+    let mut body = input.clone();
+    for key in [
+        "runId",
+        "run_id",
+        "protocolId",
+        "protocol_id",
+        "commandId",
+        "analysisId",
+        "maintenanceRunId",
+        "sessionId",
+        "dataFileId",
+        "pipetteId",
+        "calibrationId",
+        "key_uuid",
+        "key",
+        "serial",
+        "subsystem",
+        "seconds",
+        "query",
+        "path",
+        "filename",
+        "file",
+        "id",
+    ] {
+        body.remove(key);
+    }
+    if body.is_empty() {
+        None
+    } else {
+        Some(Value::Object(body))
+    }
+}
+
 async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRun, SdkError> {
     let command_type = string_field(input.as_map(), "commandType")
         .or_else(|_| string_field(input.as_map(), "command_type"))?;
@@ -362,26 +597,90 @@ async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRu
 }
 
 async fn collect_logs(client: &OpentronsClient, source: &str) -> Result<Vec<LogRecord>, SdkError> {
-    if source == COMMANDS_SOURCE {
-        return collect_commands(client).await;
+    match source {
+        "run_commands" => collect_commands(client, false).await,
+        "run_command_errors" => collect_commands(client, true).await,
+        "protocol_analyses" => collect_analyses(client).await,
+        "stateless_commands" => collect_stateless(client).await,
+        id if journal_source(id) => collect_journal(client, id).await,
+        _ => Err(SdkError::not_found("log source", source)),
     }
-    if TROUBLESHOOTING_LOGS.contains(&source) {
-        return collect_journal(client, source).await;
-    }
-    Err(SdkError::not_found("log source", source))
 }
 
-async fn collect_commands(client: &OpentronsClient) -> Result<Vec<LogRecord>, SdkError> {
+fn journal_source(id: &str) -> bool {
+    inventory::of_kind(Kind::Log).any(|entry| entry.id == id && entry.path.starts_with("/logs/"))
+}
+
+async fn collect_commands(
+    client: &OpentronsClient,
+    errors_only: bool,
+) -> Result<Vec<LogRecord>, SdkError> {
     let runs = client.runs().await?;
     let ids: Vec<String> = match runs.iter().find(|run| run.current) {
         Some(run) => vec![run.id.clone()],
         None => runs.into_iter().map(|run| run.id).collect(),
     };
+    let source = if errors_only {
+        "run_command_errors"
+    } else {
+        "run_commands"
+    };
     let mut records = Vec::new();
     for id in ids {
         for command in client.run_commands(&id).await? {
-            records.push(command_record(COMMANDS_SOURCE, &id, &command)?);
+            if errors_only && command.status != "failed" && command.error.is_none() {
+                continue;
+            }
+            records.push(command_record(source, &id, &command)?);
         }
+    }
+    Ok(records)
+}
+
+async fn collect_analyses(client: &OpentronsClient) -> Result<Vec<LogRecord>, SdkError> {
+    let protocols = client.call("GET", "protocols", None).await?;
+    let Some(items) = protocols.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut records = Vec::new();
+    for protocol in items {
+        let Some(id) = protocol.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let analyses = client
+            .call("GET", &format!("protocols/{id}/analyses"), None)
+            .await
+            .unwrap_or(Value::Array(Vec::new()));
+        let message = analyses.to_string();
+        records.push(LogRecord {
+            source_id: SourceId::new("protocol_analyses")?,
+            timestamp: now()?,
+            level: LogLevel::Info,
+            message,
+            attributes: JsonObject::try_from_value(json!({ "protocol_id": id }))?,
+        });
+    }
+    Ok(records)
+}
+
+async fn collect_stateless(client: &OpentronsClient) -> Result<Vec<LogRecord>, SdkError> {
+    let commands = client.call("GET", "commands", None).await?;
+    let Some(items) = commands.as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut records = Vec::new();
+    for command in items {
+        let id = command
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        records.push(LogRecord {
+            source_id: SourceId::new("stateless_commands")?,
+            timestamp: now()?,
+            level: LogLevel::Info,
+            message: command.to_string(),
+            attributes: JsonObject::try_from_value(json!({ "command_id": id }))?,
+        });
     }
     Ok(records)
 }
@@ -714,6 +1013,7 @@ fn parse_journal(source: &str, body: &str) -> Result<Vec<LogRecord>, SdkError> {
     };
     values
         .iter()
+        .filter(|entry| entry.get("MESSAGE").is_some() || entry.get("SYSLOG_IDENTIFIER").is_some())
         .map(|entry| journal_record(source, entry))
         .collect()
 }
@@ -808,10 +1108,75 @@ fn command_record(source: &str, run_id: &str, command: &Command) -> Result<LogRe
 
 async fn metric_value(client: &OpentronsClient, metric_id: &str) -> Result<f64, SdkError> {
     match metric_id {
-        HEALTH_METRIC => Ok(f64::from(u8::from(client.health().await.is_ok()))),
-        PROGRESS_METRIC | COUNT_METRIC => run_metric(client, metric_id).await,
+        "healthy" => Ok(f64::from(u8::from(client.health().await.is_ok()))),
+        "disk_available_mb" => gauge(client, "GET", "health", disk_available).await,
+        "run_progress_percent" | "run_command_count" => run_metric(client, metric_id).await,
+        "door_open" => gauge(client, "GET", "robot/door/status", door_open).await,
+        "lights_on" => gauge(client, "GET", "robot/lights", lights_on).await,
+        "pipette_count" => gauge(client, "GET", "pipettes", count_attached).await,
+        "instrument_count" => gauge(client, "GET", "instruments", count_attached).await,
+        "module_count" => gauge(client, "GET", "modules", count_attached).await,
         _ => Err(SdkError::not_found("metric", metric_id)),
     }
+}
+
+async fn gauge(
+    client: &OpentronsClient,
+    method: &str,
+    path: &str,
+    pick: fn(&Value) -> f64,
+) -> Result<f64, SdkError> {
+    let value = client.call(method, path, None).await.unwrap_or(Value::Null);
+    Ok(pick(&value))
+}
+
+fn disk_available(value: &Value) -> f64 {
+    value
+        .get("disk_details")
+        .or_else(|| value.get("diskDetails"))
+        .and_then(|details| {
+            details
+                .get("systemAvailableMb")
+                .or_else(|| details.get("system_available_mb"))
+        })
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
+fn door_open(value: &Value) -> f64 {
+    let status = value
+        .get("status")
+        .or_else(|| value.get("data").and_then(|data| data.get("status")))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    f64::from(u8::from(status.eq_ignore_ascii_case("open")))
+}
+
+fn lights_on(value: &Value) -> f64 {
+    let on = value
+        .get("on")
+        .or_else(|| value.get("data").and_then(|data| data.get("on")))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    f64::from(u8::from(on))
+}
+
+fn count_attached(value: &Value) -> f64 {
+    let len = match value {
+        Value::Array(items) => items.len(),
+        Value::Object(map) => {
+            if let Some(items) = map.get("data").and_then(Value::as_array) {
+                items.len()
+            } else {
+                ["left", "right"]
+                    .iter()
+                    .filter(|key| map.get(**key).is_some_and(|item| !item.is_null()))
+                    .count()
+            }
+        }
+        _ => 0,
+    };
+    f64::from(u32::try_from(len).unwrap_or(u32::MAX))
 }
 
 async fn run_metric(client: &OpentronsClient, metric_id: &str) -> Result<f64, SdkError> {
@@ -820,7 +1185,7 @@ async fn run_metric(client: &OpentronsClient, metric_id: &str) -> Result<f64, Sd
     };
     let commands = client.run_commands(&run.id).await?;
     let total = f64::from(u32::try_from(commands.len()).unwrap_or(u32::MAX));
-    if metric_id == COUNT_METRIC {
+    if metric_id == "run_command_count" {
         return Ok(total);
     }
     if total == 0.0 {
@@ -879,9 +1244,9 @@ fn map_status(status: &str) -> TaskState {
 
 fn string_field<'a>(
     map: &'a serde_json::Map<String, Value>,
-    field: &'static str,
+    field: &str,
 ) -> Result<&'a str, SdkError> {
     map.get(field)
         .and_then(Value::as_str)
-        .ok_or_else(|| SdkError::invalid(field, "must be a string"))
+        .ok_or_else(|| SdkError::invalid("input", format!("{field} must be a string")))
 }

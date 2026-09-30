@@ -61,8 +61,9 @@ impl Mock {
 fn router(state: Mock) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/protocols", post(upload_protocol))
+        .route("/protocols", get(list_protocols).post(upload_protocol))
         .route("/protocols/{id}", get(get_protocol))
+        .route("/protocols/{id}/analyses", get(list_analyses))
         .route("/runs", get(list_runs).post(create_run))
         .route(
             "/runs/{id}",
@@ -70,9 +71,22 @@ fn router(state: Mock) -> Router {
         )
         .route("/runs/{id}/actions", post(run_action))
         .route("/runs/{id}/commands", get(run_commands))
-        .route("/commands", post(stateless_command))
+        .route("/commands", post(stateless_command).get(list_stateless))
+        .route("/modules", get(empty_list))
+        .route("/pipettes", get(empty_object))
+        .route("/instruments", get(empty_list))
+        .route("/robot/door/status", get(door_status))
+        .route("/robot/lights", get(lights))
+        .fallback(fallback)
         .layer(middleware::from_fn(require_version))
         .with_state(state)
+}
+
+async fn fallback(uri: axum::http::Uri) -> Response {
+    if uri.path().starts_with("/logs/") {
+        return not_found("log");
+    }
+    json!({ "data": {} }).to_string().into_response()
 }
 
 async fn require_version(request: Request, next: Next) -> Response {
@@ -95,7 +109,8 @@ async fn health(State(mock): State<Mock>) -> Response {
         json!({
             "name": "opentrons-dev",
             "api_version": "10.0.0",
-            "robot_model": "OT-2 Standard"
+            "robot_model": "OT-2 Standard",
+            "disk_details": { "systemAvailableMb": 4096.0 }
         })
         .to_string()
         .into_response()
@@ -125,6 +140,18 @@ async fn get_protocol(State(mock): State<Mock>, Path(id): Path<String>) -> Respo
         Some(protocol) => json!({ "data": protocol }).to_string().into_response(),
         None => not_found("protocol"),
     }
+}
+
+async fn list_analyses(Path(id): Path<String>) -> Response {
+    json!({
+        "data": [{
+            "id": "analysis-1",
+            "status": "completed",
+            "protocolId": id
+        }]
+    })
+    .to_string()
+    .into_response()
 }
 
 async fn list_runs(State(mock): State<Mock>) -> Response {
@@ -265,6 +292,37 @@ async fn stateless_command(
     });
     inner.stateless.push(command.clone());
     json!({ "data": command }).to_string().into_response()
+}
+
+async fn list_stateless(State(mock): State<Mock>) -> Response {
+    let inner = mock.inner.lock().await;
+    json!({ "data": inner.stateless.clone() })
+        .to_string()
+        .into_response()
+}
+
+async fn list_protocols(State(mock): State<Mock>) -> Response {
+    let inner = mock.inner.lock().await;
+    let protocols: Vec<Value> = inner.protocols.values().cloned().collect();
+    json!({ "data": protocols }).to_string().into_response()
+}
+
+async fn empty_list() -> Response {
+    json!({ "data": [] }).to_string().into_response()
+}
+
+async fn empty_object() -> Response {
+    json!({ "data": {} }).to_string().into_response()
+}
+
+async fn door_status() -> Response {
+    json!({ "data": { "status": "closed" } })
+        .to_string()
+        .into_response()
+}
+
+async fn lights() -> Response {
+    json!({ "on": false }).to_string().into_response()
 }
 
 fn status_for_action(action: &str) -> &'static str {

@@ -41,14 +41,30 @@ impl OpentronsClient {
         filename: &str,
         bytes: Vec<u8>,
     ) -> Result<Protocol, SdkError> {
+        self.upload_bytes("protocols", "files", filename, bytes, "text/x-python")
+            .await
+    }
+
+    /// Multipart POST used by protocol, data-file, and Wi-Fi key uploads.
+    pub async fn upload_bytes<T>(
+        &self,
+        path: &str,
+        field: &str,
+        filename: &str,
+        bytes: Vec<u8>,
+        mime: &str,
+    ) -> Result<T, SdkError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(filename.to_owned())
-            .mime_str("text/x-python")
-            .map_err(|error| SdkError::invalid("protocol", error.to_string()))?;
-        let form = reqwest::multipart::Form::new().part("files", part);
+            .mime_str(mime)
+            .map_err(|error| SdkError::invalid("file", error.to_string()))?;
+        let form = reqwest::multipart::Form::new().part(field.to_owned(), part);
         let response = self
             .http
-            .post(self.url("protocols")?)
+            .post(self.url(path)?)
             .header(VERSION_HEADER, VERSION)
             .multipart(form)
             .send()
@@ -180,6 +196,36 @@ impl OpentronsClient {
         .await
     }
 
+    /// Calls an arbitrary robot-server path and returns JSON (`data` unwrapped when present).
+    pub async fn call(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, SdkError> {
+        let method = parse_method(method)?;
+        let mut request = self
+            .http
+            .request(method, self.url(path)?)
+            .header(VERSION_HEADER, VERSION);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = self.send_raw(request).await?;
+        let status = response.status();
+        let text = response.text().await.map_err(|error| transport(&error))?;
+        if !status.is_success() {
+            return Err(status_error(status, &text));
+        }
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        if let Ok(envelope) = serde_json::from_str::<Envelope<Value>>(&text) {
+            return Ok(envelope.data);
+        }
+        serde_json::from_str(&text).or(Ok(Value::String(text)))
+    }
+
     async fn release_current(&self) -> Result<(), SdkError> {
         for run in self.runs().await? {
             if !run.current {
@@ -271,6 +317,17 @@ fn transport(error: &reqwest::Error) -> SdkError {
 
 fn analysis_ready(summary: &AnalysisSummary) -> bool {
     summary.status != "pending"
+}
+
+fn parse_method(method: &str) -> Result<Method, SdkError> {
+    match method {
+        "GET" => Ok(Method::GET),
+        "POST" => Ok(Method::POST),
+        "PUT" => Ok(Method::PUT),
+        "PATCH" => Ok(Method::PATCH),
+        "DELETE" => Ok(Method::DELETE),
+        _ => Err(SdkError::invalid("method", method.to_owned())),
+    }
 }
 
 fn status_error(status: StatusCode, body: &str) -> SdkError {

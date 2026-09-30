@@ -11,7 +11,7 @@ use a2a_lab_sdk_example::OpentronsLab;
 use support::Mock;
 
 fn page() -> PageRequest {
-    PageRequest::new(None, 20).unwrap()
+    PageRequest::new(None, 200).unwrap()
 }
 
 fn range() -> TimeRange {
@@ -61,9 +61,10 @@ async fn lists_tasks_sources_and_metrics() {
         .map(|item| item.id.as_str())
         .collect();
     assert!(ids.contains(&"run_commands"));
+    assert!(ids.contains(&"run_command_errors"));
     assert!(ids.contains(&"api.log"));
     assert!(ids.contains(&"serial.log"));
-    assert!(!ids.contains(&"command_errors"));
+    assert!(ids.contains(&"combined_api_server.log"));
     let metrics = lab
         .list_metrics(ListMetricsRequest { page: page() })
         .await
@@ -74,16 +75,48 @@ async fn lists_tasks_sources_and_metrics() {
             .iter()
             .any(|item| item.id.as_str() == "healthy")
     );
+    assert!(
+        metrics
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "door_open")
+    );
+    assert!(
+        metrics
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "instrument_count")
+    );
+    assert!(
+        tasks
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "get_protocols")
+    );
+    assert!(
+        tasks
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "get_modules")
+    );
+    assert!(
+        tasks
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "get_system_time")
+    );
+    assert!(ids.contains(&"kernel.log"));
+    assert!(ids.contains(&"protocol_analyses"));
 }
 
 #[tokio::test]
 async fn runs_serial_dilution_and_maps_status() {
     let (lab, mock) = lab().await;
     let started = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("run_serial_dilution").unwrap(),
-            input: JsonObject::empty(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("run_serial_dilution").unwrap(),
+            JsonObject::empty(),
+        ))
         .await
         .unwrap();
     assert_eq!(started.state, TaskState::Working);
@@ -103,41 +136,41 @@ async fn runs_serial_dilution_and_maps_status() {
 async fn pauses_resumes_stops_and_deletes() {
     let (lab, mock) = lab().await;
     let started = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("run_serial_dilution").unwrap(),
-            input: JsonObject::empty(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("run_serial_dilution").unwrap(),
+            JsonObject::empty(),
+        ))
         .await
         .unwrap();
     let run_id = started.id.as_str();
     let paused = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("pause_run").unwrap(),
-            input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("pause_run").unwrap(),
+            JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
+        ))
         .await
         .unwrap();
     assert_eq!(paused.state, TaskState::Completed);
     let resumed = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("resume_run").unwrap(),
-            input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("resume_run").unwrap(),
+            JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
+        ))
         .await
         .unwrap();
     assert_eq!(resumed.state, TaskState::Completed);
     let stopped = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("stop_run").unwrap(),
-            input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("stop_run").unwrap(),
+            JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
+        ))
         .await
         .unwrap();
     assert_eq!(stopped.state, TaskState::Completed);
-    lab.start(StartTaskRequest {
-        task_id: TaskId::new("delete_run").unwrap(),
-        input: JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
-    })
+    lab.start(StartTaskRequest::new(
+        TaskId::new("delete_run").unwrap(),
+        JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
+    ))
     .await
     .unwrap();
     let actions = mock.actions().await;
@@ -151,25 +184,25 @@ async fn pauses_resumes_stops_and_deletes() {
 async fn recovery_and_stateless_commands() {
     let (lab, _) = lab().await;
     let started = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("run_serial_dilution").unwrap(),
-            input: JsonObject::empty(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("run_serial_dilution").unwrap(),
+            JsonObject::empty(),
+        ))
         .await
         .unwrap();
     let recovered = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("resume_from_recovery").unwrap(),
-            input: JsonObject::parse(&format!(r#"{{"run_id":"{}"}}"#, started.id)).unwrap(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("resume_from_recovery").unwrap(),
+            JsonObject::parse(&format!(r#"{{"run_id":"{}"}}"#, started.id)).unwrap(),
+        ))
         .await
         .unwrap();
     assert_eq!(recovered.state, TaskState::Completed);
     let command = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("execute_command").unwrap(),
-            input: JsonObject::parse(r#"{"commandType":"home","params":{}}"#).unwrap(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("execute_command").unwrap(),
+            JsonObject::parse(r#"{"commandType":"home","params":{}}"#).unwrap(),
+        ))
         .await
         .unwrap();
     assert_eq!(command.state, TaskState::Completed);
@@ -180,26 +213,26 @@ async fn recovery_and_stateless_commands() {
 async fn rejects_bad_input_and_unknown_ids() {
     let (lab, _) = lab().await;
     let missing = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("missing").unwrap(),
-            input: JsonObject::empty(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("missing").unwrap(),
+            JsonObject::empty(),
+        ))
         .await
         .unwrap_err();
     assert_eq!(missing.code(), "not_found");
     let bad_pause = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("pause_run").unwrap(),
-            input: JsonObject::empty(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("pause_run").unwrap(),
+            JsonObject::empty(),
+        ))
         .await
         .unwrap_err();
     assert_eq!(bad_pause.code(), "invalid");
     let bad_command = lab
-        .start(StartTaskRequest {
-            task_id: TaskId::new("execute_command").unwrap(),
-            input: JsonObject::parse(r#"{"params":[]}"#).unwrap(),
-        })
+        .start(StartTaskRequest::new(
+            TaskId::new("execute_command").unwrap(),
+            JsonObject::parse(r#"{"params":[]}"#).unwrap(),
+        ))
         .await
         .unwrap_err();
     assert_eq!(bad_command.code(), "invalid");
@@ -226,10 +259,10 @@ async fn rejects_bad_input_and_unknown_ids() {
 #[tokio::test]
 async fn queries_logs_and_metrics() {
     let (lab, _) = lab().await;
-    lab.start(StartTaskRequest {
-        task_id: TaskId::new("run_serial_dilution").unwrap(),
-        input: JsonObject::empty(),
-    })
+    lab.start(StartTaskRequest::new(
+        TaskId::new("run_serial_dilution").unwrap(),
+        JsonObject::empty(),
+    ))
     .await
     .unwrap();
     let logs = LogProvider::query(
@@ -313,6 +346,55 @@ async fn queries_logs_and_metrics() {
 }
 
 #[tokio::test]
+async fn queries_gauges_and_extra_logs() {
+    let (lab, _) = lab().await;
+    lab.start(StartTaskRequest::new(
+        TaskId::new("run_serial_dilution").unwrap(),
+        JsonObject::empty(),
+    ))
+    .await
+    .unwrap();
+    let door = MetricProvider::query(
+        &lab,
+        QueryMetricRequest {
+            metric_id: a2a_lab_sdk::MetricId::new("door_open").unwrap(),
+            range: range(),
+            page: page(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!((door.items()[0].value - 0.0).abs() < f64::EPSILON);
+    let errors = LogProvider::query(
+        &lab,
+        QueryLogsRequest {
+            source_id: SourceId::new("run_command_errors").unwrap(),
+            range: range(),
+            page: page(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        errors
+            .items()
+            .iter()
+            .all(|record| record.level == LogLevel::Error)
+    );
+    let kernel = LogProvider::query(
+        &lab,
+        QueryLogsRequest {
+            source_id: SourceId::new("kernel.log").unwrap(),
+            range: range(),
+            page: page(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(kernel.items().is_empty());
+}
+
+#[tokio::test]
 async fn paginates_task_list() {
     let (lab, _) = lab().await;
     let first = lab
@@ -330,4 +412,124 @@ async fn paginates_task_list() {
         .await
         .unwrap();
     assert!(!second.items().is_empty());
+}
+
+#[tokio::test]
+async fn primitive_http_tasks_complete() {
+    let (lab, _) = lab().await;
+    lab.start(StartTaskRequest::new(
+        TaskId::new("run_serial_dilution").unwrap(),
+        JsonObject::empty(),
+    ))
+    .await
+    .unwrap();
+    let protocols = lab
+        .start(StartTaskRequest::new(
+            TaskId::new("get_protocols").unwrap(),
+            JsonObject::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(protocols.state, TaskState::Completed);
+    assert!(
+        protocols
+            .message
+            .as_ref()
+            .is_some_and(|text| text.contains("protocol"))
+    );
+    let door = lab
+        .start(StartTaskRequest::new(
+            TaskId::new("get_door_status").unwrap(),
+            JsonObject::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(door.state, TaskState::Completed);
+    let modules = lab
+        .start(StartTaskRequest::new(
+            TaskId::new("get_modules").unwrap(),
+            JsonObject::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(modules.state, TaskState::Completed);
+    let settings = lab
+        .start(StartTaskRequest::new(
+            TaskId::new("get_settings").unwrap(),
+            JsonObject::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(settings.state, TaskState::Completed);
+}
+
+#[tokio::test]
+async fn inventory_is_advertised() {
+    use a2a_lab_sdk_example::opentrons::{COMPOSITE_TASK_IDS, ENTRIES, Kind};
+
+    let (lab, _) = lab().await;
+    let tasks = lab
+        .list_tasks(ListTasksRequest {
+            page: PageRequest::new(None, 1000).unwrap(),
+        })
+        .await
+        .unwrap();
+    let task_ids: Vec<_> = tasks
+        .items()
+        .iter()
+        .map(|item| item.id.as_str().to_owned())
+        .collect();
+    for id in COMPOSITE_TASK_IDS {
+        assert!(task_ids.iter().any(|item| item == id), "{id}");
+    }
+    for entry in ENTRIES {
+        match entry.kind {
+            Kind::Task => assert!(task_ids.iter().any(|item| item == entry.id), "{}", entry.id),
+            Kind::Skip => assert!(
+                !task_ids.iter().any(|item| item == entry.id),
+                "{}",
+                entry.id
+            ),
+            Kind::Log | Kind::Metric => {}
+        }
+    }
+    let sources = lab
+        .list_sources(ListLogSourcesRequest {
+            page: PageRequest::new(None, 1000).unwrap(),
+        })
+        .await
+        .unwrap();
+    let source_ids: Vec<_> = sources
+        .items()
+        .iter()
+        .map(|item| item.id.as_str().to_owned())
+        .collect();
+    let metrics = lab
+        .list_metrics(ListMetricsRequest {
+            page: PageRequest::new(None, 1000).unwrap(),
+        })
+        .await
+        .unwrap();
+    let metric_ids: Vec<_> = metrics
+        .items()
+        .iter()
+        .map(|item| item.id.as_str().to_owned())
+        .collect();
+    for entry in ENTRIES {
+        match entry.kind {
+            Kind::Log => assert!(
+                source_ids.iter().any(|item| item == entry.id),
+                "{}",
+                entry.id
+            ),
+            Kind::Metric => {
+                assert!(
+                    metric_ids.iter().any(|item| item == entry.id),
+                    "{}",
+                    entry.id
+                );
+            }
+            Kind::Task | Kind::Skip => {}
+        }
+    }
 }
