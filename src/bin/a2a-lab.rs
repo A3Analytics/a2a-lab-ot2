@@ -1,10 +1,12 @@
 //! A2A lab client for the seven lab operations.
 
+use std::str::FromStr;
+
 use a2a_lab_sdk::{
     A2aClient, GetWorkflowStatusRequest, JsonObject, LabResult, ListLogSourcesRequest,
-    ListMetricsRequest, ListWorkflowsRequest, MetricId, PageRequest, QueryLogsRequest,
-    QueryMetricRequest, RunId, RunState, SourceId, StartWorkflowRequest, TimeRange, UtcTimestamp,
-    WorkflowId,
+    ListMetricsRequest, ListWorkflowsRequest, LogLevel, LogRecord, MetricId, PageRequest,
+    QueryLogsRequest, QueryMetricRequest, RunId, RunState, SourceId, StartWorkflowRequest,
+    TimeRange, UtcTimestamp, WorkflowId,
 };
 use clap::{Parser, Subcommand};
 
@@ -28,8 +30,8 @@ enum Command {
     ListLogSources,
     /// `list_metrics`
     ListMetrics,
-    /// `query_logs` (`run_commands` or `command_errors`; omit to query every source)
-    QueryLogs { source_id: Option<String> },
+    /// `query_logs` (omit sources to merge every advertised source into one stream)
+    QueryLogs { source_ids: Vec<String> },
     /// `query_metric` (omit to query every metric)
     QueryMetrics { metric_id: Option<String> },
     /// `start_workflow` (defaults to `run_serial_dilution`)
@@ -66,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::ListWorkflows => list_workflows(&client).await?,
         Command::ListLogSources => list_log_sources(&client).await?,
         Command::ListMetrics => list_metrics(&client).await?,
-        Command::QueryLogs { source_id } => query_logs(&client, source_id.as_deref()).await?,
+        Command::QueryLogs { source_ids } => query_logs(&client, &source_ids).await?,
         Command::QueryMetrics { metric_id } => query_metrics(&client, metric_id.as_deref()).await?,
         Command::StartWorkflow { workflow_id, input } => {
             start(&client, &workflow_id, JsonObject::parse(&input)?).await?;
@@ -185,34 +187,41 @@ async fn action(
 
 async fn query_logs(
     client: &A2aClient,
-    source_id: Option<&str>,
+    source_ids: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("a2a-lab query_logs");
-    let sources = match source_id {
-        Some(id) => vec![id.to_owned()],
-        None => client
+    let sources = if source_ids.is_empty() {
+        client
             .list_log_sources(ListLogSourcesRequest {
-                page: PageRequest::new(None, 10)?,
+                page: PageRequest::new(None, 50)?,
             })
             .await?
             .items()
             .iter()
             .map(|source| source.id.as_str().to_owned())
-            .collect(),
+            .collect()
+    } else {
+        source_ids.to_vec()
     };
     let range = all_time()?;
+    let mut records = Vec::new();
     for id in sources {
         let page = client
             .query_logs(QueryLogsRequest {
                 source_id: SourceId::new(&id)?,
                 range,
-                page: PageRequest::new(None, 20)?,
+                page: PageRequest::new(None, 100)?,
             })
             .await?;
-        println!("{} ({} records)", id, page.items().len());
-        for record in page.items() {
-            println!("  {} {}", record.timestamp, record.message);
-        }
+        records.extend(page.items().iter().cloned());
+    }
+    records.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.source_id.as_str().cmp(right.source_id.as_str()))
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    for record in records {
+        println!("{}", serde_json::to_string(&otel_log_record(&record)?)?);
     }
     Ok(())
 }
@@ -257,6 +266,71 @@ fn all_time() -> Result<TimeRange, Box<dyn std::error::Error>> {
         UtcTimestamp::parse("1970-01-01T00:00:00Z")?,
         UtcTimestamp::parse("2099-01-01T00:00:00Z")?,
     )?)
+}
+
+fn otel_log_record(record: &LogRecord) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let nanos = jiff::Timestamp::from_str(&record.timestamp.to_rfc3339())?.as_nanosecond();
+    let time_unix_nano = u64::try_from(nanos.max(0)).unwrap_or(u64::MAX);
+    let mut attributes = vec![otel_kv(
+        "source_id",
+        serde_json::Value::String(record.source_id.to_string()),
+    )];
+    for (key, value) in record.attributes.as_map() {
+        attributes.push(otel_kv(key, value.clone()));
+    }
+    Ok(serde_json::json!({
+        "timeUnixNano": time_unix_nano.to_string(),
+        "severityNumber": severity_number(record.level),
+        "severityText": severity_text(record.level),
+        "body": { "stringValue": record.message },
+        "attributes": attributes,
+    }))
+}
+
+fn otel_kv(key: &str, value: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "key": key,
+        "value": otel_any(value),
+    })
+}
+
+fn otel_any(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) => serde_json::json!({ "stringValue": text }),
+        serde_json::Value::Bool(flag) => serde_json::json!({ "boolValue": flag }),
+        serde_json::Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                serde_json::json!({ "intValue": integer.to_string() })
+            } else if let Some(unsigned) = number.as_u64() {
+                serde_json::json!({ "intValue": unsigned.to_string() })
+            } else if let Some(float) = number.as_f64() {
+                serde_json::json!({ "doubleValue": float })
+            } else {
+                serde_json::json!({ "stringValue": number.to_string() })
+            }
+        }
+        other => serde_json::json!({ "stringValue": other.to_string() }),
+    }
+}
+
+fn severity_number(level: LogLevel) -> u8 {
+    match level {
+        LogLevel::Trace => 1,
+        LogLevel::Debug => 5,
+        LogLevel::Info => 9,
+        LogLevel::Warn => 13,
+        LogLevel::Error => 17,
+    }
+}
+
+fn severity_text(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Trace => "TRACE",
+        LogLevel::Debug => "DEBUG",
+        LogLevel::Info => "INFO",
+        LogLevel::Warn => "WARN",
+        LogLevel::Error => "ERROR",
+    }
 }
 
 fn run_state(state: RunState) -> &'static str {

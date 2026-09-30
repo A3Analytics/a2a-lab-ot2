@@ -27,14 +27,14 @@ Start the OT-2 simulator and lab agent (leave this terminal running):
 mise run start
 ```
 
-Ctrl-C stops both. In a second terminal, optionally seed a paused serial-dilution run, then walk through the a2a-lab list and query operations:
+Ctrl-C stops both. In a second terminal, optionally seed a paused serial-dilution run, then print logs as one OTEL stream:
 
 ```bash
 mise run ot2-simulation
 mise run a2a-lab-example
 ```
 
-`ot2-simulation` talks to robot-server only. `a2a-lab-example` calls `list_workflows`, `list_log_sources`, `list_metrics`, `query_logs`, and `query_metric`. Pause, resume, stop, and `start_workflow` depend on run state, so they are not part of the walkthrough.
+`ot2-simulation` talks to robot-server only. `a2a-lab-example` calls `query_logs` for every advertised source and prints merged OTLP JSON log records (one per line), not grouped by source.
 
 Call the same operations yourself:
 
@@ -47,8 +47,8 @@ mise run a2a-lab -- get-workflow-status <run_id>
 mise run a2a-lab -- pause <run_id>
 mise run a2a-lab -- resume <run_id>
 mise run a2a-lab -- stop <run_id>
-mise run a2a-lab -- query-logs run_commands
-mise run a2a-lab -- query-logs command_errors
+mise run a2a-lab -- query-logs
+mise run a2a-lab -- query-logs run_commands command_errors
 mise run a2a-lab -- query-metrics run_progress_percent
 mise run a2a-lab -- home
 mise run a2a-lab -- command home '{}'
@@ -80,7 +80,7 @@ mise run test
 mise run quality
 ```
 
-`mise run ot2-simulation` plays the bundled protocol on the live simulator so logs and metrics have data. `mise run a2a-lab-example` runs the list and query operations. `mise run smoke` is a pass/fail check against the same simulator. All three are opt-in and slower than the unit suite.
+`mise run ot2-simulation` plays the bundled protocol on the live simulator so logs and metrics have data. `mise run a2a-lab-example` prints `query_logs` as one OTEL log stream. `mise run smoke` is a pass/fail check against the same simulator. All three are opt-in and slower than the unit suite.
 
 ## Opentrons App
 

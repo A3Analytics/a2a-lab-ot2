@@ -45,7 +45,7 @@ description = "Call a2a-lab log, metric, and workflow operations"
 run = "cargo run --bin a2a-lab --"
 
 [a2a-lab-example]
-description = "Call a2a-lab list and query operations"
+description = "Print advertised log sources as one OTEL log stream"
 run = "bash .mise/scripts/a2a-lab-example.sh"
 
 [ot2-simulation]
