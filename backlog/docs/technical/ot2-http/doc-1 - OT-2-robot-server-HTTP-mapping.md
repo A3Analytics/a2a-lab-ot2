@@ -27,6 +27,8 @@ Composite tasks (`run_serial_dilution`, pause/resume/stop, recovery, `execute_co
 
 Some GETs are both a gauge and a task (`/pipettes`, `/modules`, `/robot/door/status`, `/robot/lights`) so callers can read a number or the object. `GET /health` is metrics only.
 
+`--readonly` on `a2a-lab-ot2` advertises and starts only GET-backed tasks. Composite tasks and non-GET HTTP tasks return `not_found`. Logs, metrics, list operations, and task status are unchanged. `start_task` stays an A2A skill and MCP tool because object-valued GETs use it.
+
 ## Start-task input
 
 Path parameters use OpenAPI names (`runId`) or snake_case (`run_id`). A trailing `Id` also accepts `id`.

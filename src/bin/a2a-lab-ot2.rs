@@ -24,6 +24,9 @@ struct Cli {
     /// Protocol file for `start-task run_serial_dilution`
     #[arg(long, env = "OPENTRONS_PROTOCOL")]
     protocol: Option<PathBuf>,
+    /// Advertise and execute only GET-backed tasks
+    #[arg(long, global = true)]
+    readonly: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -137,7 +140,8 @@ fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
     Ok(OpentronsLab::new(
         &cli.opentrons_url,
         cli.protocol.clone().unwrap_or_else(default_protocol),
-    )?)
+    )?
+    .with_readonly(cli.readonly))
 }
 
 async fn serve(lab: OpentronsLab, opentrons_url: &str) -> Result<(), Box<dyn std::error::Error>> {

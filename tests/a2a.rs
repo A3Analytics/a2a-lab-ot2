@@ -114,3 +114,68 @@ async fn a2a_run_pause_resume_and_status() {
         .unwrap();
     assert!((metrics.items()[0].value - 1.0).abs() < f64::EPSILON);
 }
+
+#[tokio::test]
+async fn a2a_readonly_keeps_reads_and_rejects_writes() {
+    let mock = Mock::new();
+    let (base, _) = mock.bind().await;
+    let lab = OpentronsLab::new(&base, protocol())
+        .unwrap()
+        .with_readonly(true);
+    let service = LabService::new(lab.clone(), lab.clone(), lab).share();
+    let client = A2aClient::new(&serve(Arc::clone(&service)).await).unwrap();
+
+    let tasks = client
+        .list_tasks(ListTasksRequest {
+            page: PageRequest::new(None, 1000).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        !tasks
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "run_serial_dilution")
+    );
+    assert!(
+        tasks
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "get_protocols")
+    );
+
+    let started = client
+        .start_task(StartTaskRequest::new(
+            TaskId::new("get_protocols").unwrap(),
+            JsonObject::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(started.state, TaskState::Completed);
+
+    let denied = client
+        .start_task(
+            StartTaskRequest::new(
+                TaskId::new("run_serial_dilution").unwrap(),
+                JsonObject::empty(),
+            )
+            .immediate(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), "not_found");
+
+    let metrics = client
+        .query_metric(a2a_lab_sdk::QueryMetricRequest {
+            metric_id: a2a_lab_sdk::MetricId::new("healthy").unwrap(),
+            range: a2a_lab_sdk::TimeRange::new(
+                a2a_lab_sdk::UtcTimestamp::parse("1970-01-01T00:00:00Z").unwrap(),
+                a2a_lab_sdk::UtcTimestamp::parse("2099-01-01T00:00:00Z").unwrap(),
+            )
+            .unwrap(),
+            page: PageRequest::new(None, 10).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!((metrics.items()[0].value - 1.0).abs() < f64::EPSILON);
+}

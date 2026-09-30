@@ -1289,6 +1289,12 @@ pub fn task_entry(id: &str) -> Option<&'static Entry> {
         .find(|entry| entry.kind == Kind::Task && entry.id == id)
 }
 
+/// True when the row is a GET-backed task.
+#[must_use]
+pub fn is_read(entry: &Entry) -> bool {
+    entry.kind == Kind::Task && entry.method == "GET"
+}
+
 /// True when this robot-server path is inventoried (including Flex skips).
 #[must_use]
 pub fn covers(method: &str, path: &str) -> bool {

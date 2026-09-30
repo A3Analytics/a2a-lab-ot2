@@ -60,6 +60,9 @@ mise run a2a-lab-ot2 -- query-logs run_commands api.log
 mise run a2a-lab-ot2 -- query-metrics run_progress_percent
 mise run a2a-lab-ot2 -- home
 mise run a2a-lab-ot2 -- command home '{}'
+mise run start -- --readonly
+mise run a2a-lab-ot2 -- --readonly list-tasks
+mise run a2a-lab-ot2 -- --readonly start-task get_protocols
 ```
 
 `mise run start` is `a2a-lab-ot2` (default: A2A and MCP). `mise run ot2-simulator-health` checks `GET /health` on the simulator. `mise run ot2-simulator-clean` removes the simulator container and image.
@@ -72,7 +75,7 @@ mise run a2a-lab-ot2 -- command home '{}'
 | A2A                    | `http://127.0.0.1:31000` (`/.well-known/agent-card.json`, `POST /message:send`) |
 | MCP                    | `http://127.0.0.1:31001/mcp`                                                    |
 
-`list-tasks` advertises composite helpers (`run_serial_dilution`, pause/resume/stop, recovery, `execute_command`) plus primitive robot-server HTTP operations from the pinned OT-2 v10.0.0 OpenAPI. Flex-only routes (estop, deck configuration, subsystems, live-stream settings) are omitted. `list-log-sources` includes run/analysis command streams and every `GET /logs/{identifier}` journal. `list-metrics` includes health, run progress, door, lights, pipette/instrument/module counts, and disk space. Path parameters and JSON bodies go in `start-task --input`.
+`list-tasks` advertises composite helpers (`run_serial_dilution`, pause/resume/stop, recovery, `execute_command`) plus primitive robot-server HTTP operations from the pinned OT-2 v10.0.0 OpenAPI. Flex-only routes (estop, deck configuration, subsystems, live-stream settings) are omitted. `--readonly` keeps logs, metrics, and GET-backed tasks and hides composites and other mutations. `list-log-sources` includes run/analysis command streams and every `GET /logs/{identifier}` journal. `list-metrics` includes health, run progress, door, lights, pipette/instrument/module counts, and disk space. Path parameters and JSON bodies go in `start-task --input`.
 
 ## Tests
 

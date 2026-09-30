@@ -32,6 +32,17 @@ async fn lab() -> (OpentronsLab, Mock) {
     (OpentronsLab::new(&base, protocol()).unwrap(), mock)
 }
 
+async fn readonly_lab() -> (OpentronsLab, Mock) {
+    let mock = Mock::new();
+    let (base, _) = mock.bind().await;
+    (
+        OpentronsLab::new(&base, protocol())
+            .unwrap()
+            .with_readonly(true),
+        mock,
+    )
+}
+
 #[tokio::test]
 async fn lists_tasks_sources_and_metrics() {
     let (lab, _) = lab().await;
@@ -532,4 +543,97 @@ async fn inventory_is_advertised() {
             Kind::Task | Kind::Skip => {}
         }
     }
+}
+
+#[tokio::test]
+async fn readonly_lists_get_tasks_and_omits_writes() {
+    use a2a_lab_sdk_example::opentrons::{COMPOSITE_TASK_IDS, ENTRIES, Kind, is_read};
+
+    let (lab, _) = readonly_lab().await;
+    let tasks = lab
+        .list_tasks(ListTasksRequest {
+            page: PageRequest::new(None, 1000).unwrap(),
+        })
+        .await
+        .unwrap();
+    let task_ids: Vec<_> = tasks
+        .items()
+        .iter()
+        .map(|item| item.id.as_str().to_owned())
+        .collect();
+    for id in COMPOSITE_TASK_IDS {
+        assert!(!task_ids.iter().any(|item| item == id), "{id}");
+    }
+    for entry in ENTRIES {
+        if is_read(entry) {
+            assert!(task_ids.iter().any(|item| item == entry.id), "{}", entry.id);
+        } else if entry.kind == Kind::Task {
+            assert!(
+                !task_ids.iter().any(|item| item == entry.id),
+                "{}",
+                entry.id
+            );
+        }
+    }
+    let sources = lab
+        .list_sources(ListLogSourcesRequest {
+            page: PageRequest::new(None, 1000).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        sources
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "api.log")
+    );
+    let metrics = lab
+        .list_metrics(ListMetricsRequest {
+            page: PageRequest::new(None, 1000).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        metrics
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "healthy")
+    );
+}
+
+#[tokio::test]
+async fn readonly_starts_get_tasks_and_rejects_writes() {
+    let (lab, mock) = readonly_lab().await;
+    let protocols = lab
+        .start(StartTaskRequest::new(
+            TaskId::new("get_protocols").unwrap(),
+            JsonObject::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(protocols.state, TaskState::Completed);
+    let door = lab
+        .start(StartTaskRequest::new(
+            TaskId::new("get_door_status").unwrap(),
+            JsonObject::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(door.state, TaskState::Completed);
+    for id in [
+        "run_serial_dilution",
+        "pause_run",
+        "execute_command",
+        "post_runs",
+    ] {
+        let error = lab
+            .start(StartTaskRequest::new(
+                TaskId::new(id).unwrap(),
+                JsonObject::empty(),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "not_found", "{id}");
+    }
+    assert!(mock.actions().await.is_empty());
 }

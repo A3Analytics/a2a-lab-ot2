@@ -6,5 +6,7 @@ mod model;
 mod provider;
 
 pub use client::OpentronsClient;
-pub use inventory::{COMPOSITE_TASK_IDS, ENTRIES, Entry, Kind, OPENAPI_OPERATIONS, covers};
+pub use inventory::{
+    COMPOSITE_TASK_IDS, ENTRIES, Entry, Kind, OPENAPI_OPERATIONS, covers, is_read,
+};
 pub use provider::OpentronsLab;

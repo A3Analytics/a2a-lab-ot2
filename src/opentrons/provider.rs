@@ -35,6 +35,7 @@ pub struct OpentronsLab {
     client: OpentronsClient,
     protocol_path: PathBuf,
     local: Arc<Mutex<BTreeMap<String, TaskRun>>>,
+    readonly: bool,
 }
 
 impl OpentronsLab {
@@ -44,7 +45,15 @@ impl OpentronsLab {
             client: OpentronsClient::new(base_url)?,
             protocol_path: protocol_path.into(),
             local: Arc::new(Mutex::new(BTreeMap::new())),
+            readonly: false,
         })
+    }
+
+    /// Advertises and starts only GET-backed tasks.
+    #[must_use]
+    pub fn with_readonly(mut self, readonly: bool) -> Self {
+        self.readonly = readonly;
+        self
     }
 
     /// Robot-server client used by this adapter.
@@ -74,10 +83,13 @@ impl TaskProvider for OpentronsLab {
         &self,
         request: ListTasksRequest,
     ) -> Result<Page<TaskDefinition>, SdkError> {
-        slice_page(&task_definitions(), &request.page)
+        slice_page(&task_definitions(self.readonly), &request.page)
     }
 
     async fn start(&self, request: StartTaskRequest) -> Result<TaskRun, SdkError> {
+        if self.readonly && !allowed_in_readonly(request.task_id.as_str()) {
+            return Err(SdkError::not_found("task", request.task_id.to_string()));
+        }
         match request.task_id.as_str() {
             RUN_TASK => start_dilution(self, request.input).await,
             PAUSE_TASK => control(self, request, "pause", "pause").await,
@@ -154,11 +166,19 @@ impl MetricProvider for OpentronsLab {
     }
 }
 
-fn task_definitions() -> Vec<TaskDefinition> {
-    let mut items = definitions();
-    items.extend(inventory::of_kind(Kind::Task).map(entry_task));
+fn task_definitions(readonly: bool) -> Vec<TaskDefinition> {
+    let mut items = if readonly { Vec::new() } else { definitions() };
+    items.extend(
+        inventory::of_kind(Kind::Task)
+            .filter(|entry| !readonly || inventory::is_read(entry))
+            .map(entry_task),
+    );
     items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
     items
+}
+
+fn allowed_in_readonly(task_id: &str) -> bool {
+    inventory::task_entry(task_id).is_some_and(inventory::is_read)
 }
 
 fn entry_task(entry: &Entry) -> TaskDefinition {
