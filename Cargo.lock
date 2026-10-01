@@ -29,6 +29,7 @@ dependencies = [
 [[package]]
 name = "a2a-lab-sdk"
 version = "0.1.0"
+source = "git+https://github.com/A3Analytics/a2a-lab-sdk-rs#42e17e172a07f8c3cce6ea6ae3e800c1021c9a48"
 dependencies = [
  "a2a-client-lf",
  "a2a-lf",
