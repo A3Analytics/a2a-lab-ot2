@@ -46,7 +46,7 @@ Query string:
 
 Multipart uploads (`post_protocols`, `post_data_files`, `post_wifi_keys`) take `path` (and optional `filename`). `post_protocols` defaults to the bundled serial-dilution file.
 
-`TaskRun.message` is JSON text for primitive reads/writes. Auth-scoped routes (for example `PUT /system/time`) stay advertised; robot-server errors surface as `SdkError`.
+`TaskRun.message` is JSON text for primitive reads/writes. Auth-scoped routes (for example `PUT /system/time`) stay advertised; robot-server errors surface as `A2aLabError`.
 
 ## Coverage
 

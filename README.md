@@ -1,6 +1,6 @@
-# a2a-lab-sdk-example
+# a2a-lab-ot2
 
-Example lab agent that wraps a persistent Opentrons OT-2 `robot-server` simulator with [`a2a-lab-sdk`](https://github.com/A3Analytics/a2a-lab-sdk-rs). The `a2a-lab-ot2` executable calls the seven lab operations against the OT-2 HTTP API (`127.0.0.1:31950`). With no subcommand it also serves those operations over A2A 1.0 HTTP+JSON (`127.0.0.1:31000`) and MCP (`127.0.0.1:31001/mcp`).
+Example lab agent that wraps a persistent Opentrons OT-2 `robot-server` simulator with [`a2a-lab-dev-kit`](https://github.com/A3Analytics/a2a-lab-dev-kit-rs). The `a2a-lab-ot2` executable calls the seven lab operations against the OT-2 HTTP API (`127.0.0.1:31950`). With no subcommand it also serves those operations over A2A 1.0 HTTP+JSON (`127.0.0.1:31000`) and MCP (`127.0.0.1:31001/mcp`).
 
 This is software simulation, not a physical robot. The simulator can also be discovered by the Opentrons App as a development robot at `127.0.0.1`.
 

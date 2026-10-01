@@ -3,13 +3,13 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use a2a_lab_sdk::{
+use a2a_lab_dev_kit::{
     A2aServer, GetTaskStatusRequest, JsonObject, LabService, ListLogSourcesRequest,
     ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider, LogRecord, McpLab, McpServer,
     MetricId, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
     StartTaskRequest, TaskId, TaskProvider, TaskState, TimeRange, UtcTimestamp, start_run,
 };
-use a2a_lab_sdk_example::{OpentronsLab, default_protocol};
+use a2a_lab_ot2::{OpentronsLab, default_protocol};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]

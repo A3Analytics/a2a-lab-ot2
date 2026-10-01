@@ -1,4 +1,4 @@
-use a2a_lab_sdk_example::opentrons::{
+use a2a_lab_ot2::opentrons::{
     COMPOSITE_TASK_IDS, ENTRIES, Kind, OPENAPI_OPERATIONS, covers, is_read,
 };
 

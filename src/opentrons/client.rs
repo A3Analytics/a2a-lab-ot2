@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use a2a_lab_sdk::SdkError;
+use a2a_lab_dev_kit::A2aLabError;
 use reqwest::{Method, StatusCode, Url};
 use serde_json::{Value, json};
 
@@ -20,8 +20,9 @@ pub struct OpentronsClient {
 
 impl OpentronsClient {
     /// Creates a client for `base`, such as `http://127.0.0.1:31950`.
-    pub fn new(base: &str) -> Result<Self, SdkError> {
-        let base = Url::parse(base).map_err(|error| SdkError::invalid("url", error.to_string()))?;
+    pub fn new(base: &str) -> Result<Self, A2aLabError> {
+        let base =
+            Url::parse(base).map_err(|error| A2aLabError::invalid("url", error.to_string()))?;
         let http = reqwest::Client::builder()
             .pool_max_idle_per_host(0)
             .timeout(Duration::from_secs(30))
@@ -31,7 +32,7 @@ impl OpentronsClient {
     }
 
     /// `GET /health`.
-    pub async fn health(&self) -> Result<Health, SdkError> {
+    pub async fn health(&self) -> Result<Health, A2aLabError> {
         self.send_json(Method::GET, "health", None).await
     }
 
@@ -40,7 +41,7 @@ impl OpentronsClient {
         &self,
         filename: &str,
         bytes: Vec<u8>,
-    ) -> Result<Protocol, SdkError> {
+    ) -> Result<Protocol, A2aLabError> {
         self.upload_bytes("protocols", "files", filename, bytes, "text/x-python")
             .await
     }
@@ -53,14 +54,14 @@ impl OpentronsClient {
         filename: &str,
         bytes: Vec<u8>,
         mime: &str,
-    ) -> Result<T, SdkError>
+    ) -> Result<T, A2aLabError>
     where
         T: serde::de::DeserializeOwned,
     {
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(filename.to_owned())
             .mime_str(mime)
-            .map_err(|error| SdkError::invalid("file", error.to_string()))?;
+            .map_err(|error| A2aLabError::invalid("file", error.to_string()))?;
         let form = reqwest::multipart::Form::new().part(field.to_owned(), part);
         let response = self
             .http
@@ -74,13 +75,13 @@ impl OpentronsClient {
     }
 
     /// `GET /protocols/{id}`.
-    pub async fn protocol(&self, protocol_id: &str) -> Result<Protocol, SdkError> {
+    pub async fn protocol(&self, protocol_id: &str) -> Result<Protocol, A2aLabError> {
         self.send_json(Method::GET, &format!("protocols/{protocol_id}"), None)
             .await
     }
 
     /// Polls until the latest analysis is no longer pending.
-    pub async fn wait_for_analysis(&self, protocol_id: &str) -> Result<Protocol, SdkError> {
+    pub async fn wait_for_analysis(&self, protocol_id: &str) -> Result<Protocol, A2aLabError> {
         for _ in 0..60 {
             let protocol = self.protocol(protocol_id).await?;
             if !protocol.analysis_summaries.is_empty()
@@ -90,13 +91,13 @@ impl OpentronsClient {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        Err(SdkError::unavailable(
+        Err(A2aLabError::unavailable(
             "protocol analysis did not finish in time",
         ))
     }
 
     /// `POST /runs`. Dismisses any current run first; robot-server allows only one.
-    pub async fn create_run(&self, protocol_id: &str) -> Result<Run, SdkError> {
+    pub async fn create_run(&self, protocol_id: &str) -> Result<Run, A2aLabError> {
         self.release_current().await?;
         self.send_json(
             Method::POST,
@@ -107,19 +108,19 @@ impl OpentronsClient {
     }
 
     /// `GET /runs/{id}`.
-    pub async fn run(&self, run_id: &str) -> Result<Run, SdkError> {
+    pub async fn run(&self, run_id: &str) -> Result<Run, A2aLabError> {
         self.send_json(Method::GET, &format!("runs/{run_id}"), None)
             .await
     }
 
     /// `GET /runs`.
-    pub async fn runs(&self) -> Result<Vec<Run>, SdkError> {
+    pub async fn runs(&self) -> Result<Vec<Run>, A2aLabError> {
         self.send_json(Method::GET, "runs?pageLength=50", None)
             .await
     }
 
     /// `DELETE /runs/{id}`.
-    pub async fn delete_run(&self, run_id: &str) -> Result<(), SdkError> {
+    pub async fn delete_run(&self, run_id: &str) -> Result<(), A2aLabError> {
         let response = self
             .send_raw(
                 self.http
@@ -138,7 +139,7 @@ impl OpentronsClient {
     }
 
     /// `POST /runs/{id}/actions`.
-    pub async fn run_action(&self, run_id: &str, action_type: &str) -> Result<(), SdkError> {
+    pub async fn run_action(&self, run_id: &str, action_type: &str) -> Result<(), A2aLabError> {
         let _: Value = self
             .send_json(
                 Method::POST,
@@ -150,7 +151,7 @@ impl OpentronsClient {
     }
 
     /// `GET /runs/{id}/commands`.
-    pub async fn run_commands(&self, run_id: &str) -> Result<Vec<Command>, SdkError> {
+    pub async fn run_commands(&self, run_id: &str) -> Result<Vec<Command>, A2aLabError> {
         self.send_json(
             Method::GET,
             &format!("runs/{run_id}/commands?pageLength=100"),
@@ -160,7 +161,7 @@ impl OpentronsClient {
     }
 
     /// `GET /logs/{identifier}?format=json`. Missing or empty journals yield an empty string.
-    pub async fn troubleshooting_log(&self, identifier: &str) -> Result<String, SdkError> {
+    pub async fn troubleshooting_log(&self, identifier: &str) -> Result<String, A2aLabError> {
         let Ok(response) = self
             .send_raw(
                 self.http
@@ -182,7 +183,7 @@ impl OpentronsClient {
         &self,
         command_type: &str,
         params: Value,
-    ) -> Result<Command, SdkError> {
+    ) -> Result<Command, A2aLabError> {
         self.send_json(
             Method::POST,
             "commands?waitUntilComplete=true",
@@ -202,7 +203,7 @@ impl OpentronsClient {
         method: &str,
         path: &str,
         body: Option<Value>,
-    ) -> Result<Value, SdkError> {
+    ) -> Result<Value, A2aLabError> {
         let method = parse_method(method)?;
         let mut request = self
             .http
@@ -226,7 +227,7 @@ impl OpentronsClient {
         serde_json::from_str(&text).or(Ok(Value::String(text)))
     }
 
-    async fn release_current(&self) -> Result<(), SdkError> {
+    async fn release_current(&self) -> Result<(), A2aLabError> {
         for run in self.runs().await? {
             if !run.current {
                 continue;
@@ -257,7 +258,7 @@ impl OpentronsClient {
         method: Method,
         path: &str,
         body: Option<Value>,
-    ) -> Result<T, SdkError>
+    ) -> Result<T, A2aLabError>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -275,7 +276,7 @@ impl OpentronsClient {
     async fn send_raw(
         &self,
         request: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, SdkError> {
+    ) -> Result<reqwest::Response, A2aLabError> {
         let retry = request.try_clone();
         match request.send().await {
             Ok(response) => Ok(response),
@@ -286,7 +287,7 @@ impl OpentronsClient {
         }
     }
 
-    async fn read_data<T>(&self, response: reqwest::Response) -> Result<T, SdkError>
+    async fn read_data<T>(&self, response: reqwest::Response) -> Result<T, A2aLabError>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -298,19 +299,19 @@ impl OpentronsClient {
         if let Ok(envelope) = serde_json::from_str::<Envelope<T>>(&body) {
             return Ok(envelope.data);
         }
-        serde_json::from_str(&body).map_err(|error| SdkError::protocol(error.to_string()))
+        serde_json::from_str(&body).map_err(|error| A2aLabError::protocol(error.to_string()))
     }
 
-    fn url(&self, path: &str) -> Result<Url, SdkError> {
+    fn url(&self, path: &str) -> Result<Url, A2aLabError> {
         let mut base = self.base.as_str().trim_end_matches('/').to_owned();
         base.push('/');
         base.push_str(path.trim_start_matches('/'));
-        Url::parse(&base).map_err(|error| SdkError::invalid("url", error.to_string()))
+        Url::parse(&base).map_err(|error| A2aLabError::invalid("url", error.to_string()))
     }
 }
 
-fn transport(error: &reqwest::Error) -> SdkError {
-    SdkError::unavailable(format!(
+fn transport(error: &reqwest::Error) -> A2aLabError {
+    A2aLabError::unavailable(format!(
         "robot-server is unreachable ({error}); keep `mise run ot2-simulator` running"
     ))
 }
@@ -319,25 +320,25 @@ fn analysis_ready(summary: &AnalysisSummary) -> bool {
     summary.status != "pending"
 }
 
-fn parse_method(method: &str) -> Result<Method, SdkError> {
+fn parse_method(method: &str) -> Result<Method, A2aLabError> {
     match method {
         "GET" => Ok(Method::GET),
         "POST" => Ok(Method::POST),
         "PUT" => Ok(Method::PUT),
         "PATCH" => Ok(Method::PATCH),
         "DELETE" => Ok(Method::DELETE),
-        _ => Err(SdkError::invalid("method", method.to_owned())),
+        _ => Err(A2aLabError::invalid("method", method.to_owned())),
     }
 }
 
-fn status_error(status: StatusCode, body: &str) -> SdkError {
+fn status_error(status: StatusCode, body: &str) -> A2aLabError {
     let detail = error_detail(body);
     if status == StatusCode::NOT_FOUND {
-        SdkError::not_found("resource", detail)
+        A2aLabError::not_found("resource", detail)
     } else if status.is_client_error() {
-        SdkError::invalid("request", detail)
+        A2aLabError::invalid("request", detail)
     } else {
-        SdkError::unavailable(detail)
+        A2aLabError::unavailable(detail)
     }
 }
 

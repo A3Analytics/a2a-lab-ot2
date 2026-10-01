@@ -1,5 +1,5 @@
 [package]
-name = "a2a-lab-sdk-example"
+name = "a2a-lab-ot2"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
@@ -15,7 +15,7 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [dependencies]
-a2a-lab-sdk = { git = "https://github.com/A3Analytics/a2a-lab-sdk-rs", default-features = false }
+a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", default-features = false }
 clap = { version = "4.5.53", features = ["derive", "env"] }
 jiff = { version = "0.2.37", features = ["serde"] }
 reqwest = { version = "0.13.5", features = ["json", "multipart"] }

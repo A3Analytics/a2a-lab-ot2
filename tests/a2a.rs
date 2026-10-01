@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use a2a_lab_sdk::{
+use a2a_lab_dev_kit::{
     A2aClient, A2aServer, GetTaskStatusRequest, JsonObject, LabApi, LabResult, LabService,
     ListTasksRequest, PageRequest, StartTaskRequest, TaskId, TaskState, bind_local,
 };
-use a2a_lab_sdk_example::OpentronsLab;
+use a2a_lab_ot2::OpentronsLab;
 use support::Mock;
 
 fn protocol() -> PathBuf {
@@ -87,11 +87,11 @@ async fn a2a_run_pause_resume_and_status() {
     assert_eq!(status.state, TaskState::Working);
 
     let logs = client
-        .query_logs(a2a_lab_sdk::QueryLogsRequest {
-            source_id: a2a_lab_sdk::SourceId::new("run_commands").unwrap(),
-            range: a2a_lab_sdk::TimeRange::new(
-                a2a_lab_sdk::UtcTimestamp::parse("1970-01-01T00:00:00Z").unwrap(),
-                a2a_lab_sdk::UtcTimestamp::parse("2099-01-01T00:00:00Z").unwrap(),
+        .query_logs(a2a_lab_dev_kit::QueryLogsRequest {
+            source_id: a2a_lab_dev_kit::SourceId::new("run_commands").unwrap(),
+            range: a2a_lab_dev_kit::TimeRange::new(
+                a2a_lab_dev_kit::UtcTimestamp::parse("1970-01-01T00:00:00Z").unwrap(),
+                a2a_lab_dev_kit::UtcTimestamp::parse("2099-01-01T00:00:00Z").unwrap(),
             )
             .unwrap(),
             page: PageRequest::new(None, 20).unwrap(),
@@ -101,11 +101,11 @@ async fn a2a_run_pause_resume_and_status() {
     assert!(!logs.items().is_empty());
 
     let metrics = client
-        .query_metric(a2a_lab_sdk::QueryMetricRequest {
-            metric_id: a2a_lab_sdk::MetricId::new("healthy").unwrap(),
-            range: a2a_lab_sdk::TimeRange::new(
-                a2a_lab_sdk::UtcTimestamp::parse("1970-01-01T00:00:00Z").unwrap(),
-                a2a_lab_sdk::UtcTimestamp::parse("2099-01-01T00:00:00Z").unwrap(),
+        .query_metric(a2a_lab_dev_kit::QueryMetricRequest {
+            metric_id: a2a_lab_dev_kit::MetricId::new("healthy").unwrap(),
+            range: a2a_lab_dev_kit::TimeRange::new(
+                a2a_lab_dev_kit::UtcTimestamp::parse("1970-01-01T00:00:00Z").unwrap(),
+                a2a_lab_dev_kit::UtcTimestamp::parse("2099-01-01T00:00:00Z").unwrap(),
             )
             .unwrap(),
             page: PageRequest::new(None, 10).unwrap(),
@@ -166,11 +166,11 @@ async fn a2a_readonly_keeps_reads_and_rejects_writes() {
     assert_eq!(denied.code(), "not_found");
 
     let metrics = client
-        .query_metric(a2a_lab_sdk::QueryMetricRequest {
-            metric_id: a2a_lab_sdk::MetricId::new("healthy").unwrap(),
-            range: a2a_lab_sdk::TimeRange::new(
-                a2a_lab_sdk::UtcTimestamp::parse("1970-01-01T00:00:00Z").unwrap(),
-                a2a_lab_sdk::UtcTimestamp::parse("2099-01-01T00:00:00Z").unwrap(),
+        .query_metric(a2a_lab_dev_kit::QueryMetricRequest {
+            metric_id: a2a_lab_dev_kit::MetricId::new("healthy").unwrap(),
+            range: a2a_lab_dev_kit::TimeRange::new(
+                a2a_lab_dev_kit::UtcTimestamp::parse("1970-01-01T00:00:00Z").unwrap(),
+                a2a_lab_dev_kit::UtcTimestamp::parse("2099-01-01T00:00:00Z").unwrap(),
             )
             .unwrap(),
             page: PageRequest::new(None, 10).unwrap(),

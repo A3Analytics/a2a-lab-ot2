@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use a2a_lab_sdk::{
-    GetTaskStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest,
-    LogLevel, LogProvider, LogRecord, LogSource, MetricDescriptor, MetricId, MetricPoint,
-    MetricProvider, Page, QueryLogsRequest, QueryMetricRequest, RunId, SdkError, SourceId,
+use a2a_lab_dev_kit::{
+    A2aLabError, GetTaskStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest,
+    ListTasksRequest, LogLevel, LogProvider, LogRecord, LogSource, MetricDescriptor, MetricId,
+    MetricPoint, MetricProvider, Page, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
     StartTaskRequest, TaskDefinition, TaskId, TaskProvider, TaskRun, TaskState, UtcTimestamp,
 };
 use serde_json::{Value, json};
@@ -40,7 +40,7 @@ pub struct OpentronsLab {
 
 impl OpentronsLab {
     /// Creates an adapter for a running robot-server.
-    pub fn new(base_url: &str, protocol_path: impl Into<PathBuf>) -> Result<Self, SdkError> {
+    pub fn new(base_url: &str, protocol_path: impl Into<PathBuf>) -> Result<Self, A2aLabError> {
         Ok(Self {
             client: OpentronsClient::new(base_url)?,
             protocol_path: protocol_path.into(),
@@ -82,13 +82,13 @@ impl TaskProvider for OpentronsLab {
     async fn list_tasks(
         &self,
         request: ListTasksRequest,
-    ) -> Result<Page<TaskDefinition>, SdkError> {
+    ) -> Result<Page<TaskDefinition>, A2aLabError> {
         slice_page(&task_definitions(self.readonly), &request.page)
     }
 
-    async fn start(&self, request: StartTaskRequest) -> Result<TaskRun, SdkError> {
+    async fn start(&self, request: StartTaskRequest) -> Result<TaskRun, A2aLabError> {
         if self.readonly && !allowed_in_readonly(request.task_id.as_str()) {
-            return Err(SdkError::not_found("task", request.task_id.to_string()));
+            return Err(A2aLabError::not_found("task", request.task_id.to_string()));
         }
         match request.task_id.as_str() {
             RUN_TASK => start_dilution(self, request.input).await,
@@ -109,12 +109,12 @@ impl TaskProvider for OpentronsLab {
             COMMAND_TASK => execute_command(self, request.input).await,
             id => match inventory::task_entry(id) {
                 Some(entry) => http_task(self, entry, request).await,
-                None => Err(SdkError::not_found("task", request.task_id.to_string())),
+                None => Err(A2aLabError::not_found("task", request.task_id.to_string())),
             },
         }
     }
 
-    async fn status(&self, request: GetTaskStatusRequest) -> Result<TaskRun, SdkError> {
+    async fn status(&self, request: GetTaskStatusRequest) -> Result<TaskRun, A2aLabError> {
         if let Some(run) = self.local.lock().await.get(request.id.as_str()).cloned() {
             return Ok(run);
         }
@@ -128,11 +128,11 @@ impl LogProvider for OpentronsLab {
     async fn list_sources(
         &self,
         request: ListLogSourcesRequest,
-    ) -> Result<Page<LogSource>, SdkError> {
+    ) -> Result<Page<LogSource>, A2aLabError> {
         slice_page(&catalog_sources(), &request.page)
     }
 
-    async fn query(&self, request: QueryLogsRequest) -> Result<Page<LogRecord>, SdkError> {
+    async fn query(&self, request: QueryLogsRequest) -> Result<Page<LogRecord>, A2aLabError> {
         request.range.check()?;
         let source = request.source_id.as_str();
         let mut records = collect_logs(&self.client, source).await?;
@@ -151,11 +151,11 @@ impl MetricProvider for OpentronsLab {
     async fn list_metrics(
         &self,
         request: ListMetricsRequest,
-    ) -> Result<Page<MetricDescriptor>, SdkError> {
+    ) -> Result<Page<MetricDescriptor>, A2aLabError> {
         slice_page(&catalog_metrics(), &request.page)
     }
 
-    async fn query(&self, request: QueryMetricRequest) -> Result<Page<MetricPoint>, SdkError> {
+    async fn query(&self, request: QueryMetricRequest) -> Result<Page<MetricPoint>, A2aLabError> {
         request.range.check()?;
         let timestamp = now()?;
         if !request.range.contains(timestamp) {
@@ -272,15 +272,15 @@ fn definitions() -> Vec<TaskDefinition> {
     items
 }
 
-async fn start_dilution(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRun, SdkError> {
+async fn start_dilution(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRun, A2aLabError> {
     let bytes = tokio::fs::read(&lab.protocol_path)
         .await
-        .map_err(|error| SdkError::unavailable(error.to_string()))?;
+        .map_err(|error| A2aLabError::unavailable(error.to_string()))?;
     let filename = lab
         .protocol_path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| SdkError::invalid("protocol", "path must have a file name"))?;
+        .ok_or_else(|| A2aLabError::invalid("protocol", "path must have a file name"))?;
     let protocol = lab.client.upload_protocol(filename, bytes).await?;
     lab.client.wait_for_analysis(&protocol.id).await?;
     let run = lab.client.create_run(&protocol.id).await?;
@@ -294,7 +294,7 @@ async fn control(
     request: StartTaskRequest,
     action: &str,
     prefix: &str,
-) -> Result<TaskRun, SdkError> {
+) -> Result<TaskRun, A2aLabError> {
     let run_id = string_field(request.input.as_map(), "run_id")?;
     lab.client.run_action(run_id, action).await?;
     Ok(lab
@@ -307,7 +307,7 @@ async fn control(
         .await)
 }
 
-async fn delete_run(lab: &OpentronsLab, request: StartTaskRequest) -> Result<TaskRun, SdkError> {
+async fn delete_run(lab: &OpentronsLab, request: StartTaskRequest) -> Result<TaskRun, A2aLabError> {
     let run_id = string_field(request.input.as_map(), "run_id")?;
     lab.client.delete_run(run_id).await?;
     Ok(lab
@@ -324,7 +324,7 @@ async fn http_task(
     lab: &OpentronsLab,
     entry: &Entry,
     request: StartTaskRequest,
-) -> Result<TaskRun, SdkError> {
+) -> Result<TaskRun, A2aLabError> {
     match (entry.method, entry.path) {
         ("POST", "/protocols") => {
             upload_file_task(lab, entry, request, "files", "text/x-python").await
@@ -351,17 +351,17 @@ async fn upload_file_task(
     request: StartTaskRequest,
     field: &str,
     mime: &str,
-) -> Result<TaskRun, SdkError> {
+) -> Result<TaskRun, A2aLabError> {
     let map = request.input.as_map();
     let file_path = map
         .get("path")
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or_else(|| (entry.path == "/protocols").then(|| lab.protocol_path.clone()))
-        .ok_or_else(|| SdkError::invalid("path", "file path required"))?;
+        .ok_or_else(|| A2aLabError::invalid("path", "file path required"))?;
     let bytes = tokio::fs::read(&file_path)
         .await
-        .map_err(|error| SdkError::unavailable(error.to_string()))?;
+        .map_err(|error| A2aLabError::unavailable(error.to_string()))?;
     let filename = map
         .get("filename")
         .and_then(Value::as_str)
@@ -372,7 +372,7 @@ async fn upload_file_task(
                 .and_then(|name| name.to_str())
                 .map(ToOwned::to_owned)
         })
-        .ok_or_else(|| SdkError::invalid("filename", "path must have a file name"))?;
+        .ok_or_else(|| A2aLabError::invalid("filename", "path must have a file name"))?;
     let result = lab
         .client
         .upload_bytes::<Value>(
@@ -391,7 +391,7 @@ async fn complete_http(
     entry: &Entry,
     request: StartTaskRequest,
     result: Value,
-) -> Result<TaskRun, SdkError> {
+) -> Result<TaskRun, A2aLabError> {
     let suffix = lab.local.lock().await.len() + 1;
     Ok(lab
         .store(completed_run(
@@ -403,13 +403,16 @@ async fn complete_http(
         .await)
 }
 
-fn fill_path(template: &str, input: &serde_json::Map<String, Value>) -> Result<String, SdkError> {
+fn fill_path(
+    template: &str,
+    input: &serde_json::Map<String, Value>,
+) -> Result<String, A2aLabError> {
     let mut path = template.trim_start_matches('/').to_owned();
     while let Some(start) = path.find('{') {
         let end = path[start..]
             .find('}')
             .map(|offset| start + offset)
-            .ok_or_else(|| SdkError::invalid("path", "unclosed path parameter"))?;
+            .ok_or_else(|| A2aLabError::invalid("path", "unclosed path parameter"))?;
         let name = &path[start + 1..end];
         let value = path_param(input, name)?;
         path.replace_range(start..=end, value);
@@ -504,7 +507,7 @@ fn query_escape(value: &str) -> String {
 fn path_param<'a>(
     input: &'a serde_json::Map<String, Value>,
     name: &str,
-) -> Result<&'a str, SdkError> {
+) -> Result<&'a str, A2aLabError> {
     if let Ok(value) = string_field(input, name) {
         return Ok(value);
     }
@@ -522,7 +525,7 @@ fn path_param<'a>(
             return Ok(value);
         }
     }
-    Err(SdkError::invalid(
+    Err(A2aLabError::invalid(
         "input",
         format!("missing path parameter `{name}`"),
     ))
@@ -586,11 +589,11 @@ fn http_body(method: &str, input: &serde_json::Map<String, Value>) -> Option<Val
     }
 }
 
-async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRun, SdkError> {
+async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRun, A2aLabError> {
     let command_type = string_field(input.as_map(), "commandType")
         .or_else(|_| string_field(input.as_map(), "command_type"))?;
     if command_type.is_empty() {
-        return Err(SdkError::invalid("commandType", "must not be empty"));
+        return Err(A2aLabError::invalid("commandType", "must not be empty"));
     }
     let params = input
         .as_map()
@@ -598,7 +601,7 @@ async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRu
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
     if !params.is_object() {
-        return Err(SdkError::invalid("params", "must be a JSON object"));
+        return Err(A2aLabError::invalid("params", "must be a JSON object"));
     }
     let command = lab.client.execute_command(command_type, params).await?;
     let state = if command.status == "failed" {
@@ -616,14 +619,17 @@ async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRu
     Ok(lab.store(run).await)
 }
 
-async fn collect_logs(client: &OpentronsClient, source: &str) -> Result<Vec<LogRecord>, SdkError> {
+async fn collect_logs(
+    client: &OpentronsClient,
+    source: &str,
+) -> Result<Vec<LogRecord>, A2aLabError> {
     match source {
         "run_commands" => collect_commands(client, false).await,
         "run_command_errors" => collect_commands(client, true).await,
         "protocol_analyses" => collect_analyses(client).await,
         "stateless_commands" => collect_stateless(client).await,
         id if journal_source(id) => collect_journal(client, id).await,
-        _ => Err(SdkError::not_found("log source", source)),
+        _ => Err(A2aLabError::not_found("log source", source)),
     }
 }
 
@@ -634,7 +640,7 @@ fn journal_source(id: &str) -> bool {
 async fn collect_commands(
     client: &OpentronsClient,
     errors_only: bool,
-) -> Result<Vec<LogRecord>, SdkError> {
+) -> Result<Vec<LogRecord>, A2aLabError> {
     let runs = client.runs().await?;
     let ids: Vec<String> = match runs.iter().find(|run| run.current) {
         Some(run) => vec![run.id.clone()],
@@ -657,7 +663,7 @@ async fn collect_commands(
     Ok(records)
 }
 
-async fn collect_analyses(client: &OpentronsClient) -> Result<Vec<LogRecord>, SdkError> {
+async fn collect_analyses(client: &OpentronsClient) -> Result<Vec<LogRecord>, A2aLabError> {
     let protocols = client.call("GET", "protocols", None).await?;
     let Some(items) = protocols.as_array() else {
         return Ok(Vec::new());
@@ -683,7 +689,7 @@ async fn collect_analyses(client: &OpentronsClient) -> Result<Vec<LogRecord>, Sd
     Ok(records)
 }
 
-async fn collect_stateless(client: &OpentronsClient) -> Result<Vec<LogRecord>, SdkError> {
+async fn collect_stateless(client: &OpentronsClient) -> Result<Vec<LogRecord>, A2aLabError> {
     let commands = client.call("GET", "commands", None).await?;
     let Some(items) = commands.as_array() else {
         return Ok(Vec::new());
@@ -708,7 +714,7 @@ async fn collect_stateless(client: &OpentronsClient) -> Result<Vec<LogRecord>, S
 async fn collect_journal(
     client: &OpentronsClient,
     source: &str,
-) -> Result<Vec<LogRecord>, SdkError> {
+) -> Result<Vec<LogRecord>, A2aLabError> {
     let body = client.troubleshooting_log(source).await?;
     let parsed = parse_journal(source, &body)?;
     if parsed.is_empty() {
@@ -720,7 +726,7 @@ async fn collect_journal(
 async fn simulated_journal(
     client: &OpentronsClient,
     source: &str,
-) -> Result<Vec<LogRecord>, SdkError> {
+) -> Result<Vec<LogRecord>, A2aLabError> {
     let run = current_run(client).await?;
     let commands = match &run {
         Some(run) => client.run_commands(&run.id).await?,
@@ -744,7 +750,7 @@ fn simulated_api(
     commands: &[Command],
     failed: Option<&Command>,
     origin: UtcTimestamp,
-) -> Result<Vec<LogRecord>, SdkError> {
+) -> Result<Vec<LogRecord>, A2aLabError> {
     let mut records = vec![
         journal_line(
             "api.log",
@@ -820,7 +826,7 @@ fn simulated_api(
 fn simulated_serial(
     failed: Option<&Command>,
     origin: UtcTimestamp,
-) -> Result<Vec<LogRecord>, SdkError> {
+) -> Result<Vec<LogRecord>, A2aLabError> {
     let mut records = vec![
         journal_line(
             "serial.log",
@@ -884,7 +890,10 @@ fn simulated_serial(
     Ok(records)
 }
 
-fn simulated_server(run: Option<&Run>, origin: UtcTimestamp) -> Result<Vec<LogRecord>, SdkError> {
+fn simulated_server(
+    run: Option<&Run>,
+    origin: UtcTimestamp,
+) -> Result<Vec<LogRecord>, A2aLabError> {
     let mut records = vec![
         journal_line(
             "server.log",
@@ -951,7 +960,7 @@ fn simulated_server(run: Option<&Run>, origin: UtcTimestamp) -> Result<Vec<LogRe
     Ok(records)
 }
 
-fn simulated_update(origin: UtcTimestamp) -> Result<Vec<LogRecord>, SdkError> {
+fn simulated_update(origin: UtcTimestamp) -> Result<Vec<LogRecord>, A2aLabError> {
     Ok(vec![
         journal_line(
             "update_server.log",
@@ -990,7 +999,7 @@ fn journal_line(
     timestamp: UtcTimestamp,
     level: LogLevel,
     message: impl Into<String>,
-) -> Result<LogRecord, SdkError> {
+) -> Result<LogRecord, A2aLabError> {
     Ok(LogRecord {
         source_id: SourceId::new(source)?,
         timestamp,
@@ -1000,7 +1009,7 @@ fn journal_line(
     })
 }
 
-fn command_stamp(command: &Command) -> Result<UtcTimestamp, SdkError> {
+fn command_stamp(command: &Command) -> Result<UtcTimestamp, A2aLabError> {
     command
         .completed_at
         .as_deref()
@@ -1008,11 +1017,11 @@ fn command_stamp(command: &Command) -> Result<UtcTimestamp, SdkError> {
         .map_or_else(now, parse_timestamp)
 }
 
-fn offset(origin: UtcTimestamp, seconds: i64) -> Result<UtcTimestamp, SdkError> {
+fn offset(origin: UtcTimestamp, seconds: i64) -> Result<UtcTimestamp, A2aLabError> {
     crate::time::shift_seconds(origin, seconds)
 }
 
-fn parse_journal(source: &str, body: &str) -> Result<Vec<LogRecord>, SdkError> {
+fn parse_journal(source: &str, body: &str) -> Result<Vec<LogRecord>, A2aLabError> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
@@ -1020,14 +1029,17 @@ fn parse_journal(source: &str, body: &str) -> Result<Vec<LogRecord>, SdkError> {
     let values = if let Ok(array) = serde_json::from_str::<Vec<Value>>(trimmed) {
         array
     } else if trimmed.starts_with('{') && !trimmed.contains('\n') {
-        vec![serde_json::from_str(trimmed).map_err(|error| SdkError::protocol(error.to_string()))?]
+        vec![
+            serde_json::from_str(trimmed)
+                .map_err(|error| A2aLabError::protocol(error.to_string()))?,
+        ]
     } else {
         trimmed
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .map(|line| {
-                serde_json::from_str(line).map_err(|error| SdkError::protocol(error.to_string()))
+                serde_json::from_str(line).map_err(|error| A2aLabError::protocol(error.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?
     };
@@ -1038,7 +1050,7 @@ fn parse_journal(source: &str, body: &str) -> Result<Vec<LogRecord>, SdkError> {
         .collect()
 }
 
-fn journal_record(source: &str, entry: &Value) -> Result<LogRecord, SdkError> {
+fn journal_record(source: &str, entry: &Value) -> Result<LogRecord, A2aLabError> {
     let message = entry
         .get("MESSAGE")
         .and_then(Value::as_str)
@@ -1055,7 +1067,7 @@ fn journal_record(source: &str, entry: &Value) -> Result<LogRecord, SdkError> {
     })
 }
 
-fn journal_timestamp(entry: &Value) -> Result<UtcTimestamp, SdkError> {
+fn journal_timestamp(entry: &Value) -> Result<UtcTimestamp, A2aLabError> {
     let Some(raw) = entry.get("__REALTIME_TIMESTAMP") else {
         return now();
     };
@@ -1103,7 +1115,7 @@ fn command_message(command: &Command) -> String {
     }
 }
 
-fn command_record(source: &str, run_id: &str, command: &Command) -> Result<LogRecord, SdkError> {
+fn command_record(source: &str, run_id: &str, command: &Command) -> Result<LogRecord, A2aLabError> {
     let stamp = command
         .completed_at
         .as_deref()
@@ -1126,7 +1138,7 @@ fn command_record(source: &str, run_id: &str, command: &Command) -> Result<LogRe
     })
 }
 
-async fn metric_value(client: &OpentronsClient, metric_id: &str) -> Result<f64, SdkError> {
+async fn metric_value(client: &OpentronsClient, metric_id: &str) -> Result<f64, A2aLabError> {
     match metric_id {
         "healthy" => Ok(f64::from(u8::from(client.health().await.is_ok()))),
         "disk_available_mb" => gauge(client, "GET", "health", disk_available).await,
@@ -1136,7 +1148,7 @@ async fn metric_value(client: &OpentronsClient, metric_id: &str) -> Result<f64, 
         "pipette_count" => gauge(client, "GET", "pipettes", count_attached).await,
         "instrument_count" => gauge(client, "GET", "instruments", count_attached).await,
         "module_count" => gauge(client, "GET", "modules", count_attached).await,
-        _ => Err(SdkError::not_found("metric", metric_id)),
+        _ => Err(A2aLabError::not_found("metric", metric_id)),
     }
 }
 
@@ -1145,7 +1157,7 @@ async fn gauge(
     method: &str,
     path: &str,
     pick: fn(&Value) -> f64,
-) -> Result<f64, SdkError> {
+) -> Result<f64, A2aLabError> {
     let value = client.call(method, path, None).await.unwrap_or(Value::Null);
     Ok(pick(&value))
 }
@@ -1199,7 +1211,7 @@ fn count_attached(value: &Value) -> f64 {
     f64::from(u32::try_from(len).unwrap_or(u32::MAX))
 }
 
-async fn run_metric(client: &OpentronsClient, metric_id: &str) -> Result<f64, SdkError> {
+async fn run_metric(client: &OpentronsClient, metric_id: &str) -> Result<f64, A2aLabError> {
     let Some(run) = current_run(client).await? else {
         return Ok(0.0);
     };
@@ -1223,7 +1235,7 @@ async fn run_metric(client: &OpentronsClient, metric_id: &str) -> Result<f64, Sd
     Ok((done / total) * 100.0)
 }
 
-async fn current_run(client: &OpentronsClient) -> Result<Option<Run>, SdkError> {
+async fn current_run(client: &OpentronsClient) -> Result<Option<Run>, A2aLabError> {
     Ok(client.runs().await?.into_iter().find(|run| run.current))
 }
 
@@ -1242,7 +1254,7 @@ fn completed_run(
     task_id: TaskId,
     input: JsonObject,
     message: Option<String>,
-) -> Result<TaskRun, SdkError> {
+) -> Result<TaskRun, A2aLabError> {
     Ok(TaskRun {
         id: RunId::new(id)?,
         task_id,
@@ -1265,8 +1277,8 @@ fn map_status(status: &str) -> TaskState {
 fn string_field<'a>(
     map: &'a serde_json::Map<String, Value>,
     field: &str,
-) -> Result<&'a str, SdkError> {
+) -> Result<&'a str, A2aLabError> {
     map.get(field)
         .and_then(Value::as_str)
-        .ok_or_else(|| SdkError::invalid("input", format!("{field} must be a string")))
+        .ok_or_else(|| A2aLabError::invalid("input", format!("{field} must be a string")))
 }

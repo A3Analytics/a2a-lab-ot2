@@ -27,9 +27,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "a2a-lab-sdk"
+name = "a2a-lab-dev-kit"
 version = "0.1.0"
-source = "git+https://github.com/A3Analytics/a2a-lab-sdk-rs#42e17e172a07f8c3cce6ea6ae3e800c1021c9a48"
+source = "git+https://github.com/A3Analytics/a2a-lab-dev-kit-rs#3b98fdeb1f3096a4b464e28f44da09d0a81cc935"
 dependencies = [
  "a2a-client-lf",
  "a2a-lf",
@@ -47,10 +47,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "a2a-lab-sdk-example"
+name = "a2a-lab-ot2"
 version = "0.1.0"
 dependencies = [
- "a2a-lab-sdk",
+ "a2a-lab-dev-kit",
  "axum",
  "clap",
  "jiff",

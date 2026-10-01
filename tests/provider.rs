@@ -2,12 +2,12 @@ mod support;
 
 use std::path::PathBuf;
 
-use a2a_lab_sdk::{
+use a2a_lab_dev_kit::{
     GetTaskStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest,
     LogLevel, LogProvider, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest,
     RunId, SourceId, StartTaskRequest, TaskId, TaskProvider, TaskState, TimeRange, UtcTimestamp,
 };
-use a2a_lab_sdk_example::OpentronsLab;
+use a2a_lab_ot2::OpentronsLab;
 use support::Mock;
 
 fn page() -> PageRequest {
@@ -330,7 +330,7 @@ async fn queries_logs_and_metrics() {
     let health = MetricProvider::query(
         &lab,
         QueryMetricRequest {
-            metric_id: a2a_lab_sdk::MetricId::new("healthy").unwrap(),
+            metric_id: a2a_lab_dev_kit::MetricId::new("healthy").unwrap(),
             range: range(),
             page: page(),
         },
@@ -346,7 +346,7 @@ async fn queries_logs_and_metrics() {
     let empty = MetricProvider::query(
         &lab,
         QueryMetricRequest {
-            metric_id: a2a_lab_sdk::MetricId::new("healthy").unwrap(),
+            metric_id: a2a_lab_dev_kit::MetricId::new("healthy").unwrap(),
             range: past,
             page: page(),
         },
@@ -368,7 +368,7 @@ async fn queries_gauges_and_extra_logs() {
     let door = MetricProvider::query(
         &lab,
         QueryMetricRequest {
-            metric_id: a2a_lab_sdk::MetricId::new("door_open").unwrap(),
+            metric_id: a2a_lab_dev_kit::MetricId::new("door_open").unwrap(),
             range: range(),
             page: page(),
         },
@@ -476,7 +476,7 @@ async fn primitive_http_tasks_complete() {
 
 #[tokio::test]
 async fn inventory_is_advertised() {
-    use a2a_lab_sdk_example::opentrons::{COMPOSITE_TASK_IDS, ENTRIES, Kind};
+    use a2a_lab_ot2::opentrons::{COMPOSITE_TASK_IDS, ENTRIES, Kind};
 
     let (lab, _) = lab().await;
     let tasks = lab
@@ -547,7 +547,7 @@ async fn inventory_is_advertised() {
 
 #[tokio::test]
 async fn readonly_lists_get_tasks_and_omits_writes() {
-    use a2a_lab_sdk_example::opentrons::{COMPOSITE_TASK_IDS, ENTRIES, Kind, is_read};
+    use a2a_lab_ot2::opentrons::{COMPOSITE_TASK_IDS, ENTRIES, Kind, is_read};
 
     let (lab, _) = readonly_lab().await;
     let tasks = lab
