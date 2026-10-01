@@ -1,6 +1,6 @@
 # a2a-lab-sdk-example
 
-Example lab agent that wraps a persistent Opentrons OT-2 `robot-server` simulator with [`a2a-lab-sdk`](https://github.com/A3Analytics/a2a-lab-sdk-rs). The `a2a-lab-ot2` executable calls the seven lab operations against the OT-2 HTTP API (`127.0.0.1:31950`). With no subcommand it also serves those operations over A2A (`127.0.0.1:31000`) and MCP (`127.0.0.1:31001/mcp`).
+Example lab agent that wraps a persistent Opentrons OT-2 `robot-server` simulator with [`a2a-lab-sdk`](https://github.com/A3Analytics/a2a-lab-sdk-rs). The `a2a-lab-ot2` executable calls the seven lab operations against the OT-2 HTTP API (`127.0.0.1:31950`). With no subcommand it also serves those operations over A2A 1.0 HTTP+JSON (`127.0.0.1:31000`) and MCP (`127.0.0.1:31001/mcp`).
 
 This is software simulation, not a physical robot. The simulator can also be discovered by the Opentrons App as a development robot at `127.0.0.1`.
 
@@ -27,7 +27,7 @@ Start the OT-2 simulator (leave this terminal running):
 mise run ot2-simulator
 ```
 
-In another terminal, run `a2a-lab-ot2`. With no extra args it serves A2A and MCP:
+In another terminal, run `a2a-lab-ot2`. With no extra args it serves MCP at `http://127.0.0.1:31001/mcp` and A2A 1.0 HTTP+JSON at `http://127.0.0.1:31000`, with A2A calling those MCP tools:
 
 ```bash
 mise run start
@@ -69,11 +69,11 @@ mise run a2a-lab-ot2 -- --readonly start-task get_protocols
 
 ## Endpoints
 
-| Service                | Address                                                                         |
-| ---------------------- | ------------------------------------------------------------------------------- |
-| Opentrons robot-server | `http://127.0.0.1:31950`                                                        |
-| A2A                    | `http://127.0.0.1:31000` (`/.well-known/agent-card.json`, `POST /message:send`) |
-| MCP                    | `http://127.0.0.1:31001/mcp`                                                    |
+| Service                | Address                                                                                                                      |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Opentrons robot-server | `http://127.0.0.1:31950`                                                                                                     |
+| A2A 1.0 HTTP+JSON      | `http://127.0.0.1:31000` (`/.well-known/agent-card.json`, `POST /message:send`, `application/a2a+json`; lab skills call MCP) |
+| MCP                    | `http://127.0.0.1:31001/mcp`                                                                                                 |
 
 `list-tasks` advertises composite helpers (`run_serial_dilution`, pause/resume/stop, recovery, `execute_command`) plus primitive robot-server HTTP operations from the pinned OT-2 v10.0.0 OpenAPI. Flex-only routes (estop, deck configuration, subsystems, live-stream settings) are omitted. `--readonly` keeps logs, metrics, and GET-backed tasks and hides composites and other mutations. `list-log-sources` includes run/analysis command streams and every `GET /logs/{identifier}` journal. `list-metrics` includes health, run progress, door, lights, pipette/instrument/module counts, and disk space. Path parameters and JSON bodies go in `start-task --input`.
 

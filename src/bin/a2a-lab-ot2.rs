@@ -5,8 +5,8 @@ use std::str::FromStr;
 
 use a2a_lab_sdk::{
     A2aServer, GetTaskStatusRequest, JsonObject, LabService, ListLogSourcesRequest,
-    ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider, LogRecord, McpServer, MetricId,
-    MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
+    ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider, LogRecord, McpLab, McpServer,
+    MetricId, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
     StartTaskRequest, TaskId, TaskProvider, TaskState, TimeRange, UtcTimestamp, start_run,
 };
 use a2a_lab_sdk_example::{OpentronsLab, default_protocol};
@@ -147,12 +147,15 @@ fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
 async fn serve(lab: OpentronsLab, opentrons_url: &str) -> Result<(), Box<dyn std::error::Error>> {
     lab.client().health().await?;
     let service = LabService::new(lab.clone(), lab.clone(), lab).share();
-    let a2a = A2aServer::new(&service);
     let mcp = McpServer::new(&service);
+    let mcp_task = tokio::spawn(async move { mcp.serve_http(None).await });
+    let a2a = A2aServer::new(&McpLab::connect_default().await?);
     println!("connected to {opentrons_url}");
     println!("A2A          http://127.0.0.1:31000");
     println!("MCP          http://127.0.0.1:31001/mcp");
-    tokio::try_join!(a2a.listen(None), mcp.serve_http(None))?;
+    let result = a2a.listen(None).await;
+    mcp_task.abort();
+    result?;
     Ok(())
 }
 
