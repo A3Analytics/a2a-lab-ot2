@@ -15,12 +15,25 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [dependencies]
-a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", default-features = false }
+a2a-lab-dev-kit = { path = "../a2a-lab-dev-kit-rs", default-features = false }
 clap = { version = "4.5.53", features = ["derive", "env"] }
 jiff = { version = "0.2.37", features = ["serde"] }
 reqwest = { version = "0.13.5", features = ["json", "multipart"] }
+rmcp = { version = "2.2", default-features = false, features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+] }
+rig = { version = "0.42", default-features = false, features = [
+    "bedrock",
+    "agent",
+    "rmcp",
+] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+] }
 tokio = { version = "1.53.1", features = [
     "rt-multi-thread",
     "macros",
@@ -33,6 +46,7 @@ tokio = { version = "1.53.1", features = [
 
 [dev-dependencies]
 axum = "0.8.9"
+rig = { version = "0.42", default-features = false, features = ["test-utils"] }
 
 [[bin]]
 name = "a2a-lab-ot2"

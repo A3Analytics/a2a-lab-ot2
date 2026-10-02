@@ -3,13 +3,18 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use std::sync::Arc;
+
 use a2a_lab_dev_kit::{
-    A2aServer, GetTaskStatusRequest, JsonObject, LabService, ListLogSourcesRequest,
-    ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider, LogRecord, McpLab, McpServer,
-    MetricId, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
-    StartTaskRequest, TaskId, TaskProvider, TaskState, TimeRange, UtcTimestamp, start_run,
+    A2aClient, A2aServer, AgentMessageHandler, DEFAULT_MCP_URL, GetTaskStatusRequest, JsonObject,
+    LabService, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider,
+    LogRecord, McpLab, McpServer, MetricId, MetricProvider, PageRequest, QueryLogsRequest,
+    QueryMetricRequest, RunId, SourceId, StartTaskRequest, TaskId, TaskProvider, TaskState,
+    TimeRange, UtcTimestamp, start_run,
 };
-use a2a_lab_ot2::{OpentronsLab, default_protocol};
+use a2a_lab_ot2::{
+    ConversationStore, LabAgent, ModelProvider, OpentronsLab, default_protocol, selected_model,
+};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -27,8 +32,52 @@ struct Cli {
     /// Advertise and execute only GET-backed tasks
     #[arg(long, global = true)]
     readonly: bool,
+    /// A2A origin used by `agent-message`
+    #[arg(
+        long,
+        env = "A2A_URL",
+        default_value = "http://127.0.0.1:31000"
+    )]
+    a2a_url: String,
+    /// SQLite file for conversation history
+    #[arg(
+        long,
+        env = "CONVERSATION_DB",
+        default_value = ".a2a-lab-ot2/conversations.sqlite3"
+    )]
+    conversation_db: PathBuf,
+    /// Model provider for plain-text messages
+    #[arg(long, env = "MODEL_PROVIDER", default_value = "bedrock")]
+    model_provider: ModelProviderArg,
+    /// Model id. Defaults to the provider's small tool-capable model.
+    #[arg(long, env = "MODEL")]
+    model: Option<String>,
+    /// Bedrock model id used when `--model` is omitted and the provider is Bedrock
+    #[arg(long, env = "BEDROCK_MODEL")]
+    bedrock_model: Option<String>,
+    /// Rig messages retained for each A2A context
+    #[arg(long, env = "HISTORY_LIMIT", default_value_t = 40)]
+    history_limit: usize,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+enum ModelProviderArg {
+    #[default]
+    Bedrock,
+    Openai,
+    Anthropic,
+}
+
+impl From<ModelProviderArg> for ModelProvider {
+    fn from(value: ModelProviderArg) -> Self {
+        match value {
+            ModelProviderArg::Bedrock => Self::Bedrock,
+            ModelProviderArg::Openai => Self::OpenAi,
+            ModelProviderArg::Anthropic => Self::Anthropic,
+        }
+    }
 }
 
 #[derive(Subcommand, Default)]
@@ -76,14 +125,25 @@ enum Command {
         #[arg(default_value = "{}")]
         params: String,
     },
+    /// Send plain text to the Bedrock agent over A2A
+    AgentMessage {
+        text: Vec<String>,
+        /// Continue the conversation returned by an earlier turn
+        #[arg(long)]
+        context_id: Option<String>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    let command = cli.command.take().unwrap_or_default();
+    if let Command::AgentMessage { text, context_id } = &command {
+        return agent_message(&cli.a2a_url, text, context_id.as_deref()).await;
+    }
     let lab = connect(&cli)?;
-    match cli.command.unwrap_or_default() {
-        Command::Serve => serve(lab, &cli.opentrons_url).await?,
+    match command {
+        Command::Serve => serve(lab, &cli).await?,
         Command::ListTasks => list_tasks(&lab).await?,
         Command::ListLogSources => list_log_sources(&lab).await?,
         Command::ListMetrics => list_metrics(&lab).await?,
@@ -118,6 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
+        Command::AgentMessage { .. } => unreachable!("handled before the lab client connects"),
         Command::Engine {
             command_type,
             params,
@@ -136,6 +197,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+async fn agent_message(
+    a2a_url: &str,
+    text: &[String],
+    context_id: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reply = A2aClient::new(a2a_url)?
+        .agent_message(&text.join(" "), context_id)
+        .await?;
+    println!("{}", reply.text);
+    if let Some(task_id) = reply.task_id {
+        println!("task_id {task_id}");
+    }
+    println!("context_id {}", reply.context_id);
+    Ok(())
+}
+
 fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
     Ok(OpentronsLab::new(
         &cli.opentrons_url,
@@ -144,15 +221,23 @@ fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
     .with_readonly(cli.readonly))
 }
 
-async fn serve(lab: OpentronsLab, opentrons_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     lab.client().health().await?;
     let service = LabService::new(lab.clone(), lab.clone(), lab).share();
     let mcp = McpServer::new(&service);
     let mcp_task = tokio::spawn(async move { mcp.serve_http(None).await });
-    let a2a = A2aServer::new(&McpLab::connect_default().await?);
-    println!("connected to {opentrons_url}");
+    let mcp_lab = McpLab::connect_default().await?;
+    let store = ConversationStore::open(&cli.conversation_db, cli.history_limit).await?;
+    let provider = ModelProvider::from(cli.model_provider);
+    let model = selected_model(provider, cli.model.as_deref(), cli.bedrock_model.as_deref());
+    let agent = LabAgent::from_provider(provider, &model, DEFAULT_MCP_URL, store).await?;
+    let a2a = A2aServer::new(&mcp_lab)
+        .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>);
+    println!("connected to {}", cli.opentrons_url);
     println!("A2A          http://127.0.0.1:31000");
-    println!("MCP          http://127.0.0.1:31001/mcp");
+    println!("MCP          {DEFAULT_MCP_URL}");
+    println!("model        {} {model}", provider.as_str());
+    println!("conversation {}", cli.conversation_db.display());
     let result = a2a.listen(None).await;
     mcp_task.abort();
     result?;

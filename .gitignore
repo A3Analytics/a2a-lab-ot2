@@ -1,4 +1,5 @@
 /target
+.a2a-lab-ot2
 .cache
 **/*.rs.bk
 .DS_Store

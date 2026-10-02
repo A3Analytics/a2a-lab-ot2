@@ -2,10 +2,17 @@
 
 use std::path::PathBuf;
 
+pub mod agent;
+pub mod memory;
 pub mod opentrons;
 pub mod page;
 pub mod time;
 
+pub use agent::{
+    DEFAULT_ANTHROPIC_MODEL, DEFAULT_BEDROCK_MODEL, DEFAULT_OPENAI_MODEL, LabAgent, ModelProvider,
+    selected_model,
+};
+pub use memory::ConversationStore;
 pub use opentrons::{OpentronsClient, OpentronsLab};
 
 /// Bundled serial-dilution protocol used by `run_serial_dilution`.

@@ -27,7 +27,7 @@ Start the OT-2 simulator (leave this terminal running):
 mise run ot2-simulator
 ```
 
-In another terminal, run `a2a-lab-ot2`. With no extra args it serves MCP at `http://127.0.0.1:31001/mcp` and A2A 1.0 HTTP+JSON at `http://127.0.0.1:31000`, with A2A calling those MCP tools:
+In another terminal, run `a2a-lab-ot2`. With no extra args it serves MCP at `http://127.0.0.1:31001/mcp` and A2A 1.0 HTTP+JSON at `http://127.0.0.1:31000`. Structured lab skills call those MCP tools directly. Plain-text `agent-message` turns go to a Rig agent on Amazon Bedrock, which calls the same MCP tools and stores the conversation in SQLite:
 
 ```bash
 mise run start
@@ -63,17 +63,21 @@ mise run a2a-lab-ot2 -- command home '{}'
 mise run start -- --readonly
 mise run a2a-lab-ot2 -- --readonly list-tasks
 mise run a2a-lab-ot2 -- --readonly start-task get_protocols
+mise run a2a-lab-ot2 -- agent-message "which tasks can I run?"
+mise run a2a-lab-ot2 -- agent-message --context-id <context_id> "what did you find?"
 ```
+
+`agent-message` talks only to the A2A server (`--a2a-url`, `A2A_URL`, default `http://127.0.0.1:31000`). `--model-provider` / `MODEL_PROVIDER` is `bedrock` (default), `openai`, or `anthropic`. `--model` / `MODEL` selects the model id. When it is omitted, the defaults are Bedrock `global.openai.gpt-5.6-luna`, OpenAI `gpt-5.6-luna`, and Anthropic `claude-sonnet-5`. `--bedrock-model` / `BEDROCK_MODEL` still overrides the Bedrock default. Bedrock uses the process AWS credentials and `AWS_REGION`. OpenAI uses `OPENAI_API_KEY`. Anthropic uses `ANTHROPIC_API_KEY`. Each A2A context is one conversation in `--conversation-db` / `CONVERSATION_DB` (default `.a2a-lab-ot2/conversations.sqlite3`). `--history-limit` / `HISTORY_LIMIT` keeps that many Rig messages, including tool calls. A follow-up passes the printed `context_id` and starts a new A2A task. `--readonly` still hides writes from the model because the tools are the same MCP server.
 
 `mise run start` is `a2a-lab-ot2` (default: A2A and MCP). `mise run ot2-simulator-health` checks `GET /health` on the simulator. `mise run ot2-simulator-clean` removes the simulator container and image.
 
 ## Endpoints
 
-| Service                | Address                                                                                                                      |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| Opentrons robot-server | `http://127.0.0.1:31950`                                                                                                     |
-| A2A 1.0 HTTP+JSON      | `http://127.0.0.1:31000` (`/.well-known/agent-card.json`, `POST /message:send`, `application/a2a+json`; lab skills call MCP) |
-| MCP                    | `http://127.0.0.1:31001/mcp`                                                                                                 |
+| Service                | Address                                                                                                                                                                          |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Opentrons robot-server | `http://127.0.0.1:31950`                                                                                                                                                         |
+| A2A 1.0 HTTP+JSON      | `http://127.0.0.1:31000` (`/.well-known/agent-card.json`, `POST /message:send`, `application/a2a+json`; lab data parts call MCP, plain text calls Bedrock, OpenAI, or Anthropic) |
+| MCP                    | `http://127.0.0.1:31001/mcp`                                                                                                                                                     |
 
 `list-tasks` advertises composite helpers (`run_serial_dilution`, pause/resume/stop, recovery, `execute_command`) plus primitive robot-server HTTP operations from the pinned OT-2 v10.0.0 OpenAPI. Flex-only routes (estop, deck configuration, subsystems, live-stream settings) are omitted. `--readonly` keeps logs, metrics, and GET-backed tasks and hides composites and other mutations. `list-log-sources` includes run/analysis command streams and every `GET /logs/{identifier}` journal. `list-metrics` includes health, run progress, door, lights, pipette/instrument/module counts, and disk space. Path parameters and JSON bodies go in `start-task --input`.
 
