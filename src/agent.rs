@@ -113,9 +113,35 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
     value.filter(|text| !text.trim().is_empty())
 }
 
+fn bedrock_profile() -> String {
+    std::env::var("AWS_PROFILE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "default".to_owned())
+}
+
+async fn bedrock_client(profile: &str) -> BedrockClient {
+    let mut loader =
+        aws_config::defaults(aws_config::BehaviorVersion::latest()).profile_name(profile);
+    if let Some(region) = bedrock_region() {
+        loader = loader.region(aws_config::Region::new(region));
+    }
+    aws_sdk_bedrockruntime::Client::new(&loader.load().await).into()
+}
+
+fn bedrock_region() -> Option<String> {
+    std::env::var("AWS_REGION")
+        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 /// Rig agent that calls the lab MCP server and stores each A2A context in SQLite.
 pub struct LabAgent {
     agent: rig::Agent,
+    label: String,
     #[allow(dead_code)]
     mcp: RunningService<rmcp::RoleClient, ClientInfo>,
     turns: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -137,6 +163,7 @@ impl LabAgent {
             .build();
         Ok(Self {
             agent,
+            label: "completion model".to_owned(),
             mcp,
             turns: Mutex::new(HashMap::new()),
         })
@@ -151,16 +178,36 @@ impl LabAgent {
     ) -> Result<Self, A2aLabError> {
         match provider {
             ModelProvider::Bedrock => {
-                let client = BedrockClient::from_env().map_err(provider_error)?;
-                Self::connect(client.completion_model(model_id), mcp_url, store).await
+                let profile = bedrock_profile();
+                let client = bedrock_client(&profile).await;
+                let mut agent =
+                    Self::connect(client.completion_model(model_id), mcp_url, store).await?;
+                agent.label = format!(
+                    "bedrock model {model_id} using AWS profile {profile} and AWS_REGION or that profile's region"
+                );
+                Ok(agent)
             }
             ModelProvider::OpenAi => {
-                let client = OpenAiClient::from_env().map_err(provider_error)?;
-                Self::connect(client.completion_model(model_id), mcp_url, store).await
+                let client = OpenAiClient::from_env().map_err(|error| {
+                    A2aLabError::unavailable(format!(
+                        "create openai client for model {model_id} with OPENAI_API_KEY: {error}"
+                    ))
+                })?;
+                let mut agent =
+                    Self::connect(client.completion_model(model_id), mcp_url, store).await?;
+                agent.label = format!("openai model {model_id}");
+                Ok(agent)
             }
             ModelProvider::Anthropic => {
-                let client = AnthropicClient::from_env().map_err(provider_error)?;
-                Self::connect(client.completion_model(model_id), mcp_url, store).await
+                let client = AnthropicClient::from_env().map_err(|error| {
+                    A2aLabError::unavailable(format!(
+                        "create anthropic client for model {model_id} with ANTHROPIC_API_KEY: {error}"
+                    ))
+                })?;
+                let mut agent =
+                    Self::connect(client.completion_model(model_id), mcp_url, store).await?;
+                agent.label = format!("anthropic model {model_id}");
+                Ok(agent)
             }
         }
     }
@@ -188,14 +235,10 @@ impl AgentMessageHandler for LabAgent {
                 .prompt(Message::user(request.text))
                 .conversation(request.context_id)
                 .await
-                .map_err(|error| A2aLabError::unavailable(error.to_string()))?;
+                .map_err(|error| A2aLabError::unavailable(format!("{}: {error}", self.label)))?;
             Ok(AgentMessageReply { text })
         })
     }
-}
-
-fn provider_error(error: impl std::fmt::Display) -> A2aLabError {
-    A2aLabError::unavailable(error.to_string())
 }
 
 async fn connect_mcp(

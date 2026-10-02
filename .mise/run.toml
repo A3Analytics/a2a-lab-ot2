@@ -65,5 +65,5 @@ description = "Remove the simulator container, image, and leftover host checkout
 run = "bash .mise/scripts/ot2-simulator-clean.sh"
 
 [smoke]
-description = "Live smoke test against the pinned robot-server simulator"
+description = "Live smoke test: OT-2 simulator, A2A, MCP, and Bedrock conversations"
 run = "bash .mise/scripts/smoke.sh"

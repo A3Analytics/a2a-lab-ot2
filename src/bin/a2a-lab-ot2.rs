@@ -6,11 +6,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use a2a_lab_dev_kit::{
-    A2aClient, A2aServer, AgentMessageHandler, DEFAULT_MCP_URL, GetTaskStatusRequest, JsonObject,
-    LabService, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider,
-    LogRecord, McpLab, McpServer, MetricId, MetricProvider, PageRequest, QueryLogsRequest,
-    QueryMetricRequest, RunId, SourceId, StartTaskRequest, TaskId, TaskProvider, TaskState,
-    TimeRange, UtcTimestamp, start_run,
+    A2aClient, A2aLabError, A2aServer, AgentMessageHandler, DEFAULT_MCP_URL, GetTaskStatusRequest,
+    JsonObject, LabService, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest, LogLevel,
+    LogProvider, LogRecord, McpLab, McpServer, MetricId, MetricProvider, PageRequest,
+    QueryLogsRequest, QueryMetricRequest, RunId, SourceId, StartTaskRequest, TaskId, TaskProvider,
+    TaskState, TimeRange, UtcTimestamp, start_run,
 };
 use a2a_lab_ot2::{
     ConversationStore, LabAgent, ModelProvider, OpentronsLab, default_protocol, selected_model,
@@ -33,11 +33,7 @@ struct Cli {
     #[arg(long, global = true)]
     readonly: bool,
     /// A2A origin used by `agent-message`
-    #[arg(
-        long,
-        env = "A2A_URL",
-        default_value = "http://127.0.0.1:31000"
-    )]
+    #[arg(long, env = "A2A_URL", default_value = "http://127.0.0.1:31000")]
     a2a_url: String,
     /// SQLite file for conversation history
     #[arg(
@@ -222,15 +218,31 @@ fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
 }
 
 async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    lab.client().health().await?;
+    let opentrons = format!("opentrons robot-server at {}", cli.opentrons_url);
+    lab.client()
+        .health()
+        .await
+        .map_err(|error| startup_error(&opentrons, error))?;
+    let conversation = format!("conversation store at {}", cli.conversation_db.display());
+    let store = ConversationStore::open(&cli.conversation_db, cli.history_limit)
+        .await
+        .map_err(|error| startup_error(&conversation, error))?;
     let service = LabService::new(lab.clone(), lab.clone(), lab).share();
     let mcp = McpServer::new(&service);
-    let mcp_task = tokio::spawn(async move { mcp.serve_http(None).await });
-    let mcp_lab = McpLab::connect_default().await?;
-    let store = ConversationStore::open(&cli.conversation_db, cli.history_limit).await?;
+    let mut mcp_task = AbortOnDrop(tokio::spawn(async move { mcp.serve_http(None).await }));
+    let mcp_target = format!("mcp at {DEFAULT_MCP_URL}");
+    let mcp_lab = tokio::select! {
+        finished = mcp_task.join() => return Err(mcp_task_error(&mcp_target, finished).into()),
+        connected = McpLab::connect_default() => {
+            connected.map_err(|error| startup_error(&mcp_target, error))?
+        }
+    };
     let provider = ModelProvider::from(cli.model_provider);
     let model = selected_model(provider, cli.model.as_deref(), cli.bedrock_model.as_deref());
-    let agent = LabAgent::from_provider(provider, &model, DEFAULT_MCP_URL, store).await?;
+    let model_target = format!("{} model {model}", provider.as_str());
+    let agent = LabAgent::from_provider(provider, &model, DEFAULT_MCP_URL, store)
+        .await
+        .map_err(|error| startup_error(&model_target, error))?;
     let a2a = A2aServer::new(&mcp_lab)
         .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>);
     println!("connected to {}", cli.opentrons_url);
@@ -238,10 +250,46 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     println!("MCP          {DEFAULT_MCP_URL}");
     println!("model        {} {model}", provider.as_str());
     println!("conversation {}", cli.conversation_db.display());
-    let result = a2a.listen(None).await;
-    mcp_task.abort();
-    result?;
+    let a2a_target = "a2a at http://127.0.0.1:31000";
+    tokio::select! {
+        result = a2a.listen(None) => {
+            result.map_err(|error| startup_error(a2a_target, error))?;
+        }
+        result = tokio::signal::ctrl_c() => {
+            result.map_err(|error| startup_error("shutdown signal", error))?;
+        }
+    }
+    drop(mcp_task);
     Ok(())
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<Result<(), A2aLabError>>);
+
+impl AbortOnDrop {
+    async fn join(&mut self) -> Result<Result<(), A2aLabError>, tokio::task::JoinError> {
+        (&mut self.0).await
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn startup_error(dependency: &str, error: impl std::fmt::Display) -> A2aLabError {
+    A2aLabError::unavailable(format!("{dependency}: {error}"))
+}
+
+fn mcp_task_error(
+    target: &str,
+    finished: Result<Result<(), A2aLabError>, tokio::task::JoinError>,
+) -> A2aLabError {
+    match finished {
+        Ok(Ok(())) => startup_error(target, "stopped before it accepted a session"),
+        Ok(Err(error)) => startup_error(target, error),
+        Err(error) => startup_error(target, error),
+    }
 }
 
 async fn list_tasks(lab: &OpentronsLab) -> Result<(), Box<dyn std::error::Error>> {

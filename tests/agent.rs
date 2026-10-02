@@ -216,3 +216,39 @@ async fn agent_calls_mcp_tool_and_reloads_history() {
     assert!(rendered.contains("which tasks"));
     assert!(rendered.contains("list_tasks"));
 }
+
+#[tokio::test]
+async fn agent_serializes_turns_in_one_context() {
+    let url = mcp_url().await;
+    let store = ConversationStore::open(&temp_db(), 40)
+        .await
+        .expect("store");
+    let model = MockCompletionModel::new([
+        MockTurn::text("first reply"),
+        MockTurn::text("second reply"),
+    ]);
+    let watched = model.clone();
+    let agent = LabAgent::connect(model, &url, store).await.expect("agent");
+    let (left, right) = tokio::join!(
+        agent.handle(request("token-one", "ctx-lock")),
+        agent.handle(request("token-two", "ctx-lock")),
+    );
+    left.expect("left");
+    right.expect("right");
+
+    let rendered = watched
+        .requests()
+        .iter()
+        .map(|request| format!("{request:?}"))
+        .collect::<Vec<_>>();
+    assert_eq!(rendered.len(), 2);
+    let (first_token, second_token) = if rendered[0].contains("token-one") {
+        ("token-one", "token-two")
+    } else {
+        ("token-two", "token-one")
+    };
+    assert!(rendered[0].contains(first_token));
+    assert!(!rendered[0].contains(second_token));
+    assert!(rendered[1].contains(first_token));
+    assert!(rendered[1].contains(second_token));
+}

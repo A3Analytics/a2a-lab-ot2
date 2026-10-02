@@ -16,6 +16,15 @@ missing_panics_doc = "allow"
 
 [dependencies]
 a2a-lab-dev-kit = { path = "../a2a-lab-dev-kit-rs", default-features = false }
+aws-config = { version = "1", default-features = false, features = [
+    "behavior-version-latest",
+    "rt-tokio",
+    "sso",
+] }
+aws-sdk-bedrockruntime = { version = "1", default-features = false, features = [
+    "rt-tokio",
+    "default-https-client",
+] }
 clap = { version = "4.5.53", features = ["derive", "env"] }
 jiff = { version = "0.2.37", features = ["serde"] }
 reqwest = { version = "0.13.5", features = ["json", "multipart"] }

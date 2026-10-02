@@ -27,11 +27,26 @@ Start the OT-2 simulator (leave this terminal running):
 mise run ot2-simulator
 ```
 
-In another terminal, run `a2a-lab-ot2`. With no extra args it serves MCP at `http://127.0.0.1:31001/mcp` and A2A 1.0 HTTP+JSON at `http://127.0.0.1:31000`. Structured lab skills call those MCP tools directly. Plain-text `agent-message` turns go to a Rig agent on Amazon Bedrock, which calls the same MCP tools and stores the conversation in SQLite:
+In another terminal, serve MCP at `http://127.0.0.1:31001/mcp` and A2A 1.0 HTTP+JSON at `http://127.0.0.1:31000`. Structured lab skills call those MCP tools directly. Plain-text `agent-message` turns go to a Rig agent on Amazon Bedrock, which calls the same MCP tools and stores one conversation per A2A context in SQLite:
 
 ```bash
 mise run start
 ```
+
+Bedrock uses the AWS SDK default credential chain for `AWS_PROFILE` (or the `default` profile): environment credentials first, then the shared profile, including SSO. `AWS_REGION` overrides the profile region. The model is `global.openai.gpt-5.6-luna` unless `--model` or `BEDROCK_MODEL` selects another id the account can invoke. Run `aws sso login` when the profile session is expired. Startup checks robot-server health, opens `.a2a-lab-ot2/conversations.sqlite3`, accepts an MCP session, and loads that AWS profile before it binds A2A. A failure names the dependency and address. Ctrl-C stops A2A and MCP.
+
+Check the three services:
+
+```bash
+mise run ot2-simulator-health
+curl -fsS http://127.0.0.1:31000/.well-known/agent-card.json
+mise run a2a-lab-ot2 -- agent-message "which tasks can I run?"
+mise run a2a-lab-ot2 -- agent-message --context-id <context_id> "what did you find?"
+```
+
+The follow-up reuses the printed `context_id` and receives a new `task_id`. History for that context is in `.a2a-lab-ot2/conversations.sqlite3`. `mise run smoke` runs the simulator, agent card, an A2A `list_tasks` call through MCP, MCP tool listing, and two Bedrock conversation turns. It needs Docker and Bedrock access and stays outside `mise run quality`.
+
+If `ot2-simulator-health` fails, the simulator is not listening on `127.0.0.1:31950`. If a turn reports the Bedrock model, refresh the profile with `aws sso login`, then confirm `AWS_REGION` or the profile region and that the model id can be invoked. If startup reports A2A or MCP, ports `31000` and `31001` are already taken.
 
 Ctrl-C stops what that terminal started. Seed a serial-dilution run that fails mid-protocol (missing tip), then print logs as one OTEL stream:
 
@@ -63,11 +78,9 @@ mise run a2a-lab-ot2 -- command home '{}'
 mise run start -- --readonly
 mise run a2a-lab-ot2 -- --readonly list-tasks
 mise run a2a-lab-ot2 -- --readonly start-task get_protocols
-mise run a2a-lab-ot2 -- agent-message "which tasks can I run?"
-mise run a2a-lab-ot2 -- agent-message --context-id <context_id> "what did you find?"
 ```
 
-`agent-message` talks only to the A2A server (`--a2a-url`, `A2A_URL`, default `http://127.0.0.1:31000`). `--model-provider` / `MODEL_PROVIDER` is `bedrock` (default), `openai`, or `anthropic`. `--model` / `MODEL` selects the model id. When it is omitted, the defaults are Bedrock `global.openai.gpt-5.6-luna`, OpenAI `gpt-5.6-luna`, and Anthropic `claude-sonnet-5`. `--bedrock-model` / `BEDROCK_MODEL` still overrides the Bedrock default. Bedrock uses the process AWS credentials and `AWS_REGION`. OpenAI uses `OPENAI_API_KEY`. Anthropic uses `ANTHROPIC_API_KEY`. Each A2A context is one conversation in `--conversation-db` / `CONVERSATION_DB` (default `.a2a-lab-ot2/conversations.sqlite3`). `--history-limit` / `HISTORY_LIMIT` keeps that many Rig messages, including tool calls. A follow-up passes the printed `context_id` and starts a new A2A task. `--readonly` still hides writes from the model because the tools are the same MCP server.
+`agent-message` talks only to the A2A server (`--a2a-url`, `A2A_URL`, default `http://127.0.0.1:31000`). `--model-provider` / `MODEL_PROVIDER` is `bedrock` (default), `openai`, or `anthropic`. `--model` / `MODEL` selects the model id. When it is omitted, the defaults are Bedrock `global.openai.gpt-5.6-luna`, OpenAI `gpt-5.6-luna`, and Anthropic `claude-sonnet-5`. `--bedrock-model` / `BEDROCK_MODEL` still overrides the Bedrock default. Bedrock loads `AWS_PROFILE` or the `default` profile through the AWS SDK, and `AWS_REGION` overrides that profile's region. OpenAI uses `OPENAI_API_KEY`. Anthropic uses `ANTHROPIC_API_KEY`. Each A2A context is one conversation in `--conversation-db` / `CONVERSATION_DB` (default `.a2a-lab-ot2/conversations.sqlite3`). `--history-limit` / `HISTORY_LIMIT` keeps that many Rig messages, including tool calls. A follow-up passes the printed `context_id` and starts a new A2A task. `--readonly` still hides writes from the model because the tools are the same MCP server.
 
 `mise run start` is `a2a-lab-ot2` (default: A2A and MCP). `mise run ot2-simulator-health` checks `GET /health` on the simulator. `mise run ot2-simulator-clean` removes the simulator container and image.
 
