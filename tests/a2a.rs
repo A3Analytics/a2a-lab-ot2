@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use a2a_lab_dev_kit::{
-    A2aClient, A2aLabError, A2aServer, AgentMessageFuture, AgentMessageHandler, AgentMessageReply,
-    AgentMessageRequest, GetTaskStatusRequest, JsonObject, LabApi, LabCommand, LabResult,
-    A2aLabService, ListTasksRequest, McpLab, McpServer, PageRequest, StartTaskRequest, TaskId,
-    TaskState, bind_local,
+    A2aClient, A2aLabApi, A2aLabCommand, A2aLabError, A2aLabResult, A2aLabService, A2aServer,
+    AgentMessageFuture, AgentMessageHandler, AgentMessageReply, AgentMessageRequest,
+    GetTaskStatusRequest, JsonObject, ListTasksRequest, McpLab, McpServer, PageRequest,
+    StartTaskRequest, TaskId, TaskState, bind_local,
 };
 use a2a_lab_ot2::OpentronsLab;
 use rmcp::ServiceExt;
@@ -18,7 +18,10 @@ fn protocol() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("protocols/serial_dilution.py")
 }
 
-async fn serve(service: Arc<dyn LabApi>, handler: Option<Arc<dyn AgentMessageHandler>>) -> String {
+async fn serve(
+    service: Arc<dyn A2aLabApi>,
+    handler: Option<Arc<dyn AgentMessageHandler>>,
+) -> String {
     let (listener, address) = bind_local().await.unwrap();
     let mut server = A2aServer::new(&service);
     if let Some(handler) = handler {
@@ -78,7 +81,7 @@ async fn a2a_run_pause_resume_and_status() {
         .await
         .unwrap();
     assert_eq!(started.state, TaskState::Working);
-    let LabResult::StartTask(run) = started.result else {
+    let A2aLabResult::StartTask(run) = started.result else {
         panic!("start result");
     };
     let run_id = run.id;
@@ -284,12 +287,12 @@ async fn mcp_lists_tools_and_readonly_hides_writes() {
 
     let connected = McpLab::connect(&url).await.unwrap();
     let listed = connected
-        .execute(LabCommand::ListTasks(ListTasksRequest {
+        .execute(A2aLabCommand::ListTasks(ListTasksRequest {
             page: PageRequest::new(None, 1000).unwrap(),
         }))
         .await
         .unwrap();
-    let LabResult::ListTasks(page) = listed.task.result else {
+    let A2aLabResult::ListTasks(page) = listed.task.result else {
         panic!("list_tasks result");
     };
     assert!(
@@ -305,7 +308,7 @@ async fn mcp_lists_tools_and_readonly_hides_writes() {
     );
 
     let denied = connected
-        .execute(LabCommand::StartTask(
+        .execute(A2aLabCommand::StartTask(
             StartTaskRequest::new(
                 TaskId::new("run_serial_dilution").unwrap(),
                 JsonObject::empty(),
