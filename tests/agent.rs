@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use a2a_lab_dev_kit::{
-    AgentMessageHandler, AgentMessageRequest, LabService, McpServer, MemoryLogs, MemoryMetrics,
+    AgentMessageHandler, AgentMessageRequest, A2aLabService, McpServer, MemoryLogs, MemoryMetrics,
     MemoryTasks, TaskDefinition, TaskId,
 };
 use a2a_lab_ot2::{
@@ -45,7 +45,7 @@ async fn mcp_url() -> String {
             semantic_id: None,
         })
         .await;
-    let service = LabService::new(MemoryLogs::new(), MemoryMetrics::new(), tasks).share();
+    let service = A2aLabService::new(MemoryLogs::new(), MemoryMetrics::new(), tasks).share();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("address");
     let mcp = McpServer::new(&service);

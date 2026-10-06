@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use a2a_lab_dev_kit::{
     A2aClient, A2aLabError, A2aServer, AgentMessageHandler, DEFAULT_MCP_URL, GetTaskStatusRequest,
-    JsonObject, LabService, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest, LogLevel,
+    JsonObject, A2aLabService, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest, LogLevel,
     LogProvider, LogRecord, McpLab, McpServer, MetricId, MetricProvider, PageRequest,
     QueryLogsRequest, QueryMetricRequest, RunId, SourceId, StartTaskRequest, TaskId, TaskProvider,
     TaskState, TimeRange, UtcTimestamp, start_run,
@@ -227,7 +227,7 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     let store = ConversationStore::open(&cli.conversation_db, cli.history_limit)
         .await
         .map_err(|error| startup_error(&conversation, error))?;
-    let service = LabService::new(lab.clone(), lab.clone(), lab).share();
+    let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
     let mcp = McpServer::new(&service);
     let mut mcp_task = AbortOnDrop(tokio::spawn(async move { mcp.serve_http(None).await }));
     let mcp_target = format!("mcp at {DEFAULT_MCP_URL}");

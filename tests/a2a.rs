@@ -7,7 +7,7 @@ use std::time::Duration;
 use a2a_lab_dev_kit::{
     A2aClient, A2aLabError, A2aServer, AgentMessageFuture, AgentMessageHandler, AgentMessageReply,
     AgentMessageRequest, GetTaskStatusRequest, JsonObject, LabApi, LabCommand, LabResult,
-    LabService, ListTasksRequest, McpLab, McpServer, PageRequest, StartTaskRequest, TaskId,
+    A2aLabService, ListTasksRequest, McpLab, McpServer, PageRequest, StartTaskRequest, TaskId,
     TaskState, bind_local,
 };
 use a2a_lab_ot2::OpentronsLab;
@@ -51,7 +51,7 @@ async fn a2a_run_pause_resume_and_status() {
     let mock = Mock::new();
     let (base, _) = mock.bind().await;
     let lab = OpentronsLab::new(&base, protocol()).unwrap();
-    let service = LabService::new(lab.clone(), lab.clone(), lab).share();
+    let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
     let client = A2aClient::new(&serve(Arc::clone(&service), None).await).unwrap();
 
     let tasks = client
@@ -143,7 +143,7 @@ async fn a2a_readonly_keeps_reads_and_rejects_writes() {
     let lab = OpentronsLab::new(&base, protocol())
         .unwrap()
         .with_readonly(true);
-    let service = LabService::new(lab.clone(), lab.clone(), lab).share();
+    let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
     let client = A2aClient::new(&serve(Arc::clone(&service), None).await).unwrap();
 
     let tasks = client
@@ -206,7 +206,7 @@ async fn a2a_agent_message_continues_context_beside_lab_commands() {
     let mock = Mock::new();
     let (base, _) = mock.bind().await;
     let lab = OpentronsLab::new(&base, protocol()).unwrap();
-    let service = LabService::new(lab.clone(), lab.clone(), lab).share();
+    let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
     let client =
         A2aClient::new(&serve(Arc::clone(&service), Some(Arc::new(Repeat))).await).unwrap();
 
@@ -268,7 +268,7 @@ async fn mcp_lists_tools_and_readonly_hides_writes() {
     let lab = OpentronsLab::new(&base, protocol())
         .unwrap()
         .with_readonly(true);
-    let service = LabService::new(lab.clone(), lab.clone(), lab).share();
+    let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mcp = McpServer::new(&service);
