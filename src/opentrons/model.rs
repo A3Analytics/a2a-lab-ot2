@@ -20,20 +20,6 @@ pub struct Health {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Protocol {
-    pub id: String,
-    #[serde(default)]
-    pub analysis_summaries: Vec<AnalysisSummary>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AnalysisSummary {
-    #[serde(default)]
-    pub status: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Run {
     pub id: String,
     pub status: String,

@@ -34,7 +34,6 @@ pub struct Entry {
 
 /// Composite tasks implemented in the provider, not 1:1 HTTP.
 pub const COMPOSITE_TASK_IDS: &[&str] = &[
-    "run_serial_dilution",
     "pause_run",
     "resume_run",
     "stop_run",

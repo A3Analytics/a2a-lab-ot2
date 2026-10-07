@@ -112,8 +112,10 @@ operation = data.get("operation")
 if operation != "list_tasks":
     raise SystemExit("a2a operation " + str(operation))
 ids = [item["id"] for item in data["result"]["items"]]
-if "run_serial_dilution" not in ids:
-    raise SystemExit("a2a list_tasks missing run_serial_dilution")
+if "get_protocols" not in ids:
+    raise SystemExit("a2a list_tasks missing get_protocols")
+if "run_serial_dilution" in ids:
+    raise SystemExit("a2a list_tasks still advertises run_serial_dilution")
 '
 
 mcp_body="$(mktemp)"
@@ -199,7 +201,7 @@ fi
 cargo run --quiet --bin a2a-lab-ot2 -- list-tasks
 cargo run --quiet --bin a2a-lab-ot2 -- list-log-sources
 cargo run --quiet --bin a2a-lab-ot2 -- list-metrics
-run_out="$(cargo run --quiet --bin a2a-lab-ot2 -- start-task)"
+run_out="$(cargo run --quiet --bin a2a-lab-ot2 -- start-task get_protocols)"
 printf '%s\n' "$run_out"
 run_id="$(printf '%s\n' "$run_out" | awk '/^run_id / { print $2; exit }')"
 if [[ -z "$run_id" ]]; then
@@ -207,9 +209,6 @@ if [[ -z "$run_id" ]]; then
   exit 1
 fi
 cargo run --quiet --bin a2a-lab-ot2 -- get-task-status "$run_id"
-cargo run --quiet --bin a2a-lab-ot2 -- pause "$run_id" || true
-cargo run --quiet --bin a2a-lab-ot2 -- resume "$run_id" || true
-cargo run --quiet --bin a2a-lab-ot2 -- stop "$run_id" || true
 cargo run --quiet --bin a2a-lab-ot2 -- home
 cargo run --quiet --bin a2a-lab-ot2 -- query-logs
 cargo run --quiet --bin a2a-lab-ot2 -- query-metrics run_command_count

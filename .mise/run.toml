@@ -44,10 +44,6 @@ run = "cargo run --bin a2a-lab-ot2 --"
 description = "Print advertised log sources as one OTEL log stream"
 run = "bash .mise/scripts/a2a-lab-ot2-example.sh"
 
-[ot2-simulation]
-description = "Play the OT-2 protocol into a mid-run tip error so a2a-lab-ot2 has command and error logs"
-run = "bash .mise/scripts/ot2-simulation.sh"
-
 [ot2-simulator-setup]
 description = "Build the pinned OT-2 robot-server Docker image (Opentrons v10.0.0)"
 run = "bash .mise/scripts/ot2-simulator-setup.sh"

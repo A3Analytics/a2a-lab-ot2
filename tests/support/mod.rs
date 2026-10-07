@@ -1,10 +1,14 @@
 //! Shared mock robot-server for integration tests.
 
 use std::collections::HashMap;
+use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use a2a_lab_dev_kit::{JsonObject, StartTaskRequest, TaskId, TaskProvider};
+use a2a_lab_ot2::OpentronsLab;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, Request, State};
@@ -340,6 +344,46 @@ fn status_for_action(action: &str) -> &'static str {
         }
         _ => "idle",
     }
+}
+
+/// Uploads a throwaway protocol and creates a current robot-server run.
+pub async fn seed_run(lab: &OpentronsLab) -> String {
+    let path = std::env::temp_dir().join(format!(
+        "a2a-lab-ot2-seed-{}-{}.py",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::write(&path, b"def run(protocol):\n    pass\n").expect("seed protocol");
+    let uploaded = lab
+        .start(StartTaskRequest::new(
+            TaskId::new("post_protocols").expect("task id"),
+            JsonObject::parse(&format!(r#"{{"path":"{}"}}"#, path.display())).expect("input"),
+        ))
+        .await
+        .expect("upload protocol");
+    let _ = fs::remove_file(&path);
+    let protocol_id = result_id(&uploaded);
+    let created = lab
+        .start(StartTaskRequest::new(
+            TaskId::new("post_runs").expect("task id"),
+            JsonObject::parse(&format!(r#"{{"data":{{"protocolId":"{protocol_id}"}}}}"#))
+                .expect("input"),
+        ))
+        .await
+        .expect("create run");
+    result_id(&created)
+}
+
+fn result_id(run: &a2a_lab_dev_kit::TaskRun) -> String {
+    run.result
+        .as_ref()
+        .and_then(|value| value.as_map().get("id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("result id")
+        .to_owned()
 }
 
 fn next_id(counter: &AtomicU64, prefix: &str) -> String {

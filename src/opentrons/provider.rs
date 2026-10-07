@@ -1,7 +1,7 @@
 //! Lab providers over a persistent Opentrons robot-server.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use a2a_lab_dev_kit::{
@@ -20,7 +20,6 @@ use super::client::OpentronsClient;
 use super::inventory::{self, Entry, Kind};
 use super::model::{Command, Run};
 
-const RUN_TASK: &str = "run_serial_dilution";
 const PAUSE_TASK: &str = "pause_run";
 const RESUME_TASK: &str = "resume_run";
 const STOP_TASK: &str = "stop_run";
@@ -34,17 +33,15 @@ const OBJECT_SCHEMA: &str = r#"{"additionalProperties":true,"type":"object"}"#;
 #[derive(Clone)]
 pub struct OpentronsLab {
     client: OpentronsClient,
-    protocol_path: PathBuf,
     local: Arc<Mutex<BTreeMap<String, TaskRun>>>,
     readonly: bool,
 }
 
 impl OpentronsLab {
     /// Creates an adapter for a running robot-server.
-    pub fn new(base_url: &str, protocol_path: impl Into<PathBuf>) -> Result<Self, A2aLabError> {
+    pub fn new(base_url: &str) -> Result<Self, A2aLabError> {
         Ok(Self {
             client: OpentronsClient::new(base_url)?,
-            protocol_path: protocol_path.into(),
             local: Arc::new(Mutex::new(BTreeMap::new())),
             readonly: false,
         })
@@ -61,12 +58,6 @@ impl OpentronsLab {
     #[must_use]
     pub fn client(&self) -> &OpentronsClient {
         &self.client
-    }
-
-    /// Bundled protocol path.
-    #[must_use]
-    pub fn protocol_path(&self) -> &Path {
-        &self.protocol_path
     }
 
     async fn store(&self, run: TaskRun) -> TaskRun {
@@ -92,7 +83,6 @@ impl TaskProvider for OpentronsLab {
             return Err(A2aLabError::not_found("task", request.task_id.to_string()));
         }
         match request.task_id.as_str() {
-            RUN_TASK => start_dilution(self, request.input).await,
             PAUSE_TASK => control(self, request, "pause", "pause").await,
             RESUME_TASK => control(self, request, "play", "resume").await,
             STOP_TASK => control(self, request, "stop", "stop").await,
@@ -227,20 +217,11 @@ fn catalog_metrics() -> Vec<MetricDescriptor> {
 fn definitions() -> Vec<TaskDefinition> {
     let mut items: Vec<TaskDefinition> = [
         (
-            RUN_TASK,
-            "Run serial dilution",
-            "Upload the bundled OT-2 protocol, create a run, and play it. The protocol fails mid-run after dropping a tip.",
-        ),
-        (
             PAUSE_TASK,
             "Pause run",
             "Pause an in-progress Opentrons run.",
         ),
-        (
-            RESUME_TASK,
-            "Resume run",
-            "Resume a paused Opentrons run.",
-        ),
+        (RESUME_TASK, "Resume run", "Resume a paused Opentrons run."),
         (STOP_TASK, "Stop run", "Stop (cancel) an Opentrons run."),
         (
             DELETE_TASK,
@@ -276,24 +257,6 @@ fn definitions() -> Vec<TaskDefinition> {
     .collect();
     items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
     items
-}
-
-async fn start_dilution(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRun, A2aLabError> {
-    let bytes = tokio::fs::read(&lab.protocol_path)
-        .await
-        .map_err(|error| A2aLabError::unavailable(error.to_string()))?;
-    let filename = lab
-        .protocol_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| A2aLabError::invalid("protocol", "path must have a file name"))?;
-    let protocol = lab.client.upload_protocol(filename, bytes).await?;
-    lab.client.wait_for_analysis(&protocol.id).await?;
-    let run = lab.client.create_run(&protocol.id).await?;
-    lab.client.run_action(&run.id, "play").await?;
-    let run = lab.client.run(&run.id).await?;
-    let commands = lab.client.run_commands(&run.id).await?;
-    Ok(task_from_run(&run, input, &commands))
 }
 
 async fn control(
@@ -366,7 +329,6 @@ async fn upload_file_task(
         .get("path")
         .and_then(Value::as_str)
         .map(PathBuf::from)
-        .or_else(|| (entry.path == "/protocols").then(|| lab.protocol_path.clone()))
         .ok_or_else(|| A2aLabError::invalid("path", "file path required"))?;
     let bytes = tokio::fs::read(&file_path)
         .await
@@ -783,7 +745,7 @@ fn simulated_api(
             "opentrons-api",
             offset(origin, -3)?,
             LogLevel::Info,
-            "protocol_reader: loaded serial_dilution.py (apiLevel=2.16, robotType=OT-2)",
+            "protocol_reader: loaded protocol (apiLevel=2.16, robotType=OT-2)",
         )?,
         journal_line(
             "api.log",
@@ -1267,7 +1229,7 @@ fn task_from_run(run: &Run, input: JsonObject, commands: &[Command]) -> TaskRun 
     };
     TaskRun {
         id: RunId::new(&run.id).expect("opentrons run id"),
-        task_id: TaskId::new(RUN_TASK).expect("task id"),
+        task_id: TaskId::new("get_run").expect("task id"),
         state,
         input,
         message: Some(run.status.clone()),
@@ -1332,7 +1294,6 @@ fn composite_input_schema(id: &str) -> String {
             &["commandType"],
             true,
         ),
-        RUN_TASK => OBJECT_SCHEMA.to_owned(),
         _ => object_schema(
             [("run_id", "Opentrons run identifier.")],
             &["run_id"],

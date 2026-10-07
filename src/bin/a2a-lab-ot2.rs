@@ -14,23 +14,20 @@ use a2a_lab_dev_kit::{
 };
 use a2a_lab_ot2::{
     ConversationStore, DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, LabAgent, ModelProvider, OidcConfig,
-    OpentronsLab, SilaConfig, default_protocol, prepare_sila, selected_model, sila_server,
-    with_oidc,
+    OpentronsLab, SilaConfig, prepare_sila, selected_model, sila_server, with_oidc,
 };
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
     name = "a2a-lab-ot2",
+    version,
     about = "Call a2a-lab operations against an OT-2 robot-server HTTP API"
 )]
 struct Cli {
     /// Robot-server HTTP base URL (`GET /health`, `/runs`, `/logs`, …)
     #[arg(long, env = "OPENTRONS_URL", default_value = "http://127.0.0.1:31950")]
     opentrons_url: String,
-    /// Protocol file for `start-task run_serial_dilution`
-    #[arg(long, env = "OPENTRONS_PROTOCOL")]
-    protocol: Option<PathBuf>,
     /// Advertise and execute only GET-backed tasks
     #[arg(long, global = true)]
     readonly: bool,
@@ -142,9 +139,8 @@ enum Command {
     QueryLogs { source_ids: Vec<String> },
     /// `query_metric` (omit to query every metric)
     QueryMetrics { metric_id: Option<String> },
-    /// `start_task` (defaults to `run_serial_dilution`)
+    /// `start_task`
     StartTask {
-        #[arg(default_value = "run_serial_dilution")]
         task_id: String,
         #[arg(long, default_value = "{}")]
         input: String,
@@ -270,11 +266,7 @@ async fn agent_message(
 }
 
 fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
-    Ok(OpentronsLab::new(
-        &cli.opentrons_url,
-        cli.protocol.clone().unwrap_or_else(default_protocol),
-    )?
-    .with_readonly(cli.readonly))
+    Ok(OpentronsLab::new(&cli.opentrons_url)?.with_readonly(cli.readonly))
 }
 
 async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {

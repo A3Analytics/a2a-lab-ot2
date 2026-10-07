@@ -91,8 +91,8 @@ lab query-metrics healthy
 section "start_task execute_command home"
 lab home
 
-section "start_task run_serial_dilution"
-run_out="$(lab start-task run_serial_dilution)"
+section "start_task get_protocols"
+run_out="$(lab start-task get_protocols)"
 printf '%s\n' "$run_out"
 run_id="$(printf '%s\n' "$run_out" | awk '/^run_id / { print $2; exit }')"
 if [[ -z "$run_id" ]]; then

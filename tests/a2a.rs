@@ -1,6 +1,5 @@
 mod support;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,15 +7,12 @@ use a2a_lab_dev_kit::{
     A2aClient, A2aLabApi, A2aLabCommand, A2aLabError, A2aLabResult, A2aLabService, A2aServer,
     AgentMessageFuture, AgentMessageHandler, AgentMessageReply, AgentMessageRequest,
     GetTaskStatusRequest, JsonObject, ListTasksRequest, McpLab, McpServer, MemoryLogs,
-    MemoryMetrics, MemoryTasks, PageRequest, StartTaskRequest, TaskId, TaskState, bind_local,
+    MemoryMetrics, MemoryTasks, PageRequest, RunId, StartTaskRequest, TaskId, TaskState,
+    bind_local,
 };
 use a2a_lab_ot2::{OidcConfig, OpentronsLab, with_oidc};
 use rmcp::ServiceExt;
 use support::Mock;
-
-fn protocol() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("protocols/serial_dilution.py")
-}
 
 async fn serve(
     service: Arc<dyn A2aLabApi>,
@@ -53,8 +49,8 @@ impl AgentMessageHandler for Repeat {
 async fn a2a_run_pause_resume_and_status() {
     let mock = Mock::new();
     let (base, _) = mock.bind().await;
-    let lab = OpentronsLab::new(&base, protocol()).unwrap();
-    let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
+    let lab = OpentronsLab::new(&base).unwrap();
+    let service = A2aLabService::new(lab.clone(), lab.clone(), lab.clone()).share();
     let client = A2aClient::new(&serve(Arc::clone(&service), None).await).unwrap();
 
     let tasks = client
@@ -63,31 +59,20 @@ async fn a2a_run_pause_resume_and_status() {
         })
         .await
         .unwrap();
-    let dilution = tasks
-        .items()
-        .iter()
-        .find(|item| item.id.as_str() == "run_serial_dilution")
-        .unwrap();
-    assert!(dilution.input_schema.is_some());
-    assert!(dilution.output_schema.is_some());
+    assert!(
+        tasks
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "pause_run" && item.input_schema.is_some())
+    );
+    assert!(
+        !tasks
+            .items()
+            .iter()
+            .any(|item| item.id.as_str() == "run_serial_dilution")
+    );
 
-    let started = client
-        .start_task(
-            StartTaskRequest::new(
-                TaskId::new("run_serial_dilution").unwrap(),
-                JsonObject::empty(),
-            )
-            .immediate(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(started.state, TaskState::Working);
-    let A2aLabResult::StartTask(run) = started.result else {
-        panic!("start result");
-    };
-    assert_eq!(run.progress, Some(1.0));
-    assert!(run.result.is_some());
-    let run_id = run.id;
+    let run_id = RunId::new(&support::seed_run(&lab).await).unwrap();
 
     let paused = client
         .start_task(StartTaskRequest::new(
@@ -146,9 +131,7 @@ async fn a2a_run_pause_resume_and_status() {
 async fn a2a_readonly_keeps_reads_and_rejects_writes() {
     let mock = Mock::new();
     let (base, _) = mock.bind().await;
-    let lab = OpentronsLab::new(&base, protocol())
-        .unwrap()
-        .with_readonly(true);
+    let lab = OpentronsLab::new(&base).unwrap().with_readonly(true);
     let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
     let client = A2aClient::new(&serve(Arc::clone(&service), None).await).unwrap();
 
@@ -211,7 +194,7 @@ async fn a2a_readonly_keeps_reads_and_rejects_writes() {
 async fn a2a_agent_message_continues_context_beside_lab_commands() {
     let mock = Mock::new();
     let (base, _) = mock.bind().await;
-    let lab = OpentronsLab::new(&base, protocol()).unwrap();
+    let lab = OpentronsLab::new(&base).unwrap();
     let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
     let client =
         A2aClient::new(&serve(Arc::clone(&service), Some(Arc::new(Repeat))).await).unwrap();
@@ -263,7 +246,7 @@ async fn a2a_agent_message_continues_context_beside_lab_commands() {
         tasks
             .items()
             .iter()
-            .any(|item| item.id.as_str() == "run_serial_dilution")
+            .any(|item| item.id.as_str() == "get_protocols")
     );
 }
 
@@ -271,9 +254,7 @@ async fn a2a_agent_message_continues_context_beside_lab_commands() {
 async fn mcp_lists_tools_and_readonly_hides_writes() {
     let mock = Mock::new();
     let (base, _) = mock.bind().await;
-    let lab = OpentronsLab::new(&base, protocol())
-        .unwrap()
-        .with_readonly(true);
+    let lab = OpentronsLab::new(&base).unwrap().with_readonly(true);
     let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

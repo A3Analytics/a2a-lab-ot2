@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            libc: gnu
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            libc: gnu
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            libc: musl
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            libc: musl
+          - target: aarch64-apple-darwin
+            runner: macos-26
+            libc: darwin
+    steps:
+      - name: Checkout a2a-lab-ot2
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          path: a2a-lab-ot2
+
+      - name: Checkout a2a-lab-dev-kit-rs
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          repository: A3Analytics/a2a-lab-dev-kit-rs
+          ref: 690a687ba92cafefa8b98b128933c8513d46b4de
+          token: ${{ secrets.DEVKIT_READ_TOKEN }}
+          path: a2a-lab-dev-kit-rs
+
+      - name: Require the tag to match the package version
+        working-directory: a2a-lab-ot2
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ "$tag" != "$version" ]]; then
+            printf 'tag %s does not match Cargo.toml version %s\n' "$tag" "$version" >&2
+            exit 1
+          fi
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: matrix.libc == 'musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        working-directory: a2a-lab-ot2
+        run: |
+          set -euo pipefail
+          if [[ '${{ matrix.libc }}' == musl ]]; then
+            case '${{ matrix.target }}' in
+              x86_64-unknown-linux-musl)
+                export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+                ;;
+              aarch64-unknown-linux-musl)
+                export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+                ;;
+            esac
+            export OPENSSL_STATIC=1
+          fi
+          cargo build --locked --release --bin a2a-lab-ot2 --target '${{ matrix.target }}'
+
+      - name: Smoke-test and package
+        id: package
+        working-directory: a2a-lab-ot2
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          target='${{ matrix.target }}'
+          built="target/${target}/release/a2a-lab-ot2"
+          asset="a2a-lab-ot2-${version}-${target}"
+          "$built" --help >/dev/null
+          version_text="$("$built" --version)"
+          printf '%s\n' "$version_text"
+          case "$version_text" in
+            "a2a-lab-ot2 ${version}") ;;
+            *)
+              printf 'unexpected version output: %s\n' "$version_text" >&2
+              exit 1
+              ;;
+          esac
+          case '${{ matrix.libc }}' in
+            musl)
+              ldd_text="$(ldd "$built" 2>&1 || true)"
+              printf '%s\n' "$ldd_text"
+              case "$ldd_text" in
+                *"not a dynamic executable"*) ;;
+                *)
+                  printf 'musl binary is dynamically linked\n' >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+            gnu)
+              ldd_text="$(ldd "$built" 2>&1 || true)"
+              printf '%s\n' "$ldd_text"
+              case "$ldd_text" in
+                *libc.so*) ;;
+                *)
+                  printf 'glibc binary is not linked to libc\n' >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+            darwin)
+              link_text="$(otool -L "$built")"
+              printf '%s\n' "$link_text"
+              case "$link_text" in
+                *libSystem*) ;;
+                *)
+                  printf 'darwin binary is not linked to libSystem\n' >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+          esac
+          cp "$built" "$asset"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.package.outputs.asset }}
+          path: a2a-lab-ot2/${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksum and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum a2a-lab-ot2-* | tee SHA256SUMS
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            printf 'release %s already exists\n' "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "glibc and musl Linux binaries, plus an Apple Silicon macOS binary, for a2a-lab-ot2 ${GITHUB_REF_NAME#v}." \
+            --verify-tag \
+            a2a-lab-ot2-* \
+            SHA256SUMS

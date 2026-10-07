@@ -22,15 +22,15 @@ mise run start -- [options]
 
 `mise run start` and `mise run a2a-lab-ot2` both run the binary. `start` is the serve path. Put global options before the subcommand. `--readonly` is global, so it may also follow the subcommand. `help` prints this text or the help of a subcommand.
 
-Generated top-level help begins `Call a2a-lab operations against an OT-2 robot-server HTTP API` and lists `serve`, `list-tasks`, `list-log-sources`, `list-metrics`, `query-logs`, `query-metrics`, `start-task`, `get-task-status`, `pause`, `resume`, `stop`, `home`, `command`, `agent-message`, and `help`.
+Generated top-level help begins `Call a2a-lab operations against an OT-2 robot-server HTTP API` and lists `serve`, `list-tasks`, `list-log-sources`, `list-metrics`, `query-logs`, `query-metrics`, `start-task`, `get-task-status`, `pause`, `resume`, `stop`, `home`, `command`, `agent-message`, and `help`. `--version` prints `a2a-lab-ot2` and the package version.
 
 ## Where an option applies
 
 | Commands                   | Options that change behavior                                                                                                                                                                                                                                                          |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `serve`, and no subcommand | Robot URL, protocol path, readonly, conversation store, model selection, history limit, OIDC, and every SiLA setting.                                                                                                                                                                 |
+| `serve`, and no subcommand | Robot URL, readonly, conversation store, model selection, history limit, OIDC, and every SiLA setting.                                                                                                                                                                                |
 | `agent-message`            | `--a2a-url` / `A2A_URL` and `--a2a-token` / `A2A_TOKEN`, plus `--context-id` and the text arguments. Other accepted flags are ignored. The generated help text says `Send plain text to the Bedrock agent over A2A`; the server-side provider is still Bedrock, OpenAI, or Anthropic. |
-| Every other subcommand     | `--opentrons-url` / `OPENTRONS_URL`, `--protocol` / `OPENTRONS_PROTOCOL`, and `--readonly`. The process does not bind A2A, MCP, or SiLA and does not open the conversation database.                                                                                                  |
+| Every other subcommand     | `--opentrons-url` / `OPENTRONS_URL` and `--readonly`. The process does not bind A2A, MCP, or SiLA and does not open the conversation database.                                                                                                                                       |
 
 A command-line value replaces the environment variable of the same option. The environment variable replaces the built-in default. Empty `MODEL`, `BEDROCK_MODEL`, `A2A_OIDC_ISSUER`, and `A2A_TOKEN` are treated as unset.
 
@@ -39,7 +39,6 @@ A command-line value replaces the environment variable of the same option. The e
 | Option                    | Environment             | Default                                      | Effect                                                                                                                 |
 | ------------------------- | ----------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `--opentrons-url`         | `OPENTRONS_URL`         | `http://127.0.0.1:31950`                     | Robot-server base URL for health, runs, logs, and tasks.                                                               |
-| `--protocol`              | `OPENTRONS_PROTOCOL`    | `protocols/serial_dilution.py` in this crate | File uploaded by `run_serial_dilution`.                                                                                |
 | `--readonly`              | none                    | off                                          | Advertise and execute only GET-backed tasks.                                                                           |
 | `--a2a-url`               | `A2A_URL`               | `http://127.0.0.1:31000`                     | A2A origin used by `agent-message`. It does not move the A2A listener.                                                 |
 | `--conversation-db`       | `CONVERSATION_DB`       | `.a2a-lab-ot2/conversations.sqlite3`         | SQLite file of Rig messages, one conversation per A2A context. Parent directories are created. The file uses WAL mode. |
@@ -63,7 +62,7 @@ A command-line value replaces the environment variable of the same option. The e
 | `--sila-ca-out`           | `SILA_CA_OUT`           | `.a2a-lab-ot2/sila-ca.crt`                   | File written with the self-signed CA.                                                                                  |
 | `--sila-announce`         | `SILA_ANNOUNCE`         | off                                          | Advertise `_sila._tcp.local.` after the listener is ready.                                                             |
 
-Relative paths are resolved from the process working directory. The protocol default is the crate file, not the working directory.
+Relative paths are resolved from the process working directory.
 
 ## Model providers
 
@@ -85,7 +84,7 @@ The model is loaded only while serving. Startup prints `model <provider> <id>`. 
 
 ## Commands and output
 
-`list-tasks` prints `a2a-lab list_tasks` and then `id<TAB>name` for the first page of 50 tasks, sorted by id. It does not follow the next cursor. The full catalog is 8 composite tasks plus 108 primitive HTTP tasks. A2A and MCP callers can request a larger page. Readonly mode still pages at 50; that catalog is the 54 GET-backed primitives.
+`list-tasks` prints `a2a-lab list_tasks` and then `id<TAB>name` for the first page of 50 tasks, sorted by id. It does not follow the next cursor. The full catalog is 7 composite tasks plus 108 primitive HTTP tasks. A2A and MCP callers can request a larger page. Readonly mode still pages at 50; that catalog is the 54 GET-backed primitives.
 
 `list-log-sources` prints `a2a-lab list_log_sources` and `id<TAB>name` for all 15 sources. Readonly does not remove sources.
 
@@ -95,7 +94,7 @@ The model is loaded only while serving. Startup prints `model <provider> <id>`. 
 
 `query-metrics [METRIC_ID]` prints `a2a-lab query_metric` and then `id value`. An omitted id queries the first page of 10 metrics, which holds the current 9. A missing sample prints `-`.
 
-`start-task [TASK_ID]` defaults to `run_serial_dilution`. `--input` defaults to `{}`. The command waits for a terminal state unless `--no-wait` is set. `--timeout` is the wait in seconds and defaults to 60; `0` is rejected. `--no-wait` returns after the run is accepted. Output starts with `a2a-lab start_task <task>` and then the `TaskRun` lines below.
+`start-task TASK_ID` requires a task id. `--input` defaults to `{}`. The command waits for a terminal state unless `--no-wait` is set. `--timeout` is the wait in seconds and defaults to 60; `0` is rejected. `--no-wait` returns after the run is accepted. Output starts with `a2a-lab start_task <task>` and then the `TaskRun` lines below.
 
 `get-task-status <RUN_ID>` prints `a2a-lab get_task_status` and the same `TaskRun` lines.
 
@@ -158,7 +157,7 @@ The server type is `OpentronsOt2` and the default server name is `opentrons-ot2`
 
 ## Readonly behavior
 
-`--readonly` removes the 8 composite tasks and every non-GET HTTP task from `list_tasks`. `start_task` for a removed id returns `not_found`. Logs, metrics, `get_task_status`, MCP, and SiLA still start. The flag is an inventory filter. It is not an authorization check, and it is not a physical-safety control. On `agent-message` the flag is accepted and ignored by the client; a readonly MCP server hides writes from the model only when the server itself was started with `--readonly`.
+`--readonly` removes the 7 composite tasks and every non-GET HTTP task from `list_tasks`. `start_task` for a removed id returns `not_found`. Logs, metrics, `get_task_status`, MCP, and SiLA still start. The flag is an inventory filter. It is not an authorization check, and it is not a physical-safety control. On `agent-message` the flag is accepted and ignored by the client; a readonly MCP server hides writes from the model only when the server itself was started with `--readonly`.
 
 ## Synthetic journal records
 

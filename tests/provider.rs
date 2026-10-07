@@ -1,7 +1,5 @@
 mod support;
 
-use std::path::PathBuf;
-
 use a2a_lab_dev_kit::{
     GetTaskStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest,
     LogLevel, LogProvider, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest,
@@ -22,25 +20,16 @@ fn range() -> TimeRange {
     .unwrap()
 }
 
-fn protocol() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("protocols/serial_dilution.py")
-}
-
 async fn lab() -> (OpentronsLab, Mock) {
     let mock = Mock::new();
     let (base, _) = mock.bind().await;
-    (OpentronsLab::new(&base, protocol()).unwrap(), mock)
+    (OpentronsLab::new(&base).unwrap(), mock)
 }
 
 async fn readonly_lab() -> (OpentronsLab, Mock) {
     let mock = Mock::new();
     let (base, _) = mock.bind().await;
-    (
-        OpentronsLab::new(&base, protocol())
-            .unwrap()
-            .with_readonly(true),
-        mock,
-    )
+    (OpentronsLab::new(&base).unwrap().with_readonly(true), mock)
 }
 
 #[tokio::test]
@@ -54,7 +43,7 @@ async fn lists_tasks_sources_and_metrics() {
         tasks
             .items()
             .iter()
-            .any(|item| item.id.as_str() == "run_serial_dilution")
+            .any(|item| item.id.as_str() == "pause_run")
     );
     assert!(
         tasks
@@ -127,18 +116,6 @@ async fn advertises_task_schemas() {
         .list_tasks(ListTasksRequest { page: page() })
         .await
         .unwrap();
-    let dilution = tasks
-        .items()
-        .iter()
-        .find(|item| item.id.as_str() == "run_serial_dilution")
-        .unwrap();
-    assert!(
-        dilution
-            .input_schema
-            .as_deref()
-            .is_some_and(|schema| schema.contains("object"))
-    );
-    assert!(dilution.output_schema.is_some());
     let pause = tasks
         .items()
         .iter()
@@ -164,42 +141,32 @@ async fn advertises_task_schemas() {
 }
 
 #[tokio::test]
-async fn runs_serial_dilution_and_maps_status() {
-    let (lab, mock) = lab().await;
-    let started = lab
+async fn maps_robot_run_status() {
+    let (lab, _) = lab().await;
+    let run_id = support::seed_run(&lab).await;
+    let status = lab
+        .status(GetTaskStatusRequest {
+            id: RunId::new(&run_id).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(status.task_id.as_str(), "get_run");
+    assert_eq!(status.progress, Some(1.0));
+    assert!(status.result.is_some());
+    let missing = lab
         .start(StartTaskRequest::new(
             TaskId::new("run_serial_dilution").unwrap(),
             JsonObject::empty(),
         ))
         .await
-        .unwrap();
-    assert_eq!(started.state, TaskState::Working);
-    assert_eq!(started.message.as_deref(), Some("running"));
-    assert_eq!(started.progress, Some(1.0));
-    assert!(started.result.is_some());
-    assert!(started.error_kind.is_none());
-    let actions = mock.actions().await;
-    assert!(actions.iter().any(|(_, action)| action == "play"));
-    let status = lab
-        .status(GetTaskStatusRequest {
-            id: started.id.clone(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(status.state, TaskState::Working);
+        .unwrap_err();
+    assert_eq!(missing.code(), "not_found");
 }
 
 #[tokio::test]
 async fn pauses_resumes_stops_and_deletes() {
     let (lab, mock) = lab().await;
-    let started = lab
-        .start(StartTaskRequest::new(
-            TaskId::new("run_serial_dilution").unwrap(),
-            JsonObject::empty(),
-        ))
-        .await
-        .unwrap();
-    let run_id = started.id.as_str();
+    let run_id = support::seed_run(&lab).await;
     let paused = lab
         .start(StartTaskRequest::new(
             TaskId::new("pause_run").unwrap(),
@@ -240,17 +207,11 @@ async fn pauses_resumes_stops_and_deletes() {
 #[tokio::test]
 async fn recovery_and_stateless_commands() {
     let (lab, _) = lab().await;
-    let started = lab
-        .start(StartTaskRequest::new(
-            TaskId::new("run_serial_dilution").unwrap(),
-            JsonObject::empty(),
-        ))
-        .await
-        .unwrap();
+    let run_id = support::seed_run(&lab).await;
     let recovered = lab
         .start(StartTaskRequest::new(
             TaskId::new("resume_from_recovery").unwrap(),
-            JsonObject::parse(&format!(r#"{{"run_id":"{}"}}"#, started.id)).unwrap(),
+            JsonObject::parse(&format!(r#"{{"run_id":"{run_id}"}}"#)).unwrap(),
         ))
         .await
         .unwrap();
@@ -327,12 +288,7 @@ async fn rejects_bad_input_and_unknown_ids() {
 #[tokio::test]
 async fn queries_logs_and_metrics() {
     let (lab, _) = lab().await;
-    lab.start(StartTaskRequest::new(
-        TaskId::new("run_serial_dilution").unwrap(),
-        JsonObject::empty(),
-    ))
-    .await
-    .unwrap();
+    support::seed_run(&lab).await;
     let logs = LogProvider::query(
         &lab,
         QueryLogsRequest {
@@ -416,12 +372,7 @@ async fn queries_logs_and_metrics() {
 #[tokio::test]
 async fn queries_gauges_and_extra_logs() {
     let (lab, _) = lab().await;
-    lab.start(StartTaskRequest::new(
-        TaskId::new("run_serial_dilution").unwrap(),
-        JsonObject::empty(),
-    ))
-    .await
-    .unwrap();
+    support::seed_run(&lab).await;
     let door = MetricProvider::query(
         &lab,
         QueryMetricRequest {
@@ -485,12 +436,7 @@ async fn paginates_task_list() {
 #[tokio::test]
 async fn primitive_http_tasks_complete() {
     let (lab, _) = lab().await;
-    lab.start(StartTaskRequest::new(
-        TaskId::new("run_serial_dilution").unwrap(),
-        JsonObject::empty(),
-    ))
-    .await
-    .unwrap();
+    support::seed_run(&lab).await;
     let protocols = lab
         .start(StartTaskRequest::new(
             TaskId::new("get_protocols").unwrap(),

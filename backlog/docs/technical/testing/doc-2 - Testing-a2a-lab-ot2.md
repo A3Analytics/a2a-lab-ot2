@@ -40,7 +40,7 @@ Tests bind local listeners and a mock robot-server. They do not start the Docker
 | File                   | Behavior under test                                                                                                                                                                                                              |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tests/inventory.rs`   | Every pinned OpenAPI operation is classified, inventory ids are unique, and read tasks are GET-backed.                                                                                                                           |
-| `tests/provider.rs`    | Task, log, and metric catalogs; schemas; serial dilution; pause, resume, stop, and delete; recovery and stateless commands; rejected input; logs and gauges; pagination; primitive HTTP tasks; readonly advertisement and start. |
+| `tests/provider.rs`    | Task, log, and metric catalogs; schemas; pause, resume, stop, and delete; recovery and stateless commands; rejected input; logs and gauges; pagination; primitive HTTP tasks; readonly advertisement and start. |
 | `tests/a2a.rs`         | A2A run control, readonly over A2A, `agent-message` context, MCP tool listing, and OpenID Connect acceptance and rejection.                                                                                                      |
 | `tests/agent.rs`       | Model selection, conversation history, tool calls, and one-context turn ordering.                                                                                                                                                |
 | `tests/sila.rs`        | Default SiLA identity, operator PEM replacement, rejection of a partial PEM set, and a TLS bind.                                                                                                                                 |
@@ -59,7 +59,7 @@ Provider tests require every non-skip inventory id to appear in `list_tasks`, `l
 
 Smoke always rebuilds through `mise run ot2-simulator-setup`, removes the container named `a2a-lab-ot2-sim`, and exits if `127.0.0.1:31950` stays occupied. It then starts the simulator and `a2a-lab-ot2 serve` with `SILA_PORT=0`. The check covers the agent card, an A2A `list_tasks` call, the MCP tool list, two Bedrock `agent-message` turns that share a context, and the direct CLI operations `list-tasks`, `list-log-sources`, `list-metrics`, `start-task`, `get-task-status`, `pause`, `resume`, `stop`, `home`, `query-logs`, and `query-metrics`.
 
-Those CLI operations mutate the simulator. `start-task` runs the bundled serial-dilution protocol, which fails after moving the simulated robot. `home` issues a home command. Pause, resume, and stop are attempted against that run. On the way out, smoke stops its processes and removes the `a2a-lab-ot2-sim` container, including a simulator that was already using that name.
+Those CLI operations call the simulator. `start-task get_protocols` lists uploaded protocols. `home` issues a home command. On the way out, smoke stops its processes and removes the `a2a-lab-ot2-sim` container, including a simulator that was already using that name.
 
 A successful run prints:
 
@@ -86,7 +86,6 @@ These exercise a live robot-server. They are not part of `mise run test` or `mis
 | `mise run ot2-simulator-setup`  | Builds image `a2a-lab-ot2-sim:v10.0.0`. `OPENTRONS_TAG` selects another tag. `edge`, `latest`, `main`, and `master` are refused. |
 | `mise run ot2-simulator`        | Runs container `a2a-lab-ot2-sim` at `127.0.0.1:31950`.                                                                           |
 | `mise run ot2-simulator-health` | Requests `/health` on `OPENTRONS_URL`, default `http://127.0.0.1:31950`.                                                         |
-| `mise run ot2-simulation`       | Uploads the bundled protocol and plays it until the intentional missing-tip failure.                                             |
 | `mise run a2a-lab-ot2-example`  | Prints merged `query_logs` output for the robot at `OPENTRONS_URL`.                                                              |
 | `mise run ot2-simulator-clean`  | Removes the simulator container, image, and `.cache/opentrons`.                                                                  |
 

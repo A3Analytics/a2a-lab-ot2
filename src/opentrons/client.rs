@@ -6,7 +6,7 @@ use a2a_lab_dev_kit::A2aLabError;
 use reqwest::{Method, StatusCode, Url};
 use serde_json::{Value, json};
 
-use super::model::{AnalysisSummary, Command, Envelope, Health, Protocol, Run};
+use super::model::{Command, Envelope, Health, Run};
 
 const VERSION_HEADER: &str = "Opentrons-Version";
 const VERSION: &str = "*";
@@ -36,16 +36,6 @@ impl OpentronsClient {
         self.send_json(Method::GET, "health", None).await
     }
 
-    /// `POST /protocols` with the bundled protocol file.
-    pub async fn upload_protocol(
-        &self,
-        filename: &str,
-        bytes: Vec<u8>,
-    ) -> Result<Protocol, A2aLabError> {
-        self.upload_bytes("protocols", "files", filename, bytes, "text/x-python")
-            .await
-    }
-
     /// Multipart POST used by protocol, data-file, and Wi-Fi key uploads.
     pub async fn upload_bytes<T>(
         &self,
@@ -72,39 +62,6 @@ impl OpentronsClient {
             .await
             .map_err(|error| transport(&error))?;
         self.read_data(response).await
-    }
-
-    /// `GET /protocols/{id}`.
-    pub async fn protocol(&self, protocol_id: &str) -> Result<Protocol, A2aLabError> {
-        self.send_json(Method::GET, &format!("protocols/{protocol_id}"), None)
-            .await
-    }
-
-    /// Polls until the latest analysis is no longer pending.
-    pub async fn wait_for_analysis(&self, protocol_id: &str) -> Result<Protocol, A2aLabError> {
-        for _ in 0..60 {
-            let protocol = self.protocol(protocol_id).await?;
-            if !protocol.analysis_summaries.is_empty()
-                && protocol.analysis_summaries.iter().all(analysis_ready)
-            {
-                return Ok(protocol);
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        Err(A2aLabError::unavailable(
-            "protocol analysis did not finish in time",
-        ))
-    }
-
-    /// `POST /runs`. Dismisses any current run first; robot-server allows only one.
-    pub async fn create_run(&self, protocol_id: &str) -> Result<Run, A2aLabError> {
-        self.release_current().await?;
-        self.send_json(
-            Method::POST,
-            "runs",
-            Some(json!({ "data": { "protocolId": protocol_id } })),
-        )
-        .await
     }
 
     /// `GET /runs/{id}`.
@@ -227,32 +184,6 @@ impl OpentronsClient {
         serde_json::from_str(&text).or(Ok(Value::String(text)))
     }
 
-    async fn release_current(&self) -> Result<(), A2aLabError> {
-        for run in self.runs().await? {
-            if !run.current {
-                continue;
-            }
-            if matches!(
-                run.status.as_str(),
-                "running"
-                    | "paused"
-                    | "pause-requested"
-                    | "blocked-by-open-door"
-                    | "awaiting-recovery"
-            ) {
-                let _ = self.run_action(&run.id, "stop").await;
-            }
-            let _: Run = self
-                .send_json(
-                    Method::PATCH,
-                    &format!("runs/{}", run.id),
-                    Some(json!({ "data": { "current": false } })),
-                )
-                .await?;
-        }
-        Ok(())
-    }
-
     async fn send_json<T>(
         &self,
         method: Method,
@@ -314,10 +245,6 @@ fn transport(error: &reqwest::Error) -> A2aLabError {
     A2aLabError::unavailable(format!(
         "robot-server is unreachable ({error}); keep `mise run ot2-simulator` running"
     ))
-}
-
-fn analysis_ready(summary: &AnalysisSummary) -> bool {
-    summary.status != "pending"
 }
 
 fn parse_method(method: &str) -> Result<Method, A2aLabError> {
