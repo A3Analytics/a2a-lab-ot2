@@ -1,7 +1,9 @@
-name: Release
+name: Build
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -9,8 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 jobs:
   build:
@@ -50,6 +52,7 @@ jobs:
           path: a2a-lab-dev-kit-rs
 
       - name: Require the tag to match the package version
+        if: startsWith(github.ref, 'refs/tags/v')
         working-directory: a2a-lab-ot2
         run: |
           set -euo pipefail
@@ -92,7 +95,7 @@ jobs:
         working-directory: a2a-lab-ot2
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
           target='${{ matrix.target }}'
           built="target/${target}/release/a2a-lab-ot2"
           asset="a2a-lab-ot2-${version}-${target}"
@@ -154,6 +157,7 @@ jobs:
   release:
     name: Publish GitHub release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
       contents: write

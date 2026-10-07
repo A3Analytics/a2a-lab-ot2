@@ -68,17 +68,3 @@ OPENTRONS_URL=http://<robot-host>:31950 mise run start
 | SiLA 2            | `127.0.0.1:50052`            | `--sila-host`, `--sila-port`, and `SILA_*`                        | open; TLS                                                       |
 
 A2A serves `/.well-known/agent-card.json` and `POST /message:send`. OpenID Connect protects that A2A listener only. MCP and SiLA stay open. With an issuer, A2A expects a bearer token for audience `a2a-lab` and scope `a2a.invoke`.
-
-## Release
-
-Push a tag `vX.Y.Z` that matches `version` in `Cargo.toml`. GitHub Actions publishes Linux and Apple Silicon binaries and `SHA256SUMS`:
-
-- `a2a-lab-ot2-X.Y.Z-x86_64-unknown-linux-gnu`
-- `a2a-lab-ot2-X.Y.Z-aarch64-unknown-linux-gnu`
-- `a2a-lab-ot2-X.Y.Z-x86_64-unknown-linux-musl`
-- `a2a-lab-ot2-X.Y.Z-aarch64-unknown-linux-musl`
-- `a2a-lab-ot2-X.Y.Z-aarch64-apple-darwin`
-
-The `linux-gnu` binaries link glibc. The `linux-musl` binaries are static. The `apple-darwin` binary is Apple Silicon and links macOS `libSystem`.
-
-The workflow checks out `a2a-lab-dev-kit-rs` at a pinned revision using the `DEVKIT_READ_TOKEN` secret. That token needs read-only access to the private dev-kit repository. An existing tag is not replaced.
