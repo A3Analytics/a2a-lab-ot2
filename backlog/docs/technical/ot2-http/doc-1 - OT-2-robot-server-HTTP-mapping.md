@@ -46,10 +46,20 @@ Query string:
 
 Multipart uploads (`post_protocols`, `post_data_files`, `post_wifi_keys`) take `path` (and optional `filename`). `post_protocols` defaults to the bundled serial-dilution file.
 
-`TaskRun.message` is JSON text for primitive reads/writes. Auth-scoped routes (for example `PUT /system/time`) stay advertised; robot-server errors surface as `A2aLabError`.
+`TaskRun.message` is a short status. Primitive reads and writes put the robot-server JSON object on `TaskRun.result` (arrays and scalars are wrapped as `{"value": ...}`). `run_serial_dilution` sets `progress` from 0 through 1 using the share of terminal protocol commands. A failed command or run sets `error_kind` from `errorType` and `error_identifier` from the error id. Auth-scoped routes (for example `PUT /system/time`) stay advertised; robot-server errors surface as `A2aLabError`.
+
+Each advertised task includes `input_schema` and `output_schema`. Composite tasks describe `run_id`, or `commandType` plus `params` for `execute_command`. Primitive tasks describe path parameters and, for mutations, `body` and `data`.
+
+## Interfaces
+
+The same provider backs the CLI, A2A, MCP, and SiLA. A2A lab data parts use `application/json`. Requests that still send `application/a2a+json` remain accepted.
+
+SiLA listens by default at `127.0.0.1:50052` with UUID `0e2a0002-0000-4000-8000-000000000002` and a self-signed certificate. Operator PEM files replace that certificate when the certificate, key, and CA are all supplied.
+
+A2A stays open unless an OpenID Connect issuer is configured. With an issuer, A2A requires a bearer token for the configured audience and `a2a.invoke` scope. MCP and SiLA do not consume that token.
 
 ## Coverage
 
 `tests/inventory.rs` requires every `OPENAPI_OPERATIONS` pair to be classified. Provider tests require every non-skip inventory id to appear in `list_tasks`, `list_sources`, or `list_metrics`.
 
-See TASK-1 through TASK-7.
+See TASK-1 through TASK-8.

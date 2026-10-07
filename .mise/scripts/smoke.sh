@@ -58,7 +58,7 @@ for _ in $(seq 1 90); do
 done
 curl -fsS -H 'Opentrons-Version: *' http://127.0.0.1:31950/health >/dev/null
 
-cargo run --quiet --bin a2a-lab-ot2 -- serve >"$agent_log" 2>&1 &
+SILA_PORT=0 cargo run --quiet --bin a2a-lab-ot2 -- serve >"$agent_log" 2>&1 &
 agent_pid=$!
 
 for _ in $(seq 1 120); do

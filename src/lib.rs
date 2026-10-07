@@ -4,8 +4,10 @@ use std::path::PathBuf;
 
 pub mod agent;
 pub mod memory;
+pub mod oidc;
 pub mod opentrons;
 pub mod page;
+pub mod sila;
 pub mod time;
 
 pub use agent::{
@@ -13,7 +15,11 @@ pub use agent::{
     selected_model,
 };
 pub use memory::ConversationStore;
+pub use oidc::{OidcConfig, with_oidc};
 pub use opentrons::{OpentronsClient, OpentronsLab};
+pub use sila::{
+    DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, PreparedSila, SilaConfig, prepare_sila, sila_server,
+};
 
 /// Bundled serial-dilution protocol used by `run_serial_dilution`.
 #[must_use]

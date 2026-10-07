@@ -28,6 +28,7 @@ const DELETE_TASK: &str = "delete_run";
 const RECOVERY_TASK: &str = "resume_from_recovery";
 const RECOVERY_FALSE_TASK: &str = "resume_from_recovery_assuming_false_positive";
 const COMMAND_TASK: &str = "execute_command";
+const OBJECT_SCHEMA: &str = r#"{"additionalProperties":true,"type":"object"}"#;
 
 /// Shared Opentrons adapter implementing the three lab provider traits.
 #[derive(Clone)]
@@ -119,7 +120,8 @@ impl TaskProvider for OpentronsLab {
             return Ok(run);
         }
         let run = self.client.run(request.id.as_str()).await?;
-        Ok(task_from_run(&run, JsonObject::empty()))
+        let commands = self.client.run_commands(request.id.as_str()).await?;
+        Ok(task_from_run(&run, JsonObject::empty(), &commands))
     }
 }
 
@@ -188,6 +190,8 @@ fn entry_task(entry: &Entry) -> TaskDefinition {
         description: entry.description.to_owned(),
         asset_id: Some("opentrons-ot2".to_owned()),
         semantic_id: Some("opentrons.robot-server".to_owned()),
+        input_schema: Some(entry_input_schema(entry)),
+        output_schema: Some(OBJECT_SCHEMA.to_owned()),
     }
 }
 
@@ -266,6 +270,8 @@ fn definitions() -> Vec<TaskDefinition> {
         description: description.to_owned(),
         asset_id: Some("opentrons-ot2".to_owned()),
         semantic_id: Some("opentrons.robot-server".to_owned()),
+        input_schema: Some(composite_input_schema(id)),
+        output_schema: Some(OBJECT_SCHEMA.to_owned()),
     })
     .collect();
     items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
@@ -286,7 +292,8 @@ async fn start_dilution(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRun
     let run = lab.client.create_run(&protocol.id).await?;
     lab.client.run_action(&run.id, "play").await?;
     let run = lab.client.run(&run.id).await?;
-    Ok(task_from_run(&run, input))
+    let commands = lab.client.run_commands(&run.id).await?;
+    Ok(task_from_run(&run, input, &commands))
 }
 
 async fn control(
@@ -303,6 +310,7 @@ async fn control(
             request.task_id,
             request.input,
             Some(format!("{action} accepted")),
+            None,
         )?)
         .await)
 }
@@ -316,6 +324,7 @@ async fn delete_run(lab: &OpentronsLab, request: StartTaskRequest) -> Result<Tas
             request.task_id,
             request.input,
             Some("deleted".to_owned()),
+            None,
         )?)
         .await)
 }
@@ -398,7 +407,8 @@ async fn complete_http(
             &format!("{}-{suffix}", entry.id),
             request.task_id,
             request.input,
-            Some(result.to_string()),
+            Some(entry.name.to_owned()),
+            json_result(result),
         )?)
         .await)
 }
@@ -604,17 +614,26 @@ async fn execute_command(lab: &OpentronsLab, input: JsonObject) -> Result<TaskRu
         return Err(A2aLabError::invalid("params", "must be a JSON object"));
     }
     let command = lab.client.execute_command(command_type, params).await?;
-    let state = if command.status == "failed" {
-        TaskState::Failed
+    let failed = command.status == "failed";
+    let (error_kind, error_identifier) = if failed {
+        command_failure(&command)
     } else {
-        TaskState::Completed
+        (None, None)
     };
     let run = TaskRun {
         id: RunId::new(format!("cmd-{}", command.id))?,
         task_id: TaskId::new(COMMAND_TASK)?,
-        state,
+        state: if failed {
+            TaskState::Failed
+        } else {
+            TaskState::Completed
+        },
         input,
         message: Some(format!("{} {}", command.kind, command.status)),
+        result: command_result(&command),
+        progress: None,
+        error_kind,
+        error_identifier,
     };
     Ok(lab.store(run).await)
 }
@@ -1239,13 +1258,27 @@ async fn current_run(client: &OpentronsClient) -> Result<Option<Run>, A2aLabErro
     Ok(client.runs().await?.into_iter().find(|run| run.current))
 }
 
-fn task_from_run(run: &Run, input: JsonObject) -> TaskRun {
+fn task_from_run(run: &Run, input: JsonObject, commands: &[Command]) -> TaskRun {
+    let state = map_status(&run.status);
+    let (error_kind, error_identifier) = if state == TaskState::Failed {
+        run_failure(&run.status, commands)
+    } else {
+        (None, None)
+    };
     TaskRun {
         id: RunId::new(&run.id).expect("opentrons run id"),
         task_id: TaskId::new(RUN_TASK).expect("task id"),
-        state: map_status(&run.status),
+        state,
         input,
         message: Some(run.status.clone()),
+        result: json_result(json!({
+            "id": run.id,
+            "status": run.status,
+            "protocolId": run.protocol_id,
+        })),
+        progress: Some(command_progress(commands)),
+        error_kind,
+        error_identifier,
     }
 }
 
@@ -1254,6 +1287,7 @@ fn completed_run(
     task_id: TaskId,
     input: JsonObject,
     message: Option<String>,
+    result: Option<JsonObject>,
 ) -> Result<TaskRun, A2aLabError> {
     Ok(TaskRun {
         id: RunId::new(id)?,
@@ -1261,6 +1295,10 @@ fn completed_run(
         state: TaskState::Completed,
         input,
         message,
+        result,
+        progress: None,
+        error_kind: None,
+        error_identifier: None,
     })
 }
 
@@ -1281,4 +1319,218 @@ fn string_field<'a>(
     map.get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| A2aLabError::invalid("input", format!("{field} must be a string")))
+}
+
+fn composite_input_schema(id: &str) -> String {
+    match id {
+        COMMAND_TASK => object_schema(
+            [
+                ("commandType", "Protocol Engine command type."),
+                ("command_type", "Alternate name for commandType."),
+                ("params", "Command parameters object."),
+            ],
+            &["commandType"],
+            true,
+        ),
+        RUN_TASK => OBJECT_SCHEMA.to_owned(),
+        _ => object_schema(
+            [("run_id", "Opentrons run identifier.")],
+            &["run_id"],
+            false,
+        ),
+    }
+}
+
+fn entry_input_schema(entry: &Entry) -> String {
+    if is_upload(entry) {
+        return object_schema(
+            [
+                ("path", "File path to upload."),
+                ("filename", "Optional multipart filename."),
+            ],
+            &["path"],
+            false,
+        );
+    }
+    let mut fields = Vec::new();
+    let names = path_names(entry.path);
+    for name in &names {
+        fields.push((
+            name.as_str(),
+            "Path parameter. snake_case and id are also accepted.",
+        ));
+    }
+    if matches!(entry.method, "POST" | "PUT" | "PATCH") {
+        fields.push(("body", "JSON body sent as-is."));
+        fields.push(("data", "Value wrapped as {data: ...}."));
+    }
+    fields.push(("query", "Extra query parameters."));
+    object_schema(
+        fields,
+        &names.iter().map(String::as_str).collect::<Vec<_>>(),
+        true,
+    )
+}
+
+fn is_upload(entry: &Entry) -> bool {
+    matches!(
+        (entry.method, entry.path),
+        ("POST", "/protocols" | "/dataFiles" | "/wifi/keys")
+    )
+}
+
+fn path_names(path: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = path;
+    while let Some(start) = rest.find('{') {
+        let Some(end) = rest[start + 1..].find('}') else {
+            break;
+        };
+        names.push(rest[start + 1..start + 1 + end].to_owned());
+        rest = &rest[start + 1 + end + 1..];
+    }
+    names
+}
+
+fn object_schema<'a>(
+    fields: impl IntoIterator<Item = (&'a str, &'a str)>,
+    required: &[&str],
+    additional: bool,
+) -> String {
+    let mut properties = serde_json::Map::new();
+    for (name, description) in fields {
+        let schema = if name == "params" || name == "body" || name == "query" {
+            json!({"description": description, "type": "object"})
+        } else if name == "data" {
+            json!({"description": description})
+        } else {
+            json!({"description": description, "type": "string"})
+        };
+        properties.insert(name.to_owned(), schema);
+    }
+    let mut schema = serde_json::Map::new();
+    schema.insert("type".into(), json!("object"));
+    if !properties.is_empty() {
+        schema.insert("properties".into(), Value::Object(properties));
+    }
+    if !required.is_empty() {
+        schema.insert(
+            "required".into(),
+            Value::Array(required.iter().map(|name| json!(name)).collect()),
+        );
+    }
+    schema.insert("additionalProperties".into(), json!(additional));
+    serde_json::to_string(&Value::Object(schema)).expect("schema")
+}
+
+fn json_result(value: Value) -> Option<JsonObject> {
+    let object = match value {
+        Value::Null => return None,
+        Value::Object(_) => value,
+        other => json!({ "value": other }),
+    };
+    JsonObject::try_from_value(object).ok()
+}
+
+fn command_result(command: &Command) -> Option<JsonObject> {
+    json_result(json!({
+        "id": command.id,
+        "commandType": command.kind,
+        "status": command.status,
+        "error": command.error,
+        "params": command.params,
+    }))
+}
+
+fn command_progress(commands: &[Command]) -> f64 {
+    let total = f64::from(u32::try_from(commands.len()).unwrap_or(u32::MAX));
+    if total == 0.0 {
+        return 0.0;
+    }
+    let done = f64::from(
+        u32::try_from(
+            commands
+                .iter()
+                .filter(|command| matches!(command.status.as_str(), "succeeded" | "failed"))
+                .count(),
+        )
+        .unwrap_or(u32::MAX),
+    );
+    done / total
+}
+
+fn run_failure(status: &str, commands: &[Command]) -> (Option<String>, Option<String>) {
+    commands
+        .iter()
+        .rev()
+        .find(|command| command.status == "failed")
+        .map_or_else(
+            || (Some("run".to_owned()), Some(status.to_owned())),
+            command_failure,
+        )
+}
+
+fn command_failure(command: &Command) -> (Option<String>, Option<String>) {
+    let kind = command
+        .error
+        .as_ref()
+        .and_then(|error| text_field(error, "errorType"))
+        .unwrap_or_else(|| "failed".to_owned());
+    let identifier = command
+        .error
+        .as_ref()
+        .and_then(|error| text_field(error, "id"))
+        .unwrap_or_else(|| command.status.clone());
+    (Some(kind), Some(identifier))
+}
+
+fn text_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, JsonObject, Run, TaskState, Value, json, task_from_run};
+
+    fn command(status: &str, error: Option<Value>) -> Command {
+        Command {
+            id: "cmd-1".to_owned(),
+            kind: "aspirate".to_owned(),
+            status: status.to_owned(),
+            created_at: None,
+            completed_at: None,
+            error,
+            params: json!({}),
+        }
+    }
+
+    #[test]
+    fn failed_run_uses_the_command_error() {
+        let run = Run {
+            id: "run-1".to_owned(),
+            status: "failed".to_owned(),
+            current: true,
+            protocol_id: None,
+        };
+        let task = task_from_run(
+            &run,
+            JsonObject::empty(),
+            &[
+                command("succeeded", None),
+                command(
+                    "failed",
+                    Some(json!({"id": "err-1", "errorType": "NoTipAttachedError"})),
+                ),
+            ],
+        );
+        assert_eq!(task.state, TaskState::Failed);
+        assert_eq!(task.progress, Some(1.0));
+        assert_eq!(task.error_kind.as_deref(), Some("NoTipAttachedError"));
+        assert_eq!(task.error_identifier.as_deref(), Some("err-1"));
+        assert!(task.result.is_some());
+    }
 }

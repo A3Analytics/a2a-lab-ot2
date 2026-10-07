@@ -121,6 +121,49 @@ async fn lists_tasks_sources_and_metrics() {
 }
 
 #[tokio::test]
+async fn advertises_task_schemas() {
+    let (lab, _) = lab().await;
+    let tasks = lab
+        .list_tasks(ListTasksRequest { page: page() })
+        .await
+        .unwrap();
+    let dilution = tasks
+        .items()
+        .iter()
+        .find(|item| item.id.as_str() == "run_serial_dilution")
+        .unwrap();
+    assert!(
+        dilution
+            .input_schema
+            .as_deref()
+            .is_some_and(|schema| schema.contains("object"))
+    );
+    assert!(dilution.output_schema.is_some());
+    let pause = tasks
+        .items()
+        .iter()
+        .find(|item| item.id.as_str() == "pause_run")
+        .unwrap();
+    assert!(
+        pause
+            .input_schema
+            .as_deref()
+            .is_some_and(|schema| schema.contains("run_id"))
+    );
+    let get_run = tasks
+        .items()
+        .iter()
+        .find(|item| item.id.as_str() == "get_run")
+        .unwrap();
+    assert!(
+        get_run
+            .input_schema
+            .as_deref()
+            .is_some_and(|schema| schema.contains("runId"))
+    );
+}
+
+#[tokio::test]
 async fn runs_serial_dilution_and_maps_status() {
     let (lab, mock) = lab().await;
     let started = lab
@@ -132,6 +175,9 @@ async fn runs_serial_dilution_and_maps_status() {
         .unwrap();
     assert_eq!(started.state, TaskState::Working);
     assert_eq!(started.message.as_deref(), Some("running"));
+    assert_eq!(started.progress, Some(1.0));
+    assert!(started.result.is_some());
+    assert!(started.error_kind.is_none());
     let actions = mock.actions().await;
     assert!(actions.iter().any(|(_, action)| action == "play"));
     let status = lab
@@ -218,6 +264,17 @@ async fn recovery_and_stateless_commands() {
         .unwrap();
     assert_eq!(command.state, TaskState::Completed);
     assert!(command.id.as_str().starts_with("cmd-"));
+    assert!(command.result.is_some());
+    let failed = lab
+        .start(StartTaskRequest::new(
+            TaskId::new("execute_command").unwrap(),
+            JsonObject::parse(r#"{"commandType":"fail","params":{}}"#).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(failed.state, TaskState::Failed);
+    assert_eq!(failed.error_kind.as_deref(), Some("RoboticsControlError"));
+    assert_eq!(failed.error_identifier.as_deref(), Some("err-fail"));
 }
 
 #[tokio::test]
@@ -447,6 +504,12 @@ async fn primitive_http_tasks_complete() {
             .message
             .as_ref()
             .is_some_and(|text| text.contains("protocol"))
+    );
+    assert!(
+        protocols
+            .result
+            .as_ref()
+            .is_some_and(|result| result.to_string().contains("protocol"))
     );
     let door = lab
         .start(StartTaskRequest::new(

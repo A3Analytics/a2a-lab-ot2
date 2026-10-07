@@ -283,10 +283,16 @@ async fn stateless_command(
     }
     let mut inner = mock.inner.lock().await;
     let id = next_id(&inner.ids, "cmd");
+    let failed = command_type == "fail";
     let command = json!({
         "id": id,
         "commandType": command_type,
-        "status": "succeeded",
+        "status": if failed { "failed" } else { "succeeded" },
+        "error": failed.then(|| json!({
+            "id": "err-fail",
+            "errorType": "RoboticsControlError",
+            "detail": "failed"
+        })),
         "createdAt": "2026-01-01T00:00:00Z",
         "params": body["data"]["params"]
     });

@@ -1,19 +1,21 @@
 //! a2a-lab operations against an OT-2 robot-server HTTP API.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
-
 use std::sync::Arc;
 
+use a2a_lab_dev_kit::sila::SilaServerHandle;
 use a2a_lab_dev_kit::{
-    A2aClient, A2aLabError, A2aLabService, A2aServer, AgentMessageHandler, DEFAULT_MCP_URL,
-    GetTaskStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest,
-    LogLevel, LogProvider, LogRecord, McpLab, McpServer, MetricId, MetricProvider, PageRequest,
-    QueryLogsRequest, QueryMetricRequest, RunId, SourceId, StartTaskRequest, TaskId, TaskProvider,
-    TaskState, TimeRange, UtcTimestamp, start_run,
+    A2aClient, A2aLabApi, A2aLabError, A2aLabService, A2aServer, AgentMessageHandler,
+    DEFAULT_MCP_URL, GetTaskStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest,
+    ListTasksRequest, LogLevel, LogProvider, LogRecord, McpLab, McpServer, MetricId,
+    MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
+    StartTaskRequest, TaskId, TaskProvider, TaskRun, TaskState, TimeRange, UtcTimestamp, start_run,
 };
 use a2a_lab_ot2::{
-    ConversationStore, LabAgent, ModelProvider, OpentronsLab, default_protocol, selected_model,
+    ConversationStore, DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, LabAgent, ModelProvider, OidcConfig,
+    OpentronsLab, SilaConfig, default_protocol, prepare_sila, selected_model, sila_server,
+    with_oidc,
 };
 use clap::{Parser, Subcommand};
 
@@ -54,6 +56,55 @@ struct Cli {
     /// Rig messages retained for each A2A context
     #[arg(long, env = "HISTORY_LIMIT", default_value_t = 40)]
     history_limit: usize,
+    /// Bearer token for `agent-message` when A2A requires `OpenID` Connect
+    #[arg(long, env = "A2A_TOKEN")]
+    a2a_token: Option<String>,
+    /// `OpenID` Connect issuer. When set, A2A requires a bearer token. MCP and `SiLA` stay open.
+    #[arg(long, env = "A2A_OIDC_ISSUER")]
+    oidc_issuer: Option<String>,
+    /// Access-token audience required when `OpenID` Connect is enabled
+    #[arg(long, env = "A2A_OIDC_AUDIENCE", default_value = "a2a-lab")]
+    oidc_audience: String,
+    /// Access-token scope required when `OpenID` Connect is enabled
+    #[arg(long, env = "A2A_OIDC_SCOPE", default_value = "a2a.invoke")]
+    oidc_scope: String,
+    /// `OpenID` Connect discovery document URL
+    #[arg(long, env = "A2A_OIDC_DISCOVERY")]
+    oidc_discovery: Option<String>,
+    /// `SiLA` server UUID
+    #[arg(long, env = "SILA_UUID", default_value = DEFAULT_SILA_UUID)]
+    sila_uuid: String,
+    /// `SiLA` bind host
+    #[arg(long, env = "SILA_HOST", default_value = "127.0.0.1")]
+    sila_host: String,
+    /// `SiLA` bind port. `0` selects an ephemeral port.
+    #[arg(long, env = "SILA_PORT", default_value_t = DEFAULT_SILA_PORT)]
+    sila_port: u16,
+    /// `PEM` certificate that replaces the self-signed development certificate
+    #[arg(long, env = "SILA_CERT")]
+    sila_cert: Option<PathBuf>,
+    /// `PEM` private key for `--sila-cert`
+    #[arg(long, env = "SILA_KEY")]
+    sila_key: Option<PathBuf>,
+    /// `PEM` CA for `--sila-cert`
+    #[arg(long, env = "SILA_CA")]
+    sila_ca: Option<PathBuf>,
+    /// Persisted `SiLA` server name
+    #[arg(long, env = "SILA_NAME_PATH", default_value = ".a2a-lab-ot2/sila-name")]
+    sila_name_path: PathBuf,
+    /// Persisted server-initiated `SiLA` clients
+    #[arg(
+        long,
+        env = "SILA_CONNECTION_STORE",
+        default_value = ".a2a-lab-ot2/sila-connections.json"
+    )]
+    sila_connection_store: PathBuf,
+    /// Path written with the self-signed CA certificate
+    #[arg(long, env = "SILA_CA_OUT", default_value = ".a2a-lab-ot2/sila-ca.crt")]
+    sila_ca_out: PathBuf,
+    /// Advertise the `SiLA` server over mDNS
+    #[arg(long, env = "SILA_ANNOUNCE", default_value_t = false)]
+    sila_announce: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -78,7 +129,7 @@ impl From<ModelProviderArg> for ModelProvider {
 
 #[derive(Subcommand, Default)]
 enum Command {
-    /// Serve A2A and MCP backed by the OT-2 HTTP API
+    /// Serve A2A, MCP, and `SiLA` backed by the OT-2 HTTP API
     #[default]
     Serve,
     /// `list_tasks`
@@ -135,7 +186,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cli = Cli::parse();
     let command = cli.command.take().unwrap_or_default();
     if let Command::AgentMessage { text, context_id } = &command {
-        return agent_message(&cli.a2a_url, text, context_id.as_deref()).await;
+        return agent_message(
+            &cli.a2a_url,
+            cli.a2a_token.as_deref(),
+            text,
+            context_id.as_deref(),
+        )
+        .await;
     }
     let lab = connect(&cli)?;
     match command {
@@ -195,12 +252,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn agent_message(
     a2a_url: &str,
+    token: Option<&str>,
     text: &[String],
     context_id: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let reply = A2aClient::new(a2a_url)?
-        .agent_message(&text.join(" "), context_id)
-        .await?;
+    let mut client = A2aClient::new(a2a_url)?;
+    if let Some(token) = token.filter(|token| !token.is_empty()) {
+        client = client.with_bearer_token(token);
+    }
+    let reply = client.agent_message(&text.join(" "), context_id).await?;
     println!("{}", reply.text);
     if let Some(task_id) = reply.task_id {
         println!("task_id {task_id}");
@@ -228,6 +288,9 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
         .await
         .map_err(|error| startup_error(&conversation, error))?;
     let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
+    let (sila, sila_ca) = start_sila(Arc::clone(&service), cli)
+        .await
+        .map_err(|error| startup_error("sila", error))?;
     let mcp = McpServer::new(&service);
     let mut mcp_task = AbortOnDrop(tokio::spawn(async move { mcp.serve_http(None).await }));
     let mcp_target = format!("mcp at {DEFAULT_MCP_URL}");
@@ -243,11 +306,19 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     let agent = LabAgent::from_provider(provider, &model, DEFAULT_MCP_URL, store)
         .await
         .map_err(|error| startup_error(&model_target, error))?;
-    let a2a = A2aServer::new(&mcp_lab)
+    let mut a2a = A2aServer::new(&mcp_lab)
         .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>);
+    if let Some(config) = oidc_config(cli) {
+        a2a = with_oidc(a2a, &config).map_err(|error| startup_error("oidc", error))?;
+        println!("OIDC         {} (A2A only)", config.issuer);
+    } else {
+        println!("OIDC         off");
+    }
     println!("connected to {}", cli.opentrons_url);
     println!("A2A          http://127.0.0.1:31000");
     println!("MCP          {DEFAULT_MCP_URL}");
+    println!("SiLA         {}", sila.local_addr());
+    println!("SiLA CA      {sila_ca}");
     println!("model        {} {model}", provider.as_str());
     println!("conversation {}", cli.conversation_db.display());
     let a2a_target = "a2a at http://127.0.0.1:31000";
@@ -259,8 +330,80 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
             result.map_err(|error| startup_error("shutdown signal", error))?;
         }
     }
+    drop(sila);
     drop(mcp_task);
     Ok(())
+}
+
+fn oidc_config(cli: &Cli) -> Option<OidcConfig> {
+    let issuer = cli
+        .oidc_issuer
+        .as_deref()
+        .map(str::trim)
+        .filter(|issuer| !issuer.is_empty())?;
+    Some(OidcConfig {
+        issuer: issuer.to_owned(),
+        audience: cli.oidc_audience.clone(),
+        scope: cli.oidc_scope.clone(),
+        discovery_url: cli.oidc_discovery.clone(),
+    })
+}
+
+async fn start_sila(
+    lab: Arc<dyn A2aLabApi>,
+    cli: &Cli,
+) -> Result<(SilaServerHandle, String), A2aLabError> {
+    let config = sila_config(cli)?;
+    let prepared = prepare_sila(&config)?;
+    let address = prepared.address;
+    let ca = if cli.sila_ca.is_none() {
+        if let Some(parent) = cli.sila_ca_out.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| A2aLabError::unavailable(error.to_string()))?;
+        }
+        std::fs::write(&cli.sila_ca_out, &prepared.certificate.ca_pem)
+            .map_err(|error| A2aLabError::unavailable(error.to_string()))?;
+        cli.sila_ca_out.display().to_string()
+    } else {
+        cli.sila_ca
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default()
+    };
+    let handle = sila_server(prepared, lab, &config).serve(address).await?;
+    Ok((handle, ca))
+}
+
+fn sila_config(cli: &Cli) -> Result<SilaConfig, A2aLabError> {
+    let (cert_pem, key_pem, ca_pem) = match (&cli.sila_cert, &cli.sila_key, &cli.sila_ca) {
+        (Some(cert), Some(key), Some(ca)) => (
+            Some(read_pem(cert)?),
+            Some(read_pem(key)?),
+            Some(read_pem(ca)?),
+        ),
+        (None, None, None) => (None, None, None),
+        _ => {
+            return Err(A2aLabError::invalid(
+                "certificate",
+                "certificate, key, and CA PEM are required together",
+            ));
+        }
+    };
+    Ok(SilaConfig {
+        uuid: cli.sila_uuid.clone(),
+        host: cli.sila_host.clone(),
+        port: cli.sila_port,
+        name_path: Some(cli.sila_name_path.clone()),
+        connection_store: Some(cli.sila_connection_store.clone()),
+        announce: cli.sila_announce,
+        cert_pem,
+        key_pem,
+        ca_pem,
+    })
+}
+
+fn read_pem(path: &Path) -> Result<String, A2aLabError> {
+    std::fs::read_to_string(path).map_err(|error| A2aLabError::unavailable(error.to_string()))
 }
 
 struct AbortOnDrop(tokio::task::JoinHandle<Result<(), A2aLabError>>);
@@ -344,12 +487,7 @@ async fn start(
     let mut request = StartTaskRequest::new(TaskId::new(task)?, input);
     request.wait = wait;
     request.timeout_seconds = timeout;
-    let run = start_run(lab, request).await?;
-    println!("run_id {}", run.id);
-    println!("state {}", run_state(run.state));
-    if let Some(message) = run.message {
-        println!("message {message}");
-    }
+    print_run(&start_run(lab, request).await?);
     Ok(())
 }
 
@@ -363,12 +501,28 @@ async fn get_task_status(
             id: RunId::new(run_id)?,
         })
         .await?;
+    print_run(&run);
+    Ok(())
+}
+
+fn print_run(run: &TaskRun) {
     println!("run_id {}", run.id);
     println!("state {}", run_state(run.state));
-    if let Some(message) = run.message {
+    if let Some(progress) = run.progress {
+        println!("progress {progress}");
+    }
+    if let Some(message) = &run.message {
         println!("message {message}");
     }
-    Ok(())
+    if let Some(result) = &run.result {
+        println!("result {result}");
+    }
+    if let Some(kind) = &run.error_kind {
+        println!("error_kind {kind}");
+    }
+    if let Some(identifier) = &run.error_identifier {
+        println!("error_identifier {identifier}");
+    }
 }
 
 async fn action(

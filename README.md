@@ -1,6 +1,6 @@
 # a2a-lab-ot2
 
-Example lab agent that wraps a persistent Opentrons OT-2 `robot-server` simulator with [`a2a-lab-dev-kit`](https://github.com/A3Analytics/a2a-lab-dev-kit-rs). The `a2a-lab-ot2` executable calls the seven lab operations against the OT-2 HTTP API (`127.0.0.1:31950`). With no subcommand it also serves those operations over A2A 1.0 HTTP+JSON (`127.0.0.1:31000`) and MCP (`127.0.0.1:31001/mcp`).
+Example lab agent that wraps a persistent Opentrons OT-2 `robot-server` simulator with [`a2a-lab-dev-kit`](https://github.com/A3Analytics/a2a-lab-dev-kit-rs). The `a2a-lab-ot2` executable calls the seven lab operations against the OT-2 HTTP API (`127.0.0.1:31950`). With no subcommand it also serves those operations over A2A 1.0 HTTP+JSON (`127.0.0.1:31000`), MCP (`127.0.0.1:31001/mcp`), and SiLA 2 (`127.0.0.1:50052`).
 
 This is software simulation, not a physical robot. The simulator can also be discovered by the Opentrons App as a development robot at `127.0.0.1`.
 
@@ -27,13 +27,17 @@ Start the OT-2 simulator (leave this terminal running):
 mise run ot2-simulator
 ```
 
-In another terminal, serve MCP at `http://127.0.0.1:31001/mcp` and A2A 1.0 HTTP+JSON at `http://127.0.0.1:31000`. Structured lab skills call those MCP tools directly. Plain-text `agent-message` turns go to a Rig agent on Amazon Bedrock, which calls the same MCP tools and stores one conversation per A2A context in SQLite:
+In another terminal, serve MCP at `http://127.0.0.1:31001/mcp`, A2A 1.0 HTTP+JSON at `http://127.0.0.1:31000`, and SiLA 2 at `127.0.0.1:50052`. Structured lab skills call those MCP tools directly. Plain-text `agent-message` turns go to a Rig agent on Amazon Bedrock, which calls the same MCP tools and stores one conversation per A2A context in SQLite. SiLA serves the same lab service over TLS:
 
 ```bash
 mise run start
 ```
 
-Bedrock uses the AWS SDK default credential chain for `AWS_PROFILE` (or the `default` profile): environment credentials first, then the shared profile, including SSO. `AWS_REGION` overrides the profile region. The model is `global.openai.gpt-5.6-luna` unless `--model` or `BEDROCK_MODEL` selects another id the account can invoke. Run `aws sso login` when the profile session is expired. Startup checks robot-server health, opens `.a2a-lab-ot2/conversations.sqlite3`, accepts an MCP session, and loads that AWS profile before it binds A2A. A failure names the dependency and address. Ctrl-C stops A2A and MCP.
+Bedrock uses the AWS SDK default credential chain for `AWS_PROFILE` (or the `default` profile): environment credentials first, then the shared profile, including SSO. `AWS_REGION` overrides the profile region. The model is `global.openai.gpt-5.6-luna` unless `--model` or `BEDROCK_MODEL` selects another id the account can invoke. Run `aws sso login` when the profile session is expired. Startup checks robot-server health, opens `.a2a-lab-ot2/conversations.sqlite3`, binds SiLA, accepts an MCP session, and loads that AWS profile before it binds A2A. A failure names the dependency and address. Ctrl-C stops A2A, MCP, and SiLA.
+
+SiLA uses UUID `0e2a0002-0000-4000-8000-000000000002`, server type `OpentronsOt2`, and a self-signed certificate. The CA is written to `.a2a-lab-ot2/sila-ca.crt`. `--sila-cert`, `--sila-key`, and `--sila-ca` replace that certificate when all three PEM files are set. `--sila-host`, `--sila-port`, and `--sila-uuid` change the listener. `--sila-announce` advertises `_sila._tcp.local.` Server-initiated clients are stored in `.a2a-lab-ot2/sila-connections.json`, and a renamed server name is stored in `.a2a-lab-ot2/sila-name`.
+
+A2A stays open unless `--oidc-issuer` or `A2A_OIDC_ISSUER` is set. With an issuer, A2A requires a bearer token for audience `a2a-lab` (or `--oidc-audience`) and scope `a2a.invoke` (or `--oidc-scope`). `--oidc-discovery` overrides the discovery document URL. MCP and SiLA do not use that token. `agent-message` sends `--a2a-token` or `A2A_TOKEN` when the server requires one.
 
 Check the three services:
 
@@ -82,17 +86,18 @@ mise run a2a-lab-ot2 -- --readonly start-task get_protocols
 
 `agent-message` talks only to the A2A server (`--a2a-url`, `A2A_URL`, default `http://127.0.0.1:31000`). `--model-provider` / `MODEL_PROVIDER` is `bedrock` (default), `openai`, or `anthropic`. `--model` / `MODEL` selects the model id. When it is omitted, the defaults are Bedrock `global.openai.gpt-5.6-luna`, OpenAI `gpt-5.6-luna`, and Anthropic `claude-sonnet-5`. `--bedrock-model` / `BEDROCK_MODEL` still overrides the Bedrock default. Bedrock loads `AWS_PROFILE` or the `default` profile through the AWS SDK, and `AWS_REGION` overrides that profile's region. OpenAI uses `OPENAI_API_KEY`. Anthropic uses `ANTHROPIC_API_KEY`. Each A2A context is one conversation in `--conversation-db` / `CONVERSATION_DB` (default `.a2a-lab-ot2/conversations.sqlite3`). `--history-limit` / `HISTORY_LIMIT` keeps that many Rig messages, including tool calls. A follow-up passes the printed `context_id` and starts a new A2A task. `--readonly` still hides writes from the model because the tools are the same MCP server.
 
-`mise run start` is `a2a-lab-ot2` (default: A2A and MCP). `mise run ot2-simulator-health` checks `GET /health` on the simulator. `mise run ot2-simulator-clean` removes the simulator container and image.
+`mise run start` is `a2a-lab-ot2` (default: A2A, MCP, and SiLA). `mise run ot2-simulator-health` checks `GET /health` on the simulator. `mise run ot2-simulator-clean` removes the simulator container and image.
 
 ## Endpoints
 
-| Service                | Address                                                                                                                                                                          |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Opentrons robot-server | `http://127.0.0.1:31950`                                                                                                                                                         |
-| A2A 1.0 HTTP+JSON      | `http://127.0.0.1:31000` (`/.well-known/agent-card.json`, `POST /message:send`, `application/a2a+json`; lab data parts call MCP, plain text calls Bedrock, OpenAI, or Anthropic) |
-| MCP                    | `http://127.0.0.1:31001/mcp`                                                                                                                                                     |
+| Service                | Address                                                                                                                                                                                                                     |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Opentrons robot-server | `http://127.0.0.1:31950`                                                                                                                                                                                                    |
+| A2A 1.0 HTTP+JSON      | `http://127.0.0.1:31000` (`/.well-known/agent-card.json`, `POST /message:send`, `application/json`; requests may still use `application/a2a+json`; lab data parts call MCP, plain text calls Bedrock, OpenAI, or Anthropic) |
+| MCP                    | `http://127.0.0.1:31001/mcp`                                                                                                                                                                                                |
+| SiLA 2                 | `127.0.0.1:50052` (TLS, self-signed CA at `.a2a-lab-ot2/sila-ca.crt`)                                                                                                                                                       |
 
-`list-tasks` advertises composite helpers (`run_serial_dilution`, pause/resume/stop, recovery, `execute_command`) plus primitive robot-server HTTP operations from the pinned OT-2 v10.0.0 OpenAPI. Flex-only routes (estop, deck configuration, subsystems, live-stream settings) are omitted. `--readonly` keeps logs, metrics, and GET-backed tasks and hides composites and other mutations. `list-log-sources` includes run/analysis command streams and every `GET /logs/{identifier}` journal. `list-metrics` includes health, run progress, door, lights, pipette/instrument/module counts, and disk space. Path parameters and JSON bodies go in `start-task --input`.
+`list-tasks` advertises composite helpers (`run_serial_dilution`, pause/resume/stop, recovery, `execute_command`) plus primitive robot-server HTTP operations from the pinned OT-2 v10.0.0 OpenAPI. Each task includes `input_schema` and `output_schema`. Flex-only routes (estop, deck configuration, subsystems, live-stream settings) are omitted. `--readonly` keeps logs, metrics, and GET-backed tasks and hides composites and other mutations. `list-log-sources` includes run/analysis command streams and every `GET /logs/{identifier}` journal. `list-metrics` includes health, run progress, door, lights, pipette/instrument/module counts, and disk space. Path parameters and JSON bodies go in `start-task --input`. HTTP task results are JSON objects on `result`. `run_serial_dilution` reports `progress` from 0 through 1. A failed command or run sets `error_kind` and `error_identifier`. `message` stays a short status.
 
 ## Tests
 
