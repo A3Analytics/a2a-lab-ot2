@@ -49,22 +49,22 @@ mise run a2a-lab-ot2-example
 
 ## Real OT-2
 
-Point `OPENTRONS_URL` at a robot-server that speaks the `v10.0.0` API.
+Point `A2ALAB_OPENTRONS_URL` at a robot-server that speaks the `v10.0.0` API.
 
 ```bash
-OPENTRONS_URL=http://<robot-host>:31950 mise run ot2-simulator-health
-OPENTRONS_URL=http://<robot-host>:31950 mise run a2a-lab-ot2 -- list-tasks
-OPENTRONS_URL=http://<robot-host>:31950 mise run a2a-lab-ot2 -- start-task get_protocols
-OPENTRONS_URL=http://<robot-host>:31950 mise run start
+A2ALAB_OPENTRONS_URL=http://<robot-host>:31950 mise run ot2-simulator-health
+A2ALAB_OPENTRONS_URL=http://<robot-host>:31950 mise run a2a-lab-ot2 -- list-tasks
+A2ALAB_OPENTRONS_URL=http://<robot-host>:31950 mise run a2a-lab-ot2 -- start-task get_protocols
+A2ALAB_OPENTRONS_URL=http://<robot-host>:31950 mise run start
 ```
 
 ## Endpoints
 
-| Service           | Address                      | Configurable                                                      | Authentication                                                  |
-| ----------------- | ---------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------- |
-| robot-server      | `http://127.0.0.1:31950`     | `--opentrons-url` or `OPENTRONS_URL`                              | none in this adapter                                            |
-| A2A 1.0 HTTP+JSON | `http://127.0.0.1:31000`     | listener is fixed; `--a2a-url` changes the `agent-message` client | OpenID Connect when `--oidc-issuer` or `A2A_OIDC_ISSUER` is set |
-| MCP               | `http://127.0.0.1:31001/mcp` | no                                                                | open                                                            |
-| SiLA 2            | `127.0.0.1:50052`            | `--sila-host`, `--sila-port`, and `SILA_*`                        | open; TLS                                                       |
+| Service           | Address                      | Configurable                                                                        | Authentication                                                  |
+| ----------------- | ---------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| robot-server      | `http://127.0.0.1:31950`     | `--opentrons-url` or `A2ALAB_OPENTRONS_URL`                                         | none in this adapter                                            |
+| A2A 1.0 HTTP+JSON | `http://127.0.0.1:31000`     | `--a2alab-listen-host` / `A2ALAB_LISTEN_HOST`; `A2ALAB_PUBLIC_URL` sets the advertised host | OpenID Connect when `--oidc-issuer` or `A2ALAB_OIDC_ISSUER` is set |
+| MCP               | `http://127.0.0.1:31001/mcp` | same bind host; `A2ALAB_PUBLIC_URL` keeps port `31001`                              | open                                                            |
+| SiLA 2            | `127.0.0.1:50052`            | `--sila-host`, `--sila-port`, and `A2ALAB_SILA_*`; `A2ALAB_PUBLIC_URL` keeps the SiLA port | open; TLS                                                       |
 
 A2A serves `/.well-known/agent-card.json` and `POST /message:send`. OpenID Connect protects that A2A listener only. MCP and SiLA stay open. With an issuer, A2A expects a bearer token for audience `a2a-lab` and scope `a2a.invoke`.

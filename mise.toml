@@ -12,8 +12,8 @@ bin = "backlog"
 
 [env]
 OPENTRONS_TAG = "v10.0.0"
-OPENTRONS_URL = "http://127.0.0.1:31950"
-A2A_URL = "http://127.0.0.1:31000"
+A2ALAB_OPENTRONS_URL = "http://127.0.0.1:31950"
+A2ALAB_URL = "http://127.0.0.1:31000"
 UV_PYTHON = "3.12"
 
 [task_config]

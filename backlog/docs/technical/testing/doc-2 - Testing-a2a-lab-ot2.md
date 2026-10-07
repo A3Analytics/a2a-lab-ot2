@@ -57,7 +57,7 @@ Provider tests require every non-skip inventory id to appear in `list_tasks`, `l
 - free TCP ports `31950`, `31000`, and `31001`
 - Bedrock credentials that can invoke the selected model (`AWS_PROFILE` or the `default` profile, plus `AWS_REGION` or `AWS_DEFAULT_REGION` when the profile region is not enough)
 
-Smoke always rebuilds through `mise run ot2-simulator-setup`, removes the container named `a2a-lab-ot2-sim`, and exits if `127.0.0.1:31950` stays occupied. It then starts the simulator and `a2a-lab-ot2 serve` with `SILA_PORT=0`. The check covers the agent card, an A2A `list_tasks` call, the MCP tool list, two Bedrock `agent-message` turns that share a context, and the direct CLI operations `list-tasks`, `list-log-sources`, `list-metrics`, `start-task`, `get-task-status`, `pause`, `resume`, `stop`, `home`, `query-logs`, and `query-metrics`.
+Smoke always rebuilds through `mise run ot2-simulator-setup`, removes the container named `a2a-lab-ot2-sim`, and exits if `127.0.0.1:31950` stays occupied. It then starts the simulator and `a2a-lab-ot2 serve` with `A2ALAB_SILA_PORT=0`. The check covers the agent card, an A2A `list_tasks` call, the MCP tool list, two Bedrock `agent-message` turns that share a context, and the direct CLI operations `list-tasks`, `list-log-sources`, `list-metrics`, `start-task`, `get-task-status`, `pause`, `resume`, `stop`, `home`, `query-logs`, and `query-metrics`.
 
 Those CLI operations call the simulator. `start-task get_protocols` lists uploaded protocols. `home` issues a home command. On the way out, smoke stops its processes and removes the `a2a-lab-ot2-sim` container, including a simulator that was already using that name.
 
@@ -85,8 +85,8 @@ These exercise a live robot-server. They are not part of `mise run test` or `mis
 | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `mise run ot2-simulator-setup`  | Builds image `a2a-lab-ot2-sim:v10.0.0`. `OPENTRONS_TAG` selects another tag. `edge`, `latest`, `main`, and `master` are refused. |
 | `mise run ot2-simulator`        | Runs container `a2a-lab-ot2-sim` at `127.0.0.1:31950`.                                                                           |
-| `mise run ot2-simulator-health` | Requests `/health` on `OPENTRONS_URL`, default `http://127.0.0.1:31950`.                                                         |
-| `mise run a2a-lab-ot2-example`  | Prints merged `query_logs` output for the robot at `OPENTRONS_URL`.                                                              |
+| `mise run ot2-simulator-health` | Requests `/health` on `A2ALAB_OPENTRONS_URL`, default `http://127.0.0.1:31950`.                                                  |
+| `mise run a2a-lab-ot2-example`  | Prints merged `query_logs` output for the robot at `A2ALAB_OPENTRONS_URL`.                                                       |
 | `mise run ot2-simulator-clean`  | Removes the simulator container, image, and `.cache/opentrons`.                                                                  |
 
 See the [README](../../../../README.md) for the simulator and hardware quickstarts, and [doc-3](<../cli/doc-3 - a2a-lab-ot2-command-and-configuration-reference.md>) for command options.

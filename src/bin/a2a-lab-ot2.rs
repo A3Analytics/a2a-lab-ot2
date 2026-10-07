@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use tokio::net::TcpListener;
+
 use a2a_lab_dev_kit::sila::SilaServerHandle;
 use a2a_lab_dev_kit::{
     A2aClient, A2aLabApi, A2aLabError, A2aLabService, A2aServer, AgentMessageHandler,
@@ -26,81 +28,87 @@ use clap::{Parser, Subcommand};
 )]
 struct Cli {
     /// Robot-server HTTP base URL (`GET /health`, `/runs`, `/logs`, …)
-    #[arg(long, env = "OPENTRONS_URL", default_value = "http://127.0.0.1:31950")]
+    #[arg(long, env = "A2ALAB_OPENTRONS_URL", default_value = "http://127.0.0.1:31950")]
     opentrons_url: String,
     /// Advertise and execute only GET-backed tasks
     #[arg(long, global = true)]
     readonly: bool,
     /// A2A origin used by `agent-message`
-    #[arg(long, env = "A2A_URL", default_value = "http://127.0.0.1:31000")]
+    #[arg(long, env = "A2ALAB_URL", default_value = "http://127.0.0.1:31000")]
     a2a_url: String,
+    /// Bind host for A2A and MCP. `0.0.0.0` listens on every interface.
+    #[arg(long, env = "A2ALAB_LISTEN_HOST", default_value = "127.0.0.1")]
+    a2alab_listen_host: String,
+    /// Public origin advertised for A2A, MCP, and SiLA. Each service keeps its own port.
+    #[arg(long, env = "A2ALAB_PUBLIC_URL")]
+    a2alab_public_url: Option<String>,
     /// SQLite file for conversation history
     #[arg(
         long,
-        env = "CONVERSATION_DB",
+        env = "A2ALAB_CONVERSATION_DB",
         default_value = ".a2a-lab-ot2/conversations.sqlite3"
     )]
     conversation_db: PathBuf,
     /// Model provider for plain-text messages
-    #[arg(long, env = "MODEL_PROVIDER", default_value = "bedrock")]
+    #[arg(long, env = "A2ALAB_MODEL_PROVIDER", default_value = "bedrock")]
     model_provider: ModelProviderArg,
     /// Model id. Defaults to the provider's small tool-capable model.
-    #[arg(long, env = "MODEL")]
+    #[arg(long, env = "A2ALAB_MODEL")]
     model: Option<String>,
     /// Bedrock model id used when `--model` is omitted and the provider is Bedrock
-    #[arg(long, env = "BEDROCK_MODEL")]
+    #[arg(long, env = "A2ALAB_BEDROCK_MODEL")]
     bedrock_model: Option<String>,
     /// Rig messages retained for each A2A context
-    #[arg(long, env = "HISTORY_LIMIT", default_value_t = 40)]
+    #[arg(long, env = "A2ALAB_HISTORY_LIMIT", default_value_t = 40)]
     history_limit: usize,
     /// Bearer token for `agent-message` when A2A requires `OpenID` Connect
-    #[arg(long, env = "A2A_TOKEN")]
+    #[arg(long, env = "A2ALAB_TOKEN")]
     a2a_token: Option<String>,
     /// `OpenID` Connect issuer. When set, A2A requires a bearer token. MCP and `SiLA` stay open.
-    #[arg(long, env = "A2A_OIDC_ISSUER")]
+    #[arg(long, env = "A2ALAB_OIDC_ISSUER")]
     oidc_issuer: Option<String>,
     /// Access-token audience required when `OpenID` Connect is enabled
-    #[arg(long, env = "A2A_OIDC_AUDIENCE", default_value = "a2a-lab")]
+    #[arg(long, env = "A2ALAB_OIDC_AUDIENCE", default_value = "a2a-lab")]
     oidc_audience: String,
     /// Access-token scope required when `OpenID` Connect is enabled
-    #[arg(long, env = "A2A_OIDC_SCOPE", default_value = "a2a.invoke")]
+    #[arg(long, env = "A2ALAB_OIDC_SCOPE", default_value = "a2a.invoke")]
     oidc_scope: String,
     /// `OpenID` Connect discovery document URL
-    #[arg(long, env = "A2A_OIDC_DISCOVERY")]
+    #[arg(long, env = "A2ALAB_OIDC_DISCOVERY")]
     oidc_discovery: Option<String>,
     /// `SiLA` server UUID
-    #[arg(long, env = "SILA_UUID", default_value = DEFAULT_SILA_UUID)]
+    #[arg(long, env = "A2ALAB_SILA_UUID", default_value = DEFAULT_SILA_UUID)]
     sila_uuid: String,
     /// `SiLA` bind host
-    #[arg(long, env = "SILA_HOST", default_value = "127.0.0.1")]
+    #[arg(long, env = "A2ALAB_SILA_HOST", default_value = "127.0.0.1")]
     sila_host: String,
     /// `SiLA` bind port. `0` selects an ephemeral port.
-    #[arg(long, env = "SILA_PORT", default_value_t = DEFAULT_SILA_PORT)]
+    #[arg(long, env = "A2ALAB_SILA_PORT", default_value_t = DEFAULT_SILA_PORT)]
     sila_port: u16,
     /// `PEM` certificate that replaces the self-signed development certificate
-    #[arg(long, env = "SILA_CERT")]
+    #[arg(long, env = "A2ALAB_SILA_CERT")]
     sila_cert: Option<PathBuf>,
     /// `PEM` private key for `--sila-cert`
-    #[arg(long, env = "SILA_KEY")]
+    #[arg(long, env = "A2ALAB_SILA_KEY")]
     sila_key: Option<PathBuf>,
     /// `PEM` CA for `--sila-cert`
-    #[arg(long, env = "SILA_CA")]
+    #[arg(long, env = "A2ALAB_SILA_CA")]
     sila_ca: Option<PathBuf>,
     /// Persisted `SiLA` server name
-    #[arg(long, env = "SILA_NAME_PATH", default_value = ".a2a-lab-ot2/sila-name")]
+    #[arg(long, env = "A2ALAB_SILA_NAME_PATH", default_value = ".a2a-lab-ot2/sila-name")]
     sila_name_path: PathBuf,
     /// Persisted server-initiated `SiLA` clients
     #[arg(
         long,
-        env = "SILA_CONNECTION_STORE",
+        env = "A2ALAB_SILA_CONNECTION_STORE",
         default_value = ".a2a-lab-ot2/sila-connections.json"
     )]
     sila_connection_store: PathBuf,
     /// Path written with the self-signed CA certificate
-    #[arg(long, env = "SILA_CA_OUT", default_value = ".a2a-lab-ot2/sila-ca.crt")]
+    #[arg(long, env = "A2ALAB_SILA_CA_OUT", default_value = ".a2a-lab-ot2/sila-ca.crt")]
     sila_ca_out: PathBuf,
     /// Advertise the `SiLA` server over mDNS
-    #[arg(long, env = "SILA_ANNOUNCE", default_value_t = false)]
+    #[arg(long, env = "A2ALAB_SILA_ANNOUNCE", default_value_t = false)]
     sila_announce: bool,
     #[command(subcommand)]
     command: Option<Command>,
@@ -284,7 +292,15 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
         .await
         .map_err(|error| startup_error("sila", error))?;
     let mcp = McpServer::new(&service);
-    let mut mcp_task = AbortOnDrop(tokio::spawn(async move { mcp.serve_http(None).await }));
+    let mcp_listener = TcpListener::bind(format!("{}:31001", cli.a2alab_listen_host))
+        .await
+        .map_err(|error| startup_error("mcp", error))?;
+    let mcp_addr = mcp_listener
+        .local_addr()
+        .map_err(|error| startup_error("mcp", error))?;
+    let mut mcp_task = AbortOnDrop(tokio::spawn(
+        async move { mcp.serve_http(mcp_listener).await },
+    ));
     let mcp_target = format!("mcp at {DEFAULT_MCP_URL}");
     let mcp_lab = tokio::select! {
         finished = mcp_task.join() => return Err(mcp_task_error(&mcp_target, finished).into()),
@@ -300,23 +316,52 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
         .map_err(|error| startup_error(&model_target, error))?;
     let mut a2a = A2aServer::new(&mcp_lab)
         .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>);
+    let a2a_listener = TcpListener::bind(format!("{}:31000", cli.a2alab_listen_host))
+        .await
+        .map_err(|error| startup_error("a2a", error))?;
+    let a2a_addr = a2a_listener
+        .local_addr()
+        .map_err(|error| startup_error("a2a", error))?;
+    let advertised = cli
+        .a2alab_public_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(advertised_host);
+    if let Some(host) = &advertised {
+        a2a = a2a
+            .with_public_url(origin(host, a2a_addr.port()))
+            .with_grpc_host(host.host.clone());
+    }
     if let Some(config) = oidc_config(cli) {
         a2a = with_oidc(a2a, &config).map_err(|error| startup_error("oidc", error))?;
         println!("OIDC         {} (A2A only)", config.issuer);
     } else {
         println!("OIDC         off");
     }
+    let a2a_shown = advertised
+        .as_ref()
+        .map(|host| origin(host, a2a_addr.port()))
+        .unwrap_or_else(|| format!("http://{a2a_addr}"));
+    let mcp_shown = advertised
+        .as_ref()
+        .map(|host| format!("{}/mcp", origin(host, mcp_addr.port())))
+        .unwrap_or_else(|| format!("http://{mcp_addr}/mcp"));
+    let sila_shown = advertised.as_ref().map_or_else(
+        || sila.local_addr().to_string(),
+        |host| socket_host(host, sila.local_addr().port()),
+    );
     println!("connected to {}", cli.opentrons_url);
-    println!("A2A          http://127.0.0.1:31000");
-    println!("MCP          {DEFAULT_MCP_URL}");
-    println!("SiLA         {}", sila.local_addr());
+    println!("A2A          {a2a_shown}");
+    println!("MCP          {mcp_shown}");
+    println!("SiLA         {sila_shown}");
     println!("SiLA CA      {sila_ca}");
     println!("model        {} {model}", provider.as_str());
     println!("conversation {}", cli.conversation_db.display());
-    let a2a_target = "a2a at http://127.0.0.1:31000";
+    let a2a_target = format!("a2a at http://{a2a_addr}");
     tokio::select! {
-        result = a2a.listen(None) => {
-            result.map_err(|error| startup_error(a2a_target, error))?;
+        result = a2a.listen(a2a_listener) => {
+            result.map_err(|error| startup_error(&a2a_target, error))?;
         }
         result = tokio::signal::ctrl_c() => {
             result.map_err(|error| startup_error("shutdown signal", error))?;
@@ -410,6 +455,49 @@ impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+struct AdvertisedHost {
+    scheme: String,
+    host: String,
+}
+
+fn advertised_host(value: &str) -> AdvertisedHost {
+    let (scheme, rest) = value
+        .trim()
+        .split_once("://")
+        .unwrap_or(("http", value.trim()));
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split_once(']')
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port))
+                if !host.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                host
+            }
+            _ => authority,
+        }
+    };
+    AdvertisedHost {
+        scheme: scheme.to_owned(),
+        host: host.to_owned(),
+    }
+}
+
+fn socket_host(host: &AdvertisedHost, port: u16) -> String {
+    if host.host.contains(':') {
+        format!("[{}]:{port}", host.host)
+    } else {
+        format!("{}:{port}", host.host)
+    }
+}
+
+fn origin(host: &AdvertisedHost, port: u16) -> String {
+    format!("{}://{}", host.scheme, socket_host(host, port))
 }
 
 fn startup_error(dependency: &str, error: impl std::fmt::Display) -> A2aLabError {

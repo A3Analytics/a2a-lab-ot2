@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 
-ot_url="${OPENTRONS_URL:-http://127.0.0.1:31950}"
+ot_url="${A2ALAB_OPENTRONS_URL:-http://127.0.0.1:31950}"
 started_here=0
 sim_pid=""
 server_log=""

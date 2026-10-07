@@ -29,38 +29,40 @@ Generated top-level help begins `Call a2a-lab operations against an OT-2 robot-s
 | Commands                   | Options that change behavior                                                                                                                                                                                                                                                          |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `serve`, and no subcommand | Robot URL, readonly, conversation store, model selection, history limit, OIDC, and every SiLA setting.                                                                                                                                                                                |
-| `agent-message`            | `--a2a-url` / `A2A_URL` and `--a2a-token` / `A2A_TOKEN`, plus `--context-id` and the text arguments. Other accepted flags are ignored. The generated help text says `Send plain text to the Bedrock agent over A2A`; the server-side provider is still Bedrock, OpenAI, or Anthropic. |
-| Every other subcommand     | `--opentrons-url` / `OPENTRONS_URL` and `--readonly`. The process does not bind A2A, MCP, or SiLA and does not open the conversation database.                                                                                                                                       |
+| `agent-message`            | `--a2a-url` / `A2ALAB_URL` and `--a2a-token` / `A2ALAB_TOKEN`, plus `--context-id` and the text arguments. Other accepted flags are ignored. The generated help text says `Send plain text to the Bedrock agent over A2A`; the server-side provider is still Bedrock, OpenAI, or Anthropic. |
+| Every other subcommand     | `--opentrons-url` / `A2ALAB_OPENTRONS_URL` and `--readonly`. The process does not bind A2A, MCP, or SiLA and does not open the conversation database.                                                                                                                                        |
 
-A command-line value replaces the environment variable of the same option. The environment variable replaces the built-in default. Empty `MODEL`, `BEDROCK_MODEL`, `A2A_OIDC_ISSUER`, and `A2A_TOKEN` are treated as unset.
+A command-line value replaces the environment variable of the same option. The environment variable replaces the built-in default. Empty `A2ALAB_MODEL`, `A2ALAB_BEDROCK_MODEL`, `A2ALAB_OIDC_ISSUER`, and `A2ALAB_TOKEN` are treated as unset.
 
 ## Global options
 
-| Option                    | Environment             | Default                                      | Effect                                                                                                                 |
-| ------------------------- | ----------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `--opentrons-url`         | `OPENTRONS_URL`         | `http://127.0.0.1:31950`                     | Robot-server base URL for health, runs, logs, and tasks.                                                               |
-| `--readonly`              | none                    | off                                          | Advertise and execute only GET-backed tasks.                                                                           |
-| `--a2a-url`               | `A2A_URL`               | `http://127.0.0.1:31000`                     | A2A origin used by `agent-message`. It does not move the A2A listener.                                                 |
-| `--conversation-db`       | `CONVERSATION_DB`       | `.a2a-lab-ot2/conversations.sqlite3`         | SQLite file of Rig messages, one conversation per A2A context. Parent directories are created. The file uses WAL mode. |
-| `--model-provider`        | `MODEL_PROVIDER`        | `bedrock`                                    | `bedrock`, `openai`, or `anthropic`.                                                                                   |
-| `--model`                 | `MODEL`                 | provider default below                       | Model id. A non-empty value wins over `--bedrock-model`.                                                               |
-| `--bedrock-model`         | `BEDROCK_MODEL`         | none                                         | Bedrock id used when `--model` is empty and the provider is Bedrock. Ignored for OpenAI and Anthropic.                 |
-| `--history-limit`         | `HISTORY_LIMIT`         | `40`                                         | Rig messages kept for each context. `0` is rejected on serve with `history_limit` `must keep at least one message`.    |
-| `--a2a-token`             | `A2A_TOKEN`             | none                                         | Bearer token sent by `agent-message` when A2A requires OpenID Connect.                                                 |
-| `--oidc-issuer`           | `A2A_OIDC_ISSUER`       | none                                         | When non-empty, A2A requires a bearer token. MCP and SiLA stay open.                                                   |
-| `--oidc-audience`         | `A2A_OIDC_AUDIENCE`     | `a2a-lab`                                    | Access-token audience checked while OIDC is enabled.                                                                   |
-| `--oidc-scope`            | `A2A_OIDC_SCOPE`        | `a2a.invoke`                                 | Access-token scope checked while OIDC is enabled.                                                                      |
-| `--oidc-discovery`        | `A2A_OIDC_DISCOVERY`    | `{issuer}/.well-known/openid-configuration`  | Discovery document URL.                                                                                                |
-| `--sila-uuid`             | `SILA_UUID`             | `0e2a0002-0000-4000-8000-000000000002`       | SiLA server UUID.                                                                                                      |
-| `--sila-host`             | `SILA_HOST`             | `127.0.0.1`                                  | SiLA bind host.                                                                                                        |
-| `--sila-port`             | `SILA_PORT`             | `50052`                                      | SiLA bind port. `0` selects an ephemeral port.                                                                         |
-| `--sila-cert`             | `SILA_CERT`             | none                                         | PEM certificate. Required together with the key and CA.                                                                |
-| `--sila-key`              | `SILA_KEY`              | none                                         | PEM private key for `--sila-cert`.                                                                                     |
-| `--sila-ca`               | `SILA_CA`               | none                                         | PEM CA for `--sila-cert`.                                                                                              |
-| `--sila-name-path`        | `SILA_NAME_PATH`        | `.a2a-lab-ot2/sila-name`                     | Persisted SiLA server name.                                                                                            |
-| `--sila-connection-store` | `SILA_CONNECTION_STORE` | `.a2a-lab-ot2/sila-connections.json`         | Persisted server-initiated SiLA clients.                                                                               |
-| `--sila-ca-out`           | `SILA_CA_OUT`           | `.a2a-lab-ot2/sila-ca.crt`                   | File written with the self-signed CA.                                                                                  |
-| `--sila-announce`         | `SILA_ANNOUNCE`         | off                                          | Advertise `_sila._tcp.local.` after the listener is ready.                                                             |
+| Option                    | Environment             | Default                                     | Effect                                                                                                                 |
+| ------------------------- | ----------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `--opentrons-url`         | `A2ALAB_OPENTRONS_URL`  | `http://127.0.0.1:31950`                    | Robot-server base URL for health, runs, logs, and tasks.                                                               |
+| `--readonly`              | none                    | off                                         | Advertise and execute only GET-backed tasks.                                                                           |
+| `--a2a-url`               | `A2ALAB_URL`            | `http://127.0.0.1:31000`                    | A2A origin used by `agent-message`. It does not move the A2A listener.                                                 |
+| `--a2alab-listen-host`    | `A2ALAB_LISTEN_HOST`    | `127.0.0.1`                                 | Bind host for A2A and MCP. `0.0.0.0` listens on every interface.                                                       |
+| `--a2alab-public-url`     | `A2ALAB_PUBLIC_URL`     | none                                        | Host advertised for A2A, its gRPC interface, MCP, and SiLA. Each service keeps its own port.                           |
+| `--conversation-db`       | `A2ALAB_CONVERSATION_DB` | `.a2a-lab-ot2/conversations.sqlite3`       | SQLite file of Rig messages, one conversation per A2A context. Parent directories are created. The file uses WAL mode. |
+| `--model-provider`        | `A2ALAB_MODEL_PROVIDER` | `bedrock`                                  | `bedrock`, `openai`, or `anthropic`.                                                                                   |
+| `--model`                 | `A2ALAB_MODEL`          | provider default below                     | Model id. A non-empty value wins over `--bedrock-model`.                                                               |
+| `--bedrock-model`         | `A2ALAB_BEDROCK_MODEL`  | none                                       | Bedrock id used when `--model` is empty and the provider is Bedrock. Ignored for OpenAI and Anthropic.                 |
+| `--history-limit`         | `A2ALAB_HISTORY_LIMIT`  | `40`                                       | Rig messages kept for each context. `0` is rejected on serve with `history_limit` `must keep at least one message`.    |
+| `--a2a-token`             | `A2ALAB_TOKEN`          | none                                       | Bearer token sent by `agent-message` when A2A requires OpenID Connect.                                                 |
+| `--oidc-issuer`           | `A2ALAB_OIDC_ISSUER`    | none                                       | When non-empty, A2A requires a bearer token. MCP and SiLA stay open.                                                   |
+| `--oidc-audience`         | `A2ALAB_OIDC_AUDIENCE`  | `a2a-lab`                                  | Access-token audience checked while OIDC is enabled.                                                                   |
+| `--oidc-scope`            | `A2ALAB_OIDC_SCOPE`     | `a2a.invoke`                               | Access-token scope checked while OIDC is enabled.                                                                      |
+| `--oidc-discovery`        | `A2ALAB_OIDC_DISCOVERY` | `{issuer}/.well-known/openid-configuration` | Discovery document URL.                                                                                               |
+| `--sila-uuid`             | `A2ALAB_SILA_UUID`      | `0e2a0002-0000-4000-8000-000000000002`     | SiLA server UUID.                                                                                                      |
+| `--sila-host`             | `A2ALAB_SILA_HOST`      | `127.0.0.1`                                | SiLA bind host.                                                                                                        |
+| `--sila-port`             | `A2ALAB_SILA_PORT`      | `50052`                                    | SiLA bind port. `0` selects an ephemeral port.                                                                         |
+| `--sila-cert`             | `A2ALAB_SILA_CERT`      | none                                       | PEM certificate. Required together with the key and CA.                                                                |
+| `--sila-key`              | `A2ALAB_SILA_KEY`       | none                                       | PEM private key for `--sila-cert`.                                                                                     |
+| `--sila-ca`               | `A2ALAB_SILA_CA`        | none                                       | PEM CA for `--sila-cert`.                                                                                              |
+| `--sila-name-path`        | `A2ALAB_SILA_NAME_PATH` | `.a2a-lab-ot2/sila-name`                   | Persisted SiLA server name.                                                                                            |
+| `--sila-connection-store` | `A2ALAB_SILA_CONNECTION_STORE` | `.a2a-lab-ot2/sila-connections.json` | Persisted server-initiated SiLA clients.                                                                               |
+| `--sila-ca-out`           | `A2ALAB_SILA_CA_OUT`    | `.a2a-lab-ot2/sila-ca.crt`                 | File written with the self-signed CA.                                                                                  |
+| `--sila-announce`         | `A2ALAB_SILA_ANNOUNCE`  | off                                        | Advertise `_sila._tcp.local.` after the listener is ready.                                                             |
 
 Relative paths are resolved from the process working directory.
 
@@ -68,8 +70,8 @@ Relative paths are resolved from the process working directory.
 
 Selection order:
 
-1. Non-empty `--model` / `MODEL`.
-2. For Bedrock only, non-empty `--bedrock-model` / `BEDROCK_MODEL`.
+1. Non-empty `--model` / `A2ALAB_MODEL`.
+2. For Bedrock only, non-empty `--bedrock-model` / `A2ALAB_BEDROCK_MODEL`.
 3. Provider default: Bedrock `global.openai.gpt-5.6-luna`, OpenAI `gpt-5.6-luna`, Anthropic `claude-sonnet-5`.
 
 Credentials are process environment, not flags:
@@ -135,19 +137,19 @@ When an issuer is set, the first line is `OIDC <issuer> (A2A only)`. Ctrl-C stop
 
 ## Listeners
 
-| Listener            | Bind                                                | Configurable |
-| ------------------- | --------------------------------------------------- | ------------ |
-| robot-server client | `--opentrons-url`                                   | yes          |
-| A2A HTTP+JSON       | `127.0.0.1:31000`                                   | no           |
-| A2A gRPC            | `127.0.0.1:0`, advertised on the agent card         | no           |
-| MCP Streamable HTTP | `http://127.0.0.1:31001/mcp`, protocol `2026-07-28` | no           |
-| SiLA gRPC/TLS       | `--sila-host` and `--sila-port`                     | yes          |
+| Listener            | Bind                                                        | Configurable |
+| ------------------- | ----------------------------------------------------------- | ------------ |
+| robot-server client | `--opentrons-url`                                           | yes          |
+| A2A HTTP+JSON       | `--a2alab-listen-host` port `31000`                         | yes          |
+| A2A gRPC            | `127.0.0.1:0`, or every interface when a public host is set | yes          |
+| MCP Streamable HTTP | `--a2alab-listen-host` port `31001`, protocol `2026-07-28`  | yes          |
+| SiLA gRPC/TLS       | `--sila-host` and `--sila-port`                             | yes          |
 
-`--a2a-url` selects the client used by `agent-message`. The server always listens on `127.0.0.1:31000`.
+`--a2a-url` selects the client used by `agent-message`. `--a2alab-listen-host` selects the A2A and MCP bind address. `A2ALAB_PUBLIC_URL` replaces the advertised host for the agent card, including its gRPC interface, and for the printed MCP and SiLA addresses. The ports stay `31000`, `31001`, and the SiLA port.
 
 ## OpenID Connect
 
-OIDC is off until `--oidc-issuer` or `A2A_OIDC_ISSUER` is non-empty. It then protects A2A only. MCP and SiLA do not read `--a2a-token`. The agent card advertises the OpenID Connect scheme, and `agent-message` sends the bearer token to the A2A origin.
+OIDC is off until `--oidc-issuer` or `A2ALAB_OIDC_ISSUER` is non-empty. It then protects A2A only. MCP and SiLA do not read `--a2a-token`. The agent card advertises the OpenID Connect scheme, and `agent-message` sends the bearer token to the A2A origin.
 
 ## SiLA material
 
