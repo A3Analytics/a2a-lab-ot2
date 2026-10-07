@@ -20,6 +20,7 @@ a2a-lab-dev-kit = { path = "../a2a-lab-dev-kit-rs", default-features = false, fe
 ] }
 aws-config = { version = "1", default-features = false, features = [
     "behavior-version-latest",
+    "credentials-process",
     "rt-tokio",
     "sso",
 ] }
