@@ -50,16 +50,14 @@ mise run a2a-lab-ot2-example
 
 ## Real OT-2
 
-Point `OPENTRONS_URL` at a `v10.0.0` robot-server and keep `--readonly` until a separate procedure authorizes motion.
+Point `OPENTRONS_URL` at a robot-server that speaks the `v10.0.0` API.
 
 ```bash
 OPENTRONS_URL=http://<robot-host>:31950 mise run ot2-simulator-health
-OPENTRONS_URL=http://<robot-host>:31950 mise run a2a-lab-ot2 -- --readonly list-tasks
-OPENTRONS_URL=http://<robot-host>:31950 mise run a2a-lab-ot2 -- --readonly list-metrics
-OPENTRONS_URL=http://<robot-host>:31950 mise run start -- --readonly
+OPENTRONS_URL=http://<robot-host>:31950 mise run a2a-lab-ot2 -- list-tasks
+OPENTRONS_URL=http://<robot-host>:31950 mise run a2a-lab-ot2 -- start-task
+OPENTRONS_URL=http://<robot-host>:31950 mise run start
 ```
-
-Do not run `run_serial_dilution`, `home`, or `mise run ot2-simulation` against hardware from this example. The bundled protocol moves the robot and then fails. `--readonly` does not block other clients from moving it.
 
 ## Endpoints
 
