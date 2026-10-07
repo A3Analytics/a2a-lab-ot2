@@ -10,7 +10,7 @@ created_date: "2026-09-30 21:49"
 
 ## Purpose
 
-Map every HTTP operation the pinned OT-2 `v10.0.0` robot-server simulator actually serves onto a2a-lab's seven operations. The CLI, A2A card, and MCP tools stay those seven commands. `list-tasks` / `list-log-sources` / `list-metrics` are the remaining API.
+Map every HTTP operation the pinned OT-2 `v10.0.0` robot-server actually serves onto a2a-lab's seven operations. CLI lab commands, MCP tools, and SiLA expose those seven operations. The A2A card adds `agent-message`. `list_tasks`, `list_log_sources`, and `list_metrics` are the inventory. Listener addresses, flags, and test commands are in the [README](../../../../README.md), [doc-2](<../testing/doc-2 - Testing-a2a-lab-ot2.md>), and [doc-3](<../cli/doc-3 - a2a-lab-ot2-command-and-configuration-reference.md>).
 
 Source of truth: `GET http://127.0.0.1:31950/openapi.json` with `Opentrons-Version: *`, encoded in `src/opentrons/inventory.rs` (`OPENAPI_OPERATIONS` + `ENTRIES`). Deprecated OpenAPI routes are omitted.
 
@@ -52,11 +52,7 @@ Each advertised task includes `input_schema` and `output_schema`. Composite task
 
 ## Interfaces
 
-The same provider backs the CLI, A2A, MCP, and SiLA. A2A lab data parts use `application/json`. Requests that still send `application/a2a+json` remain accepted.
-
-SiLA listens by default at `127.0.0.1:50052` with UUID `0e2a0002-0000-4000-8000-000000000002` and a self-signed certificate. Operator PEM files replace that certificate when the certificate, key, and CA are all supplied.
-
-A2A stays open unless an OpenID Connect issuer is configured. With an issuer, A2A requires a bearer token for the configured audience and `a2a.invoke` scope. MCP and SiLA do not consume that token.
+The same provider backs the CLI, A2A, MCP, and SiLA. A2A lab data parts use `application/json`. Requests that still send `application/a2a+json` remain accepted. Bind addresses, OpenID Connect, and SiLA certificate files are specified in [doc-3](<../cli/doc-3 - a2a-lab-ot2-command-and-configuration-reference.md>).
 
 ## Coverage
 
