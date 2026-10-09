@@ -15,9 +15,10 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [dependencies]
-a2a-lab-dev-kit = { path = "../a2a-lab-dev-kit-rs", default-features = false, features = [
+a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", rev = "15e0c68492a050715e1f50423aee55a34353c00a", default-features = false, features = [
     "sila2",
 ] }
+axum = "0.8.9"
 aws-config = { version = "1", default-features = false, features = [
     "behavior-version-latest",
     "credentials-process",
@@ -58,7 +59,6 @@ tokio = { version = "1.53.1", features = [
 ] }
 
 [dev-dependencies]
-axum = "0.8.9"
 base64 = "0.22.1"
 jsonwebtoken = "9.3.1"
 rand = "0.8"

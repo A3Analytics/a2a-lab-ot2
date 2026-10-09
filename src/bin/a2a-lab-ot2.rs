@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::{io, io::Write as _};
 
 use tokio::net::TcpListener;
 
@@ -18,9 +19,9 @@ use a2a_lab_dev_kit::{
 use a2a_lab_ot2::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use a2a_lab_ot2::{
     ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_IMAGE_RETENTION_PER_SOURCE,
-    DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, ImageServeConfig, LabAgent, LiveImageCatalog,
-    ModelProvider, OidcConfig, OpentronsLab, SilaConfig, image_catalog, prepare_sila,
-    selected_model, sila_server, with_oidc,
+    DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, FixtureConfig, FixtureServer, FixtureVariant,
+    ImageServeConfig, LabAgent, LiveImageCatalog, ModelProvider, OidcConfig, OpentronsLab,
+    SilaConfig, image_catalog, prepare_sila, selected_model, sila_server, with_oidc,
 };
 use clap::{Parser, Subcommand};
 
@@ -178,6 +179,21 @@ enum Command {
     /// Serve A2A, MCP, and `SiLA` backed by the OT-2 HTTP API
     #[default]
     Serve,
+    /// Run the deterministic A2A-LAB compliance fixture
+    Fixture {
+        /// A2A listener port; zero selects an ephemeral port
+        #[arg(long, default_value_t = 0)]
+        a2a_port: u16,
+        /// MCP listener port; zero selects an ephemeral port
+        #[arg(long, default_value_t = 0)]
+        mcp_port: u16,
+        /// Interface used by both fixture listeners
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Controlled fixture behavior used for compliance failure evidence
+        #[arg(long, default_value = "standard")]
+        variant: FixtureVariant,
+    },
     /// `list_tasks`
     ListTasks,
     /// `list_log_sources`
@@ -250,6 +266,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
     }
+    if let Command::Fixture {
+        a2a_port,
+        mcp_port,
+        host,
+        variant,
+    } = &command
+    {
+        return serve_fixture(host, *a2a_port, *mcp_port, *variant).await;
+    }
     let lab = connect(&cli)?;
     match command {
         Command::Serve => serve(lab, &cli).await?,
@@ -291,7 +316,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
-        Command::AgentMessage { .. } => unreachable!("handled before the lab client connects"),
+        Command::Fixture { .. } | Command::AgentMessage { .. } => {
+            unreachable!("handled before the lab client connects");
+        }
         Command::Engine {
             command_type,
             params,
@@ -307,6 +334,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
     }
+    Ok(())
+}
+
+async fn serve_fixture(
+    host: &str,
+    a2a_port: u16,
+    mcp_port: u16,
+    variant: FixtureVariant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::start(FixtureConfig {
+        host: host.to_owned(),
+        a2a_port,
+        mcp_port,
+        variant,
+    })
+    .await?;
+    println!("{}", serde_json::to_string(server.readiness())?);
+    io::stdout().flush()?;
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|error| startup_error("fixture shutdown signal", error))?;
+    server.shutdown().await;
     Ok(())
 }
 

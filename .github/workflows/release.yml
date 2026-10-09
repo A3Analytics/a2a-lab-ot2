@@ -43,14 +43,6 @@ jobs:
         with:
           path: a2a-lab-ot2
 
-      - name: Checkout a2a-lab-dev-kit-rs
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
-        with:
-          repository: A3Analytics/a2a-lab-dev-kit-rs
-          ref: 690a687ba92cafefa8b98b128933c8513d46b4de
-          token: ${{ secrets.DEVKIT_READ_TOKEN }}
-          path: a2a-lab-dev-kit-rs
-
       - name: Require the tag to match the package version
         if: startsWith(github.ref, 'refs/tags/v')
         working-directory: a2a-lab-ot2

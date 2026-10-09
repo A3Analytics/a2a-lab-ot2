@@ -1,0 +1,193 @@
+name: A2A-LAB Compliance
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a2a-lab-compliance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compliance:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout a2a-lab-ot2
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: 1.98.1
+
+      - name: Build deterministic fixture
+        run: cargo build --locked --bin a2a-lab-ot2
+
+      - name: Start deterministic fixture
+        id: fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/compliance
+          target/debug/a2a-lab-ot2 fixture \
+            >target/compliance/readiness.json \
+            2>target/compliance/fixture.log &
+          echo "$!" >target/compliance/fixture.pid
+          for _ in $(seq 1 200); do
+            [[ -s target/compliance/readiness.json ]] && break
+            kill -0 "$(<target/compliance/fixture.pid)"
+            sleep 0.05
+          done
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          ready = json.loads(
+              pathlib.Path("target/compliance/readiness.json").read_text().splitlines()[0]
+          )
+          pathlib.Path("target/compliance/fixtures.json").write_text(
+              json.dumps(ready["fixtures"]) + "\n"
+          )
+          with pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f'a2a-url={ready["a2a_url"]}\n')
+              output.write(f'mcp-url={ready["mcp_url"]}\n')
+          PY
+
+      - name: Run A2A-LAB compliance
+        id: compliance
+        uses: A3Analytics/a2a-lab-dev-kit-rs@15e0c68492a050715e1f50423aee55a34353c00a
+        with:
+          a2a-url: ${{ steps.fixture.outputs.a2a-url }}
+          mcp-url: ${{ steps.fixture.outputs.mcp-url }}
+          fixtures: target/compliance/fixtures.json
+          profile: "1.1.0"
+          suite: full
+          llm-check: "true"
+          report-path: target/compliance/a2a-lab-ot2.json
+          implementation-name: a2a-lab-ot2
+          implementation-version: ${{ github.sha }}
+
+      - name: Stop deterministic fixture
+        if: always()
+        run: |
+          if [[ -f target/compliance/fixture.pid ]]; then
+            kill -INT "$(<target/compliance/fixture.pid)" 2>/dev/null || true
+            wait "$(<target/compliance/fixture.pid)" 2>/dev/null || true
+          fi
+
+      - name: Start controlled noncompliant fixture
+        if: steps.compliance.outcome == 'success'
+        id: noncompliant-fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          target/debug/a2a-lab-ot2 fixture --variant mcp-metric-error \
+            >target/compliance/noncompliant-readiness.json \
+            2>target/compliance/noncompliant-fixture.log &
+          echo "$!" >target/compliance/noncompliant-fixture.pid
+          for _ in $(seq 1 200); do
+            [[ -s target/compliance/noncompliant-readiness.json ]] && break
+            kill -0 "$(<target/compliance/noncompliant-fixture.pid)"
+            sleep 0.05
+          done
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          ready = json.loads(
+              pathlib.Path("target/compliance/noncompliant-readiness.json")
+              .read_text()
+              .splitlines()[0]
+          )
+          pathlib.Path("target/compliance/noncompliant-fixtures.json").write_text(
+              json.dumps(ready["fixtures"]) + "\n"
+          )
+          with pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f'a2a-url={ready["a2a_url"]}\n')
+              output.write(f'mcp-url={ready["mcp_url"]}\n')
+          PY
+
+      - name: Run controlled noncompliance
+        if: steps.compliance.outcome == 'success'
+        id: noncompliance
+        continue-on-error: true
+        uses: A3Analytics/a2a-lab-dev-kit-rs@15e0c68492a050715e1f50423aee55a34353c00a
+        with:
+          a2a-url: ${{ steps.noncompliant-fixture.outputs.a2a-url }}
+          mcp-url: ${{ steps.noncompliant-fixture.outputs.mcp-url }}
+          fixtures: target/compliance/noncompliant-fixtures.json
+          profile: "1.1.0"
+          suite: full
+          llm-check: "true"
+          report-path: target/compliance/controlled-noncompliance.json
+          implementation-name: a2a-lab-ot2-controlled-noncompliance
+          implementation-version: ${{ github.sha }}
+
+      - name: Verify noncompliance fails the action
+        if: steps.compliance.outcome == 'success'
+        env:
+          ACTION_OUTCOME: ${{ steps.noncompliance.outcome }}
+        run: |
+          set -euo pipefail
+          [[ "$ACTION_OUTCOME" == "failure" ]]
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          report = json.loads(
+              pathlib.Path("target/compliance/controlled-noncompliance.json").read_text()
+          )
+          assert report["compliant"] is False
+          assert any(case["outcome"] == "fail" for case in report["cases"])
+          PY
+
+      - name: Stop controlled noncompliant fixture
+        if: always()
+        run: |
+          if [[ -f target/compliance/noncompliant-fixture.pid ]]; then
+            kill -INT "$(<target/compliance/noncompliant-fixture.pid)" 2>/dev/null || true
+            wait "$(<target/compliance/noncompliant-fixture.pid)" 2>/dev/null || true
+          fi
+
+      - name: Record compliance provenance
+        if: always()
+        env:
+          TESTED_COMMIT: ${{ github.sha }}
+          COMPLIANCE_OUTCOME: ${{ steps.compliance.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          provenance = {
+              "implementation_commit": os.environ["TESTED_COMMIT"],
+              "devkit_action_revision": "15e0c68492a050715e1f50423aee55a34353c00a",
+              "suite_revision": "15e0c68492a050715e1f50423aee55a34353c00a",
+              "profile_version": "1.1.0",
+              "suite": "full",
+              "action_outcome": os.environ["COMPLIANCE_OUTCOME"],
+          }
+          path = pathlib.Path("target/compliance/provenance.json")
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(provenance, indent=2) + "\n")
+          PY
+
+      - name: Upload compliance reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: a2a-lab-compliance-${{ github.sha }}
+          path: |
+            target/compliance/a2a-lab-ot2.json
+            target/compliance/controlled-noncompliance.json
+            target/compliance/provenance.json
+          if-no-files-found: warn

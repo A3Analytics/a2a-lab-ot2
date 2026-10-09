@@ -10,9 +10,9 @@ created_date: "2026-10-07 02:15"
 
 ## Purpose
 
-Run the local quality gate and, when a simulator and a model provider are available, the live smoke check. Local checks use in-process fakes. Smoke drives the pinned `v10.0.0` robot-server container and a Bedrock conversation.
+Run the local quality gate, deterministic A2A-LAB compliance profile, and optional live smoke check. Local checks use controlled software fixtures. Smoke drives the pinned `v10.0.0` robot-server container and a Bedrock conversation.
 
-Install tools with `mise install` before either path. All commands below go through mise.
+Install tools with `mise install` before these paths. All commands below go through mise.
 
 ## Local quality checks
 
@@ -33,7 +33,73 @@ mise run quality
 
 `mise run quality` is the gate for a change. `mise run test` is the faster loop while a failure is still inside the suite. `mise run fmt` rewrites sources; `fmt-check` only reports drift.
 
-## What the suite covers
+## Run deterministic A2A-LAB compliance
+
+Run the default profile from the repository root:
+
+```bash
+mise run compliance
+```
+
+The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies the public devkit at immutable suite revision `15e0c68492a050715e1f50423aee55a34353c00a`. `A2ALAB_DEV_KIT_ROOT` is an explicit local-source override; it does not change the default.
+
+Choose a suite or disable the LLM check with these commands:
+
+```bash
+# Basic: operation-level cases only.
+A2ALAB_COMPLIANCE_SUITE=basic mise run compliance
+
+# Full: basic cases plus linked capability scenarios and the deterministic LLM check.
+A2ALAB_COMPLIANCE_SUITE=full mise run compliance
+
+# Full without the LLM check.
+A2ALAB_COMPLIANCE_SUITE=full A2ALAB_COMPLIANCE_LLM_CHECK=false mise run compliance
+```
+
+`full` includes every `basic` case and is the default. The full suite also runs linked capability scenarios. Its LLM check is on by default and uses the fixture's fake model to exercise `agent-message` without Bedrock, OpenAI, Anthropic, AWS, or other model-provider credentials. Set `A2ALAB_COMPLIANCE_LLM_CHECK=false` for the explicit credential-free opt-out. The `basic` suite does not run linked or LLM scenarios.
+
+Interpret `target/compliance/a2a-lab-ot2.json` as follows:
+
+- `selected_suite` and `enabled_checks` record the effective basic, full, and LLM-check scope.
+- `outcome: "pass"` means the case or scenario met its assertions.
+- `outcome: "fail"` on a required case or scenario makes `compliant` false and the command exits nonzero.
+- `outcome: "skip"` is expected only when `required` is false, such as the unavailable alternative to a required fixture capability. A required skip makes the report noncompliant.
+- `compliant: true` means both interfaces were tested and every required enabled case and scenario passed. It does not extend the result beyond the tested fixture, commit, profile, and suite revision.
+
+To exercise a controlled failure:
+
+```bash
+A2ALAB_COMPLIANCE_FIXTURE_VARIANT=mcp-metric-error mise run compliance
+```
+
+The [public A2A-LAB compliance profile](https://github.com/A3Analytics/a2a-lab-dev-kit-rs/blob/15e0c68492a050715e1f50423aee55a34353c00a/backlog/docs/reference/compliance/doc-23%20-%20A2A-LAB-compliance-profile.md) defines required cases, suites, report fields, and pass criteria. The [public adoption guide](https://github.com/A3Analytics/a2a-lab-dev-kit-rs/blob/15e0c68492a050715e1f50423aee55a34353c00a/backlog/docs/guide/compliance/doc-22%20-%20Adopt-A2A-LAB-compliance.md) defines fixture, action, evidence, and badge semantics. Both links are pinned to the suite revision used by this repository.
+
+## Inspect GitHub Actions evidence
+
+The repository-owned [A2A-LAB Compliance workflow runs](https://github.com/A3Analytics/a2a-lab-ot2/actions/workflows/a2a-lab-compliance.yml?query=branch%3Amain) are the hosted evidence source. For a completed run, open its summary and download the `a2a-lab-compliance-<commit-sha>` artifact. It contains:
+
+- `a2a-lab-ot2.json`, including the per-case and per-scenario outcomes;
+- `controlled-noncompliance.json`, showing the workflow's controlled failing check; and
+- `provenance.json`, identifying the tested implementation commit, profile, suite, action outcome, and immutable devkit suite revision.
+
+The workflow uploads available reports even when compliance fails. A setup failure can occur before a report is created. If the workflow has not been published and run, no hosted artifact exists yet; use the local report instead. A green badge means the matching `main` workflow succeeded for its recorded commit and configuration. It is A2A-LAB compliance evidence, not certification.
+
+## Compliance boundaries
+
+Deterministic compliance covers only the selected A2A-LAB profile behavior exposed by the software fixture over A2A and MCP. It does not run or validate:
+
+- `mise run smoke` or a live model-provider conversation;
+- the pinned `v10.0.0` robot-server Docker simulator;
+- a physical OT-2 or an untested deployment;
+- on-board or external camera availability;
+- Bedrock, OpenAI, Anthropic, or other live model-provider behavior;
+- OpenID Connect (OIDC) authentication;
+- Standardization in Lab Automation (SiLA); or
+- the official A2A protocol Technology Compatibility Kit (TCK).
+
+Those systems need their own checks. They do not inherit a compliance result or badge from the deterministic fixture.
+
+## What the unit test suite covers
 
 Tests bind local listeners and a mock robot-server. They do not start the Docker simulator and they do not call Bedrock, OpenAI, or Anthropic.
 

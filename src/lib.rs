@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod camera;
+pub mod fixture;
 pub mod images;
 pub mod memory;
 pub mod oidc;
@@ -13,6 +14,9 @@ pub mod time;
 pub use agent::{
     DEFAULT_ANTHROPIC_MODEL, DEFAULT_BEDROCK_MODEL, DEFAULT_OPENAI_MODEL, LabAgent, ModelProvider,
     selected_model,
+};
+pub use fixture::{
+    FixtureConfig, FixtureReadiness, FixtureServer, FixtureVariant, fixture_declaration,
 };
 pub use images::{
     CapturedFrame, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_IMAGE_RETENTION_PER_SOURCE, ImageCapture,
