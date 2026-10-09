@@ -33,7 +33,7 @@ mise run quality
 
 `mise run quality` is the gate for a change. `mise run test` is the faster loop while a failure is still inside the suite. `mise run fmt` rewrites sources; `fmt-check` only reports drift.
 
-## Run deterministic A2A-LAB compliance
+## Run the deterministic A2A-LAB TCK
 
 Run the default profile from the repository root:
 
@@ -41,7 +41,7 @@ Run the default profile from the repository root:
 mise run compliance
 ```
 
-The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies the public devkit at immutable suite revision `15e0c68492a050715e1f50423aee55a34353c00a`. `A2ALAB_DEV_KIT_ROOT` is an explicit local-source override; it does not change the default.
+The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies standalone `A3Analytics/a2a-lab-tck` release `v0.1.0` at immutable suite revision `1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd`. `A2ALAB_TCK_ROOT` is an explicit local-source override; it does not change the default. The application separately pins the public devkit library at `9d5327868d96b3e800fd89f6debf434bcc12709d`; it does not depend on the TCK crate.
 
 Choose a suite or disable the LLM check with these commands:
 
@@ -72,17 +72,21 @@ To exercise a controlled failure:
 A2ALAB_COMPLIANCE_FIXTURE_VARIANT=mcp-metric-error mise run compliance
 ```
 
-The [public A2A-LAB compliance profile](https://github.com/A3Analytics/a2a-lab-dev-kit-rs/blob/15e0c68492a050715e1f50423aee55a34353c00a/backlog/docs/reference/compliance/doc-23%20-%20A2A-LAB-compliance-profile.md) defines required cases, suites, report fields, and pass criteria. The [public adoption guide](https://github.com/A3Analytics/a2a-lab-dev-kit-rs/blob/15e0c68492a050715e1f50423aee55a34353c00a/backlog/docs/guide/compliance/doc-22%20-%20Adopt-A2A-LAB-compliance.md) defines fixture, action, evidence, and badge semantics. Both links are pinned to the suite revision used by this repository.
+The authoritative [A2A-LAB TCK profile](https://github.com/A3Analytics/a2a-lab-tck/blob/1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd/backlog/docs/reference/compliance/doc-1%20-%20A2A-LAB-TCK-profile.md) defines required cases, suites, report fields, and pass criteria. The standalone TCK [adoption guidance](https://github.com/A3Analytics/a2a-lab-tck/blob/1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd/README.md#github-action) defines fixture, Action, evidence, and consumer-owned badge semantics. Both links are pinned to the immutable commit behind release `v0.1.0`.
+
+The standalone TCK replaces the legacy devkit Action `v0.1.0` as the compliance runner. Its Action interface and report contract remain compatible, but TCK provenance is now separate from the application's devkit dependency provenance.
 
 ## Inspect GitHub Actions evidence
 
-The repository-owned [A2A-LAB Compliance workflow runs](https://github.com/A3Analytics/a2a-lab-ot2/actions/workflows/a2a-lab-compliance.yml?query=branch%3Amain) are the hosted evidence source. For a completed run, open its summary and download the `a2a-lab-compliance-<commit-sha>` artifact. It contains:
+The repository-owned [A2A-LAB Compliance workflow runs](https://github.com/A3Analytics/a2a-lab-ot2/actions/workflows/a2a-lab-compliance.yml?query=branch%3Amain), which invoke the official A2A-LAB TCK, are the hosted evidence source. For a completed run, open its summary and download the `a2a-lab-compliance-<commit-sha>` artifact. It contains:
 
 - `a2a-lab-ot2.json`, including the per-case and per-scenario outcomes;
 - `controlled-noncompliance.json`, showing the workflow's controlled failing check; and
-- `provenance.json`, identifying the tested implementation commit, profile, suite, action outcome, and immutable devkit suite revision.
+- `provenance.json`, separately identifying the tested implementation commit, public devkit dependency, immutable TCK Action and suite revisions, profile, selected suite, LLM-check state, and workflow outcome.
 
-The workflow uploads available reports even when compliance fails. A setup failure can occur before a report is created. If the workflow has not been published and run, no hosted artifact exists yet; use the local report instead. A green badge means the matching `main` workflow succeeded for its recorded commit and configuration. It is A2A-LAB compliance evidence, not certification.
+The successful [hosted run for commit `9356cdd272c3ea5d5db2650e65c1c596bf83c29d`](https://github.com/A3Analytics/a2a-lab-ot2/actions/runs/37968981332) uploaded [`a2a-lab-compliance-9356cdd272c3ea5d5db2650e65c1c596bf83c29d`](https://github.com/A3Analytics/a2a-lab-ot2/actions/runs/37968981332/artifacts/11634811818). It is retained historical evidence from the legacy devkit Action: its provenance records profile `1.1.0`, the full suite, devkit suite revision `15e0c68492a050715e1f50423aee55a34353c00a`, and `action_outcome: "success"`; its primary report records `compliant: true`. It does not claim a standalone TCK result. New revisions require their own standalone TCK run and artifact.
+
+The workflow uploads available reports even when compliance fails. A setup failure can occur before a report is created. A green badge means the matching `main` workflow succeeded for its recorded commit and configuration. It is A2A-LAB compliance evidence, not certification.
 
 ## Compliance boundaries
 
@@ -95,7 +99,7 @@ Deterministic compliance covers only the selected A2A-LAB profile behavior expos
 - Bedrock, OpenAI, Anthropic, or other live model-provider behavior;
 - OpenID Connect (OIDC) authentication;
 - Standardization in Lab Automation (SiLA); or
-- the official A2A protocol Technology Compatibility Kit (TCK).
+- the separate upstream A2A protocol Technology Compatibility Kit (TCK).
 
 Those systems need their own checks. They do not inherit a compliance result or badge from the deterministic fixture.
 

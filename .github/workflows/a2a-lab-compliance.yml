@@ -60,9 +60,9 @@ jobs:
               output.write(f'mcp-url={ready["mcp_url"]}\n')
           PY
 
-      - name: Run A2A-LAB compliance
+      - name: Run official A2A-LAB TCK
         id: compliance
-        uses: A3Analytics/a2a-lab-dev-kit-rs@15e0c68492a050715e1f50423aee55a34353c00a
+        uses: A3Analytics/a2a-lab-tck@1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd
         with:
           a2a-url: ${{ steps.fixture.outputs.a2a-url }}
           mcp-url: ${{ steps.fixture.outputs.mcp-url }}
@@ -115,11 +115,11 @@ jobs:
               output.write(f'mcp-url={ready["mcp_url"]}\n')
           PY
 
-      - name: Run controlled noncompliance
+      - name: Run controlled TCK noncompliance
         if: steps.compliance.outcome == 'success'
         id: noncompliance
         continue-on-error: true
-        uses: A3Analytics/a2a-lab-dev-kit-rs@15e0c68492a050715e1f50423aee55a34353c00a
+        uses: A3Analytics/a2a-lab-tck@1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd
         with:
           a2a-url: ${{ steps.noncompliant-fixture.outputs.a2a-url }}
           mcp-url: ${{ steps.noncompliant-fixture.outputs.mcp-url }}
@@ -170,11 +170,13 @@ jobs:
 
           provenance = {
               "implementation_commit": os.environ["TESTED_COMMIT"],
-              "devkit_action_revision": "15e0c68492a050715e1f50423aee55a34353c00a",
-              "suite_revision": "15e0c68492a050715e1f50423aee55a34353c00a",
+              "devkit_dependency_revision": "9d5327868d96b3e800fd89f6debf434bcc12709d",
+              "tck_action_revision": "1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd",
+              "tck_suite_revision": "1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd",
               "profile_version": "1.1.0",
-              "suite": "full",
-              "action_outcome": os.environ["COMPLIANCE_OUTCOME"],
+              "selected_suite": "full",
+              "llm_check": True,
+              "workflow_outcome": os.environ["COMPLIANCE_OUTCOME"],
           }
           path = pathlib.Path("target/compliance/provenance.json")
           path.parent.mkdir(parents=True, exist_ok=True)

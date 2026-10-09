@@ -2,8 +2,8 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-devkit_url="https://github.com/A3Analytics/a2a-lab-dev-kit-rs"
-devkit_revision="15e0c68492a050715e1f50423aee55a34353c00a"
+tck_url="https://github.com/A3Analytics/a2a-lab-tck"
+tck_revision="1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd"
 report="${A2ALAB_COMPLIANCE_REPORT:-$root/target/compliance/a2a-lab-ot2.json}"
 variant="${A2ALAB_COMPLIANCE_FIXTURE_VARIANT:-standard}"
 suite="${A2ALAB_COMPLIANCE_SUITE:-full}"
@@ -23,22 +23,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -n "${A2ALAB_DEV_KIT_ROOT:-}" ]]; then
-  devkit="$A2ALAB_DEV_KIT_ROOT"
+if [[ -n "${A2ALAB_TCK_ROOT:-}" ]]; then
+  tck="$A2ALAB_TCK_ROOT"
 else
-  devkit="$work/a2a-lab-dev-kit-rs"
-  git init --quiet "$devkit"
-  git -C "$devkit" fetch --quiet --depth 1 "$devkit_url" "$devkit_revision"
-  git -C "$devkit" checkout --quiet --detach FETCH_HEAD
-  resolved_revision="$(git -C "$devkit" rev-parse HEAD)"
-  if [[ "$resolved_revision" != "$devkit_revision" ]]; then
-    printf 'A2A-LAB devkit resolved to %s, expected %s\n' \
-      "$resolved_revision" "$devkit_revision" >&2
+  tck="$work/a2a-lab-tck"
+  git init --quiet "$tck"
+  git -C "$tck" fetch --quiet --depth 1 "$tck_url" "$tck_revision"
+  git -C "$tck" checkout --quiet --detach FETCH_HEAD
+  resolved_revision="$(git -C "$tck" rev-parse HEAD)"
+  if [[ "$resolved_revision" != "$tck_revision" ]]; then
+    printf 'A2A-LAB TCK resolved to %s, expected %s\n' \
+      "$resolved_revision" "$tck_revision" >&2
     exit 2
   fi
 fi
-if [[ ! -f "$devkit/Cargo.toml" ]]; then
-  printf 'A2A-LAB devkit not found at %s\n' "$devkit" >&2
+if [[ ! -f "$tck/Cargo.toml" ]]; then
+  printf 'A2A-LAB TCK not found at %s\n' "$tck" >&2
   exit 2
 fi
 if [[ "$suite" != "basic" && "$suite" != "full" ]]; then
@@ -84,7 +84,7 @@ mcp_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mcp_
 
 mkdir -p "$(dirname "$report")"
 rm -f "$report"
-cd "$devkit"
+cd "$tck"
 arguments=(
   --a2a-url "$a2a_url"
   --mcp-url "$mcp_url"

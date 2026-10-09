@@ -15,7 +15,7 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [dependencies]
-a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", rev = "15e0c68492a050715e1f50423aee55a34353c00a", default-features = false, features = [
+a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", rev = "9d5327868d96b3e800fd89f6debf434bcc12709d", default-features = false, features = [
     "sila2",
 ] }
 axum = "0.8.9"
@@ -31,7 +31,9 @@ aws-sdk-bedrockruntime = { version = "1", default-features = false, features = [
 ] }
 clap = { version = "4.5.53", features = ["derive", "env"] }
 jiff = { version = "0.2.37", features = ["serde"] }
-nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }
+nokhwa = { version = "0.10.11", default-features = false, features = [
+    "input-native",
+] }
 reqwest = { version = "0.13.5", features = ["json", "multipart"] }
 rmcp = { version = "2.2", default-features = false, features = [
     "client",

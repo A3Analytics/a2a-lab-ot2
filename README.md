@@ -32,7 +32,34 @@ The OT-2 robot-server is an a2a-lab. These operations are how a caller lists, ru
 `agent-message` is an A2A skill beside those seven. A model takes plain text and calls the lab operations through MCP. MCP and SiLA serve the A2A-LAB operations.
 
 `--readonly` limits `list_tasks` and `start_task` to reads. Image reads stay available.
-cts; and
+
+## A2A-LAB TCK
+
+The badge reports the `main` branch status of this repository's
+[A2A-LAB Compliance workflow](https://github.com/A3Analytics/a2a-lab-ot2/actions/workflows/a2a-lab-compliance.yml?query=branch%3Amain),
+which runs the official A2A-LAB TCK.
+Green means the identified repository commit passed the official A2A-LAB TCK profile `1.1.0`
+and full suite revision recorded in that run's artifact. The badge and status remain owned by
+this consumer repository.
+
+This status is compliance evidence, not certification. It applies only to the tested deterministic
+fixture and commit. It does not cover an untested deployment, the Docker simulator, a physical
+OT-2, cameras, live model providers, OpenID Connect (OIDC), Standardization in Lab Automation
+(SiLA), or the separate upstream A2A protocol TCK.
+
+The standalone TCK replaces the legacy devkit Action `v0.1.0`; the application still pins its
+devkit library dependency independently. See the authoritative
+[A2A-LAB TCK profile](https://github.com/A3Analytics/a2a-lab-tck/blob/1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd/backlog/docs/reference/compliance/doc-1%20-%20A2A-LAB-TCK-profile.md)
+and [adoption guidance](https://github.com/A3Analytics/a2a-lab-tck/blob/1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd/README.md#github-action).
+
+Run the same default profile locally:
+
+```bash
+mise run compliance
+```
+
+See [Testing a2a-lab-ot2](<backlog/docs/technical/testing/doc-2 - Testing-a2a-lab-ot2.md>) for
+basic, full, deterministic LLM, and opt-out commands; report interpretation; CI artifacts; and
 scope boundaries.
 
 ## Simulator
