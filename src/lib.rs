@@ -1,6 +1,8 @@
 //! Example lab agent wrapping an Opentrons OT-2 robot-server simulator.
 
 pub mod agent;
+pub mod camera;
+pub mod images;
 pub mod memory;
 pub mod oidc;
 pub mod opentrons;
@@ -11,6 +13,10 @@ pub mod time;
 pub use agent::{
     DEFAULT_ANTHROPIC_MODEL, DEFAULT_BEDROCK_MODEL, DEFAULT_OPENAI_MODEL, LabAgent, ModelProvider,
     selected_model,
+};
+pub use images::{
+    CapturedFrame, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_IMAGE_RETENTION_PER_SOURCE, ImageCapture,
+    ImageCatalogConfig, ImageServeConfig, LiveImageCatalog, image_catalog,
 };
 pub use memory::ConversationStore;
 pub use oidc::{OidcConfig, with_oidc};

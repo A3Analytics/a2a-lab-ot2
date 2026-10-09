@@ -9,14 +9,18 @@ use tokio::net::TcpListener;
 use a2a_lab_dev_kit::sila::SilaServerHandle;
 use a2a_lab_dev_kit::{
     A2aClient, A2aLabApi, A2aLabError, A2aLabService, A2aServer, AgentMessageHandler,
-    DEFAULT_MCP_URL, GetTaskStatusRequest, JsonObject, ListLogSourcesRequest, ListMetricsRequest,
-    ListTasksRequest, LogLevel, LogProvider, LogRecord, McpLab, McpServer, MetricId,
-    MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
+    DEFAULT_MAX_IMAGE_BYTES, DEFAULT_MCP_URL, GetCurrentImageRequest, GetTaskStatusRequest,
+    ImageProvider, ImageSourceId, JsonObject, ListImageSourcesRequest, ListLogSourcesRequest,
+    ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider, LogRecord, McpLab, McpServer,
+    MetricId, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
     StartTaskRequest, TaskId, TaskProvider, TaskRun, TaskState, TimeRange, UtcTimestamp, start_run,
 };
+use a2a_lab_ot2::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use a2a_lab_ot2::{
-    ConversationStore, DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, LabAgent, ModelProvider, OidcConfig,
-    OpentronsLab, SilaConfig, prepare_sila, selected_model, sila_server, with_oidc,
+    ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_IMAGE_RETENTION_PER_SOURCE,
+    DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, ImageServeConfig, LabAgent, LiveImageCatalog,
+    ModelProvider, OidcConfig, OpentronsLab, SilaConfig, image_catalog, prepare_sila,
+    selected_model, sila_server, with_oidc,
 };
 use clap::{Parser, Subcommand};
 
@@ -28,7 +32,11 @@ use clap::{Parser, Subcommand};
 )]
 struct Cli {
     /// Robot-server HTTP base URL (`GET /health`, `/runs`, `/logs`, …)
-    #[arg(long, env = "A2ALAB_OPENTRONS_URL", default_value = "http://127.0.0.1:31950")]
+    #[arg(
+        long,
+        env = "A2ALAB_OPENTRONS_URL",
+        default_value = "http://127.0.0.1:31950"
+    )]
     opentrons_url: String,
     /// Advertise and execute only GET-backed tasks
     #[arg(long, global = true)]
@@ -39,7 +47,7 @@ struct Cli {
     /// Bind host for A2A and MCP. `0.0.0.0` listens on every interface.
     #[arg(long, env = "A2ALAB_LISTEN_HOST", default_value = "127.0.0.1")]
     a2alab_listen_host: String,
-    /// Public origin advertised for A2A, MCP, and SiLA. Each service keeps its own port.
+    /// Public origin advertised for A2A, MCP, and `SiLA`. Each service keeps its own port.
     #[arg(long, env = "A2ALAB_PUBLIC_URL")]
     a2alab_public_url: Option<String>,
     /// SQLite file for conversation history
@@ -95,7 +103,11 @@ struct Cli {
     #[arg(long, env = "A2ALAB_SILA_CA")]
     sila_ca: Option<PathBuf>,
     /// Persisted `SiLA` server name
-    #[arg(long, env = "A2ALAB_SILA_NAME_PATH", default_value = ".a2a-lab-ot2/sila-name")]
+    #[arg(
+        long,
+        env = "A2ALAB_SILA_NAME_PATH",
+        default_value = ".a2a-lab-ot2/sila-name"
+    )]
     sila_name_path: PathBuf,
     /// Persisted server-initiated `SiLA` clients
     #[arg(
@@ -105,11 +117,40 @@ struct Cli {
     )]
     sila_connection_store: PathBuf,
     /// Path written with the self-signed CA certificate
-    #[arg(long, env = "A2ALAB_SILA_CA_OUT", default_value = ".a2a-lab-ot2/sila-ca.crt")]
+    #[arg(
+        long,
+        env = "A2ALAB_SILA_CA_OUT",
+        default_value = ".a2a-lab-ot2/sila-ca.crt"
+    )]
     sila_ca_out: PathBuf,
     /// Advertise the `SiLA` server over mDNS
     #[arg(long, env = "A2ALAB_SILA_ANNOUNCE", default_value_t = false)]
     sila_announce: bool,
+    /// Optional native camera index that enables `external-camera`.
+    ///
+    /// Omit this to serve only the on-board camera. When set, current images for
+    /// `external-camera` come from this platform camera index.
+    /// The camera is not opened until a current image is requested.
+    #[arg(long, env = "A2ALAB_EXTERNAL_CAMERA_INDEX")]
+    external_camera_index: Option<u32>,
+    /// Description advertised for `external-camera` when that source is enabled.
+    ///
+    /// An empty value is rejected. A command-line value replaces the environment value.
+    #[arg(
+        long,
+        env = "A2ALAB_EXTERNAL_CAMERA_DESCRIPTION",
+        default_value = DEFAULT_EXTERNAL_CAMERA_DESCRIPTION
+    )]
+    external_camera_description: String,
+    /// Decoded image maximum in bytes. The default is 64 MiB.
+    #[arg(long, env = "A2ALAB_MAX_IMAGE_BYTES", default_value_t = DEFAULT_MAX_IMAGE_BYTES)]
+    max_image_bytes: u64,
+    /// Milliseconds allowed for one camera capture. Zero is rejected.
+    #[arg(long, env = "A2ALAB_CAPTURE_TIMEOUT_MS", default_value_t = DEFAULT_CAPTURE_TIMEOUT_MS)]
+    capture_timeout_ms: u64,
+    /// Recent frames kept for each camera source.
+    #[arg(long, env = "A2ALAB_IMAGE_RETENTION", default_value_t = DEFAULT_IMAGE_RETENTION_PER_SOURCE)]
+    image_retention: u64,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -143,6 +184,17 @@ enum Command {
     ListLogSources,
     /// `list_metrics`
     ListMetrics,
+    /// `list_image_sources`
+    ListImageSources,
+    /// `get_current_image` for one camera, written to a file
+    GetCurrentImage {
+        /// `opentrons-camera` or `external-camera`
+        #[arg(long)]
+        source: String,
+        /// File that receives the JPEG bytes
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// `query_logs` (omit sources to merge every advertised source into one stream)
     QueryLogs { source_ids: Vec<String> },
     /// `query_metric` (omit to query every metric)
@@ -204,6 +256,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::ListTasks => list_tasks(&lab).await?,
         Command::ListLogSources => list_log_sources(&lab).await?,
         Command::ListMetrics => list_metrics(&lab).await?,
+        Command::ListImageSources => list_image_sources(&cli).await?,
+        Command::GetCurrentImage { source, output } => {
+            get_current_image(&cli, &source, &output).await?;
+        }
         Command::QueryLogs { source_ids } => query_logs(&lab, &source_ids).await?,
         Command::QueryMetrics { metric_id } => query_metrics(&lab, metric_id.as_deref()).await?,
         Command::StartTask {
@@ -277,7 +333,17 @@ fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
     Ok(OpentronsLab::new(&cli.opentrons_url)?.with_readonly(cli.readonly))
 }
 
+fn prepare_images(
+    cli: &Cli,
+) -> Result<(ImageServeConfig, LiveImageCatalog), Box<dyn std::error::Error>> {
+    let images = image_config(cli)?;
+    println!("{}", images.summary());
+    let catalog = image_catalog(&cli.opentrons_url, &images, None)?;
+    Ok((images, catalog))
+}
+
 async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (images, catalog) = prepare_images(cli)?;
     let opentrons = format!("opentrons robot-server at {}", cli.opentrons_url);
     lab.client()
         .health()
@@ -287,7 +353,10 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     let store = ConversationStore::open(&cli.conversation_db, cli.history_limit)
         .await
         .map_err(|error| startup_error(&conversation, error))?;
-    let service = A2aLabService::new(lab.clone(), lab.clone(), lab).share();
+    let service = A2aLabService::new(lab.clone(), lab.clone(), lab)
+        .with_images(catalog)
+        .with_image_transport(images.transport())
+        .share();
     let (sila, sila_ca) = start_sila(Arc::clone(&service), cli)
         .await
         .map_err(|error| startup_error("sila", error))?;
@@ -304,7 +373,7 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     let mcp_target = format!("mcp at {DEFAULT_MCP_URL}");
     let mcp_lab = tokio::select! {
         finished = mcp_task.join() => return Err(mcp_task_error(&mcp_target, finished).into()),
-        connected = McpLab::connect_default() => {
+        connected = McpLab::connect_with(DEFAULT_MCP_URL, images.transport()) => {
             connected.map_err(|error| startup_error(&mcp_target, error))?
         }
     };
@@ -314,6 +383,7 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     let agent = LabAgent::from_provider(provider, &model, DEFAULT_MCP_URL, store)
         .await
         .map_err(|error| startup_error(&model_target, error))?;
+    let mcp_lab: Arc<dyn A2aLabApi> = Arc::new(mcp_lab);
     let mut a2a = A2aServer::new(&mcp_lab)
         .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>);
     let a2a_listener = TcpListener::bind(format!("{}:31000", cli.a2alab_listen_host))
@@ -333,20 +403,15 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
             .with_public_url(origin(host, a2a_addr.port()))
             .with_grpc_host(host.host.clone());
     }
-    if let Some(config) = oidc_config(cli) {
-        a2a = with_oidc(a2a, &config).map_err(|error| startup_error("oidc", error))?;
-        println!("OIDC         {} (A2A only)", config.issuer);
-    } else {
-        println!("OIDC         off");
-    }
-    let a2a_shown = advertised
-        .as_ref()
-        .map(|host| origin(host, a2a_addr.port()))
-        .unwrap_or_else(|| format!("http://{a2a_addr}"));
-    let mcp_shown = advertised
-        .as_ref()
-        .map(|host| format!("{}/mcp", origin(host, mcp_addr.port())))
-        .unwrap_or_else(|| format!("http://{mcp_addr}/mcp"));
+    a2a = apply_oidc(a2a, cli)?;
+    let a2a_shown = advertised.as_ref().map_or_else(
+        || format!("http://{a2a_addr}"),
+        |host| origin(host, a2a_addr.port()),
+    );
+    let mcp_shown = advertised.as_ref().map_or_else(
+        || format!("http://{mcp_addr}/mcp"),
+        |host| format!("{}/mcp", origin(host, mcp_addr.port())),
+    );
     let sila_shown = advertised.as_ref().map_or_else(
         || sila.local_addr().to_string(),
         |host| socket_host(host, sila.local_addr().port()),
@@ -370,6 +435,16 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     drop(sila);
     drop(mcp_task);
     Ok(())
+}
+
+fn apply_oidc(a2a: A2aServer, cli: &Cli) -> Result<A2aServer, Box<dyn std::error::Error>> {
+    let Some(config) = oidc_config(cli) else {
+        println!("OIDC         off");
+        return Ok(a2a);
+    };
+    let a2a = with_oidc(a2a, &config).map_err(|error| startup_error("oidc", error))?;
+    println!("OIDC         {} (A2A only)", config.issuer);
+    Ok(a2a)
 }
 
 fn oidc_config(cli: &Cli) -> Option<OidcConfig> {
@@ -469,9 +544,7 @@ fn advertised_host(value: &str) -> AdvertisedHost {
         .unwrap_or(("http", value.trim()));
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let host = if let Some(rest) = authority.strip_prefix('[') {
-        rest.split_once(']')
-            .map(|(host, _)| host)
-            .unwrap_or(authority)
+        rest.split_once(']').map_or(authority, |(host, _)| host)
     } else {
         match authority.rsplit_once(':') {
             Some((host, port))
@@ -513,6 +586,68 @@ fn mcp_task_error(
         Ok(Err(error)) => startup_error(target, error),
         Err(error) => startup_error(target, error),
     }
+}
+
+fn image_config(cli: &Cli) -> Result<ImageServeConfig, a2a_lab_dev_kit::A2aLabError> {
+    ImageServeConfig::new(
+        cli.external_camera_index,
+        Some(cli.external_camera_description.as_str()),
+        cli.max_image_bytes,
+        cli.capture_timeout_ms,
+        cli.image_retention,
+    )
+}
+
+fn camera_catalog(cli: &Cli) -> Result<a2a_lab_ot2::LiveImageCatalog, Box<dyn std::error::Error>> {
+    Ok(image_catalog(
+        &cli.opentrons_url,
+        &image_config(cli)?,
+        None,
+    )?)
+}
+
+async fn list_image_sources(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let catalog = camera_catalog(cli)?;
+    let page = catalog
+        .list_image_sources(ListImageSourcesRequest::new(PageRequest::new(None, 50)?)?)
+        .await?;
+    println!("a2a-lab list_image_sources");
+    for source in page.items() {
+        println!("{}\t{}", source.id, source.name);
+        if let Some(asset) = &source.asset_id {
+            println!("asset\t{asset}");
+        }
+        println!("description\t{}", source.description);
+    }
+    Ok(())
+}
+
+async fn get_current_image(
+    cli: &Cli,
+    source: &str,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let catalog = camera_catalog(cli)?;
+    let image = catalog
+        .get_current_image(GetCurrentImageRequest::new(ImageSourceId::new(source)?))
+        .await?;
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(output, image.data())?;
+    let descriptor = image.descriptor();
+    println!("a2a-lab get_current_image");
+    println!("id\t{}", descriptor.id());
+    println!("source\t{}", descriptor.source_id());
+    println!("media_type\t{}", descriptor.media_type());
+    println!("width\t{}", descriptor.width());
+    println!("height\t{}", descriptor.height());
+    println!("captured_at\t{}", descriptor.captured_at());
+    println!("bytes\t{}", image.data().len());
+    println!("output\t{}", output.display());
+    Ok(())
 }
 
 async fn list_tasks(lab: &OpentronsLab) -> Result<(), Box<dyn std::error::Error>> {

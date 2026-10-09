@@ -54,6 +54,18 @@ Each advertised task includes `input_schema` and `output_schema`. Composite task
 
 The same provider backs the CLI, A2A, MCP, and SiLA. A2A lab data parts use `application/json`. Requests that still send `application/a2a+json` remain accepted. Bind addresses, OpenID Connect, and SiLA certificate files are specified in [doc-3](<../cli/doc-3 - a2a-lab-ot2-command-and-configuration-reference.md>).
 
+## Camera images
+
+Image operations are `list_image_sources`, `list_images`, `search_images`, `get_image`, and `get_current_image`. They are not robot-server task ids.
+
+`opentrons-camera` is asset `opentrons-ot2`. A current frame is `POST /camera/picture` on pinned robot-server `v10.0.0`, with the `Opentrons-Version` header. The response body is stored byte for byte as `image/jpeg`. `GET /camera/stream` returns stream status and URLs, not frames, and this agent does not call it. OT-2 live streaming is unsupported. The agent does not enable or reconfigure the camera. The operator does that.
+
+`external-camera` is optional. It is absent until `--v4l2-device` or `A2ALAB_V4L2_DEVICE` names a host V4L2 node, for example `/dev/video4`. A current frame is the 30th JPEG from that node's stream. The capture queues every buffer the device grants and keeps those buffers streaming until that frame is read. The earlier frames are discarded so the camera can settle. The read does not pass through robot-server. The advertised description is `--v4l2-description` or `A2ALAB_V4L2_DESCRIPTION`. When neither is set, the description is "Still frame from the host Linux V4L2 camera."
+
+The pinned simulator can advertise `opentrons-camera` and does not emulate a usable on-board camera. A current-image call against the simulator fails. A real OT-2 returns a JPEG when the camera is enabled. A Linux host returns a JPEG from `external-camera` only after that device is configured. Deterministic tests mock `POST /camera/picture` and the V4L2 grab, and they do not open a video device.
+
+Frames are inline base64. Each process keeps a bounded number of recent frames per source. A restart drops them. A missing, disabled, busy, permission-denied, timed-out, malformed, or oversized camera fails only that source.
+
 ## Coverage
 
 `tests/inventory.rs` requires every `OPENAPI_OPERATIONS` pair to be classified. Provider tests require every non-skip inventory id to appear in `list_tasks`, `list_sources`, or `list_metrics`.

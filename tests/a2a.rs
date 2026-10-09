@@ -213,6 +213,11 @@ async fn a2a_agent_message_continues_context_beside_lab_commands() {
             "list-tasks",
             "start-task",
             "get-task-status",
+            "list-image-sources",
+            "list-images",
+            "search-images",
+            "get-image",
+            "get-current-image",
             "agent-message",
         ]
     );
@@ -306,12 +311,17 @@ async fn mcp_lists_tools_and_readonly_hides_writes() {
 
 fn mcp_tool_names_sorted() -> Vec<String> {
     [
+        "get_current_image",
+        "get_image",
         "get_task_status",
+        "list_image_sources",
+        "list_images",
         "list_log_sources",
         "list_metrics",
         "list_tasks",
         "query_logs",
         "query_metric",
+        "search_images",
         "start_task",
     ]
     .into_iter()

@@ -82,3 +82,4 @@ Full CLI reference: `mise exec -- backlog --help`.
 - Use `mise` tasks before raw binaries; never guess commands or paths.
 - Keep code, comments, and responses terse.
 - Don't install tools or dependencies without approval.
+- Application behavior is not OS-specific. A capability comes from a library that is either present or absent. Do not gate features, configuration, or code paths on the operating system.

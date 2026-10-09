@@ -6,6 +6,10 @@ run = "mise exec -- backlog browser"
 description = "Compile the crate"
 run = "cargo check --workspace"
 
+[build-linux-x86_64]
+description = "Build the release binary for x86-64 Linux in Docker"
+run = "bash .mise/scripts/build-linux-x86_64.sh"
+
 [fmt]
 description = "Format Rust sources"
 run = "cargo fmt"
@@ -43,6 +47,10 @@ run = "cargo run --bin a2a-lab-ot2 --"
 [a2a-lab-ot2-example]
 description = "Print advertised log sources as one OTEL log stream"
 run = "bash .mise/scripts/a2a-lab-ot2-example.sh"
+
+[images]
+description = "List camera sources, or save one current JPEG"
+run = "bash .mise/scripts/images.sh"
 
 [ot2-simulator-setup]
 description = "Build the pinned OT-2 robot-server Docker image (Opentrons v10.0.0)"

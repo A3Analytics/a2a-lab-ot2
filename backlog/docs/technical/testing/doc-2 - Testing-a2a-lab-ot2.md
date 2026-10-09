@@ -44,9 +44,26 @@ Tests bind local listeners and a mock robot-server. They do not start the Docker
 | `tests/a2a.rs`         | A2A run control, readonly over A2A, `agent-message` context, MCP tool listing, and OpenID Connect acceptance and rejection.                                                                                                      |
 | `tests/agent.rs`       | Model selection, conversation history, tool calls, and one-context turn ordering.                                                                                                                                                |
 | `tests/sila.rs`        | Default SiLA identity, operator PEM replacement, rejection of a partial PEM set, and a TLS bind.                                                                                                                                 |
+| `tests/image_catalog.rs` | Two injectable cameras, pagination, search bounds, retention, and an isolated capture failure.                                                                                                                                |
+| `tests/opentrons_camera.rs` | Mock `POST /camera/picture`, JPEG bytes and dimensions, and disabled, malformed, timeout, and unreachable failures.                                                                                                          |
+| `tests/v4l2_camera.rs` | Injected V4L2 grabs, `/dev/video4` as the default, and no video device opened by the suite.                                                                                                                                      |
+| `tests/image_serve.rs` | Serve limits, both source ids, readonly image reads, exact A2A skills, and exact MCP tools.                                                                                                                                      |
+| `tests/image_parity.rs` | The same camera calls compared across A2A and MCP.                                                                                                                                                                              |
+| `tests/image_demo.rs`  | `list-image-sources` and a saved current JPEG without a camera or the simulator.                                                                                                                                                 |
 | `tests/support/mod.rs` | The mock robot-server used by the suite.                                                                                                                                                                                         |
 
 Provider tests require every non-skip inventory id to appear in `list_tasks`, `list_log_sources`, or `list_metrics`. That is the catalog contract. [doc-1](<../ot2-http/doc-1 - OT-2-robot-server-HTTP-mapping.md>) defines how each route is classified.
+
+Image tests cover `list_image_sources`, `list_images`, `search_images`, `get_image`, and `get_current_image` for `opentrons-camera` and, when a device is configured, `external-camera`. They mock `POST /camera/picture` and inject the V4L2 grab. `mise run quality` does not open a video device, start Docker, or use model credentials. `mise run images` lists the OT-2 camera. `A2ALAB_V4L2_DEVICE=/dev/video4 mise run images` adds the extra camera.
+
+Expected outcomes differ by environment:
+
+| Environment | `opentrons-camera` | `external-camera` |
+| --- | --- | --- |
+| Deterministic tests | Mock JPEG, or a stable error for a disabled, malformed, or unreachable robot-server. | Injected JPEG, or a stable error for a missing, busy, or timed-out device. |
+| Pinned simulator | The source is advertised. A current image fails because the simulator has no camera. | Absent unless `--v4l2-device` names a node on this host. |
+| Real OT-2 | A JPEG from `POST /camera/picture` when the operator enabled the camera. | Absent unless a host device is configured. It reads that device, not the robot. |
+| Linux host with `--v4l2-device /dev/video4` | Depends on whether robot-server is a simulator or a real OT-2. | A JPEG from that device. |
 
 ## Live smoke
 

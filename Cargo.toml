@@ -30,6 +30,7 @@ aws-sdk-bedrockruntime = { version = "1", default-features = false, features = [
 ] }
 clap = { version = "4.5.53", features = ["derive", "env"] }
 jiff = { version = "0.2.37", features = ["serde"] }
+nokhwa = { version = "0.10.11", default-features = false, features = ["input-native"] }
 reqwest = { version = "0.13.5", features = ["json", "multipart"] }
 rmcp = { version = "2.2", default-features = false, features = [
     "client",

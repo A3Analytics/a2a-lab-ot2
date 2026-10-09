@@ -36,6 +36,40 @@ impl OpentronsClient {
         self.send_json(Method::GET, "health", None).await
     }
 
+    /// `POST /camera/picture`.
+    ///
+    /// Returns the response content type and raw body. This is the OT-2 still
+    /// capture. `GET /camera/stream` does not return frames.
+    pub async fn camera_picture(
+        &self,
+        timeout: Duration,
+    ) -> Result<(String, Vec<u8>), A2aLabError> {
+        let response = self
+            .http
+            .post(self.url("camera/picture")?)
+            .header(VERSION_HEADER, VERSION)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|error| picture_transport(&self.base, &error, timeout))?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| picture_transport(&self.base, &error, timeout))?;
+        if !status.is_success() {
+            let text = String::from_utf8_lossy(&body);
+            return Err(picture_status(status, &text));
+        }
+        Ok((content_type, body.to_vec()))
+    }
+
     /// Multipart POST used by protocol, data-file, and Wi-Fi key uploads.
     pub async fn upload_bytes<T>(
         &self,
@@ -238,6 +272,30 @@ impl OpentronsClient {
         base.push('/');
         base.push_str(path.trim_start_matches('/'));
         Url::parse(&base).map_err(|error| A2aLabError::invalid("url", error.to_string()))
+    }
+}
+
+fn picture_transport(base: &Url, error: &reqwest::Error, timeout: Duration) -> A2aLabError {
+    if error.is_timeout() {
+        return A2aLabError::unavailable(format!(
+            "OT-2 camera POST /camera/picture timed out after {}ms talking to {base}",
+            timeout.as_millis()
+        ));
+    }
+    A2aLabError::unavailable(format!(
+        "OT-2 camera POST /camera/picture failed talking to {base}: robot-server is unreachable ({error})"
+    ))
+}
+
+fn picture_status(status: StatusCode, body: &str) -> A2aLabError {
+    let detail = error_detail(body);
+    let message = format!("OT-2 camera POST /camera/picture returned {status}: {detail}");
+    if status == StatusCode::NOT_FOUND {
+        A2aLabError::not_found("camera", message)
+    } else if status.is_client_error() {
+        A2aLabError::invalid("camera", message)
+    } else {
+        A2aLabError::unavailable(message)
     }
 }
 
