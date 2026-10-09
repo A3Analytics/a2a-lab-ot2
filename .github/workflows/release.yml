@@ -106,7 +106,7 @@ jobs:
               ldd_text="$(ldd "$built" 2>&1 || true)"
               printf '%s\n' "$ldd_text"
               case "$ldd_text" in
-                *"not a dynamic executable"*) ;;
+                *"not a dynamic executable"*|*"statically linked"*) ;;
                 *)
                   printf 'musl binary is dynamically linked\n' >&2
                   exit 1
