@@ -32,29 +32,7 @@ The OT-2 robot-server is an a2a-lab. These operations are how a caller lists, ru
 `agent-message` is an A2A skill beside those seven. A model takes plain text and calls the lab operations through MCP. MCP and SiLA serve the A2A-LAB operations.
 
 `--readonly` limits `list_tasks` and `start_task` to reads. Image reads stay available.
-
-## A2A-LAB compliance
-
-The badge reports the `main` branch status of this repository's
-[A2A-LAB Compliance workflow](https://github.com/A3Analytics/a2a-lab-ot2/actions/workflows/a2a-lab-compliance.yml?query=branch%3Amain).
-Green means the tested repository commit passed A2A-LAB profile `1.1.0`, the configured full
-suite with its deterministic LLM check, and devkit suite revision
-`15e0c68492a050715e1f50423aee55a34353c00a`. GitHub might show no status until the workflow is
-published on `main` and has run.
-
-This status is compliance evidence, not certification. It applies only to the tested deterministic
-fixture and commit. It does not cover an untested deployment, the Docker simulator, a physical
-OT-2, cameras, live model providers, OpenID Connect (OIDC), Standardization in Lab Automation
-(SiLA), or the official A2A protocol Technology Compatibility Kit (TCK).
-
-Run the same default profile locally:
-
-```bash
-mise run compliance
-```
-
-See [Testing a2a-lab-ot2](<backlog/docs/technical/testing/doc-2 - Testing-a2a-lab-ot2.md>) for
-basic, full, deterministic LLM, and opt-out commands; report interpretation; CI artifacts; and
+cts; and
 scope boundaries.
 
 ## Simulator
