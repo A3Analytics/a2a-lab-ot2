@@ -1,4 +1,9 @@
 /target
+/backlog/tasks/
+/backlog/completed/
+/backlog/archive/
+/backlog/drafts/
+/backlog/milestones/
 qemu_*.core
 .a2a-lab-ot2
 .cache

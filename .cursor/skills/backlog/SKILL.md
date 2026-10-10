@@ -23,7 +23,7 @@ Author atomic, testable, AI-implementable tasks for this repo's `backlog.md` wor
 
 ## Golden rule
 
-**Never hand-edit files in `backlog/tasks/`.** Every create, edit, and status change goes through the CLI so metadata, Git tracking, and relationships stay in sync. Read with `--plain` for clean output.
+**Never hand-edit files in `backlog/tasks/`.** Every create, edit, and status change goes through the CLI so metadata and relationships stay in sync. `backlog/tasks/`, `backlog/completed/`, `backlog/archive/`, `backlog/drafts/`, and `backlog/milestones/` are gitignored. Read with `--plain` for clean output.
 
 ## Create a task
 
@@ -37,7 +37,7 @@ mise exec -- backlog task create "Add health-check endpoint" \
   -l api --priority medium
 ```
 
-Add an implementation plan only *after* starting work:
+Add an implementation plan only _after_ starting work:
 
 ```bash
 mise exec -- backlog task edit <id> --plan $'1. Add route\n2. Wire handler\n3. Verify'
@@ -45,9 +45,9 @@ mise exec -- backlog task edit <id> --plan $'1. Add route\n2. Wire handler\n3. V
 
 ## Section responsibilities
 
-- **Description** (`-d`): the *why* and *what*. No implementation steps.
+- **Description** (`-d`): the _why_ and _what_. No implementation steps.
 - **Acceptance Criteria** (`--ac`): observable, testable outcomes.
-- **Implementation Plan** (`--plan`): the *how*. Added after moving to In Progress.
+- **Implementation Plan** (`--plan`): the _how_. Added after moving to In Progress.
 - **Implementation Notes** (`--append-notes`): progress log, appended as you work.
 - **Final Summary** (`--final-summary`): PR-style description, added at the end.
 

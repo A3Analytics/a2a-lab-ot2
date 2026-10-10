@@ -48,7 +48,7 @@ Rules:
 
 ## Task policy
 
-All task operations go through the Backlog.md CLI — **never hand-edit files** in `backlog/tasks/`. Direct edits break metadata, Git tracking, and relationships. Use `--plain` when reading for clean output.
+All task operations go through the Backlog.md CLI — **never hand-edit files** in `backlog/tasks/`. Direct edits break metadata and relationships. `backlog/tasks/`, `backlog/completed/`, `backlog/archive/`, `backlog/drafts/`, and `backlog/milestones/` are gitignored. Use `--plain` when reading for clean output.
 
 Statuses (only these): `To Do`, `In Progress`, `Done`.
 
