@@ -139,6 +139,7 @@ images       opentrons-camera asset opentrons-ot2; external-camera off timeout 1
 OIDC         off
 connected to <opentrons-url>
 A2A          http://127.0.0.1:31000
+Web UI       http://127.0.0.1:31000/ui/
 MCP          http://127.0.0.1:31001/mcp
 SiLA         <host:port>
 SiLA CA      <ca-path>
@@ -158,11 +159,17 @@ When an issuer is set, the first line is `OIDC <issuer> (A2A only)`. Ctrl-C stop
 | MCP Streamable HTTP | `--a2alab-listen-host` port `31001`, protocol `2026-07-28`  | yes          |
 | SiLA gRPC/TLS       | `--sila-host` and `--sila-port`                             | yes          |
 
-`--a2a-url` selects the client used by `agent-message`. `--a2alab-listen-host` selects the A2A and MCP bind address. `A2ALAB_PUBLIC_URL` replaces the advertised host for the agent card, including its gRPC interface, and for the printed MCP and SiLA addresses. The ports stay `31000`, `31001`, and the SiLA port.
+`--a2a-url` selects the client used by `agent-message`. `--a2alab-listen-host` selects the A2A and MCP bind address. `A2ALAB_PUBLIC_URL` replaces the advertised host for the agent card, including its gRPC interface, and for the printed MCP, web UI, and SiLA addresses. The ports stay `31000`, `31001`, and the SiLA port. The web UI is not a separate listener.
+
+## Web interface
+
+`serve` always calls `A2aServer::with_web_ui` on the A2A listener at `http://localhost:31000/ui`.
 
 ## OpenID Connect
 
-OIDC is off until `--oidc-issuer` or `A2ALAB_OIDC_ISSUER` is non-empty. It then protects A2A only. MCP and SiLA do not read `--a2a-token`. The agent card advertises the OpenID Connect scheme, and `agent-message` sends the bearer token to the A2A origin.
+OIDC is off until `--oidc-issuer` or `A2ALAB_OIDC_ISSUER` is non-empty. It then protects A2A protocol routes only. MCP, SiLA, `/ui/`, and `/ui/assets/` do not require a token. The agent card advertises two alternative requirements: OpenID Connect, and HTTP bearer. Both use the same JWT authenticator and the same required scope. `agent-message` sends `--a2a-token` to the A2A origin.
+
+The browser has no OpenID Connect login flow. Paste an access token into the bearer field on the Agent page. The page stores that token only in page memory and sends it as `Authorization: Bearer`. A missing token is rejected. A token without the required scope is rejected. A valid token is accepted through the HTTP bearer alternative.
 
 ## SiLA material
 

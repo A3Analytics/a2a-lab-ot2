@@ -2,11 +2,12 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 use a2a_lab_dev_kit::{
-    A2aClient, A2aLabApi, A2aLabCommand, A2aLabResult, ComplianceCheck, ComplianceOutcome,
-    ComplianceRunnerConfig, ComplianceSuite, FixtureCapability, GetImageRequest,
-    ImplementationIdentity, ListTasksRequest, McpLab, PageRequest, StartTaskRequest,
-    compliance_profile, run_compliance,
+    A2aClient, A2aLabApi, A2aLabCommand, A2aLabResult, GetImageRequest, ImageSource,
+    ListImageSourcesRequest, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest,
+    LogSource, McpLab, MetricDescriptor, Page, PageRequest, QueryMetricRequest, StartTaskRequest,
+    TaskDefinition, TaskState,
 };
+use a2a_lab_ot2::fixture::{FixtureCapability, FixtureDeclaration};
 use a2a_lab_ot2::{
     FixtureConfig, FixtureReadiness, FixtureServer, FixtureVariant, fixture_declaration,
 };
@@ -17,7 +18,7 @@ async fn fixture_serves_real_a2a_and_mcp_with_stable_state() {
         .await
         .unwrap();
     assert_eq!(first.readiness().status, "ready");
-    first.readiness().fixtures.validate().unwrap();
+    assert_profile_document(&first);
 
     let a2a = A2aClient::new(&first.readiness().a2a_url).unwrap();
     let card = a2a.agent_card().await.unwrap();
@@ -37,15 +38,18 @@ async fn fixture_serves_real_a2a_and_mcp_with_stable_state() {
         panic!("tasks must be required");
     };
     let run = a2a
-        .start_task(StartTaskRequest::new(tasks.task_id, tasks.input))
+        .start_task(StartTaskRequest::new(
+            tasks.task_id.clone(),
+            tasks.input.clone(),
+        ))
         .await
         .unwrap();
-    assert_eq!(run.state, a2a_lab_dev_kit::TaskState::Completed);
+    assert_eq!(run.state, TaskState::Completed);
     let FixtureCapability::Required(images) = fixtures.images else {
         panic!("images must be required");
     };
     let image = a2a
-        .get_image(GetImageRequest::new(images.image_id))
+        .get_image(GetImageRequest::new(images.image_id.clone()))
         .await
         .unwrap();
     assert_eq!(image.data().len(), 17);
@@ -122,144 +126,247 @@ async fn occupied_port_has_an_actionable_startup_error() {
 }
 
 #[tokio::test]
-async fn basic_suite_runs_only_the_preserved_operation_matrix() {
-    let fixture = FixtureServer::start(FixtureConfig::default())
+async fn protocols_expose_the_same_logs_metrics_tasks_and_images() {
+    let server = FixtureServer::start(FixtureConfig::default())
         .await
         .unwrap();
-    let mut config = compliance_config(fixture.readiness(), true);
-    config.suite = ComplianceSuite::Basic;
-    let report = run_compliance(config).await.unwrap();
+    let fixtures = fixture_declaration();
+    let a2a = A2aClient::new(&server.readiness().a2a_url).unwrap();
+    let mcp = McpLab::connect(&server.readiness().mcp_url).await.unwrap();
+    let page = PageRequest::new(None, 1_000).unwrap();
+    assert_same_logs(&a2a, &mcp, &fixtures, page.clone()).await;
+    assert_same_metrics(&a2a, &mcp, &fixtures, page.clone()).await;
+    assert_same_tasks(&a2a, &mcp, &fixtures, page.clone()).await;
+    assert_same_images(&a2a, &mcp, &fixtures, page).await;
+    assert_eq!(server.model_invocations(), 0);
+    server.shutdown().await;
+}
 
-    assert!(report.compliant);
-    assert_eq!(report.suite_version, "1.1.0");
-    assert_eq!(report.selected_suite, ComplianceSuite::Basic);
+async fn assert_same_logs(
+    a2a: &A2aClient,
+    mcp: &McpLab,
+    fixtures: &FixtureDeclaration,
+    page: PageRequest,
+) {
+    let a2a_logs = a2a
+        .list_log_sources(ListLogSourcesRequest { page: page.clone() })
+        .await
+        .unwrap();
+    let mcp_logs = mcp_page(
+        mcp,
+        A2aLabCommand::ListLogSources(ListLogSourcesRequest { page }),
+        |result| match result {
+            A2aLabResult::ListLogSources(page) => Some(page),
+            _ => None,
+        },
+    )
+    .await;
+    let FixtureCapability::Required(logs) = &fixtures.logs else {
+        panic!("logs must be required");
+    };
+    assert_eq!(source_ids(&a2a_logs), source_ids(&mcp_logs));
+    assert!(source_ids(&a2a_logs).contains(&logs.source_id.as_str().to_owned()));
+    assert!(source_ids(&a2a_logs).contains(&logs.alternate_source_id.as_str().to_owned()));
+    assert!(!source_ids(&a2a_logs).contains(&logs.missing_source_id.as_str().to_owned()));
+}
+
+async fn assert_same_metrics(
+    a2a: &A2aClient,
+    mcp: &McpLab,
+    fixtures: &FixtureDeclaration,
+    page: PageRequest,
+) {
+    let a2a_metrics = a2a
+        .list_metrics(ListMetricsRequest { page: page.clone() })
+        .await
+        .unwrap();
+    let mcp_metrics = mcp_page(
+        mcp,
+        A2aLabCommand::ListMetrics(ListMetricsRequest { page: page.clone() }),
+        |result| match result {
+            A2aLabResult::ListMetrics(page) => Some(page),
+            _ => None,
+        },
+    )
+    .await;
+    let FixtureCapability::Required(metrics) = &fixtures.metrics else {
+        panic!("metrics must be required");
+    };
+    assert_eq!(metric_ids(&a2a_metrics), metric_ids(&mcp_metrics));
+    assert!(metric_ids(&a2a_metrics).contains(&metrics.metric_id.as_str().to_owned()));
+    assert!(metric_ids(&a2a_metrics).contains(&metrics.alternate_metric_id.as_str().to_owned()));
+    assert!(!metric_ids(&a2a_metrics).contains(&metrics.missing_metric_id.as_str().to_owned()));
+    let query = QueryMetricRequest {
+        metric_id: metrics.metric_id.clone(),
+        range: fixtures.range,
+        page,
+    };
+    let a2a_points = a2a.query_metric(query.clone()).await.unwrap();
+    let mcp_points = mcp_page(
+        mcp,
+        A2aLabCommand::QueryMetric(query),
+        |result| match result {
+            A2aLabResult::QueryMetric(page) => Some(page),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(a2a_points, mcp_points);
+    assert!(!a2a_points.items().is_empty());
+}
+
+async fn assert_same_tasks(
+    a2a: &A2aClient,
+    mcp: &McpLab,
+    fixtures: &FixtureDeclaration,
+    page: PageRequest,
+) {
+    let a2a_tasks = a2a
+        .list_tasks(ListTasksRequest { page: page.clone() })
+        .await
+        .unwrap();
+    let mcp_tasks = mcp_page(
+        mcp,
+        A2aLabCommand::ListTasks(ListTasksRequest { page }),
+        |result| match result {
+            A2aLabResult::ListTasks(page) => Some(page),
+            _ => None,
+        },
+    )
+    .await;
+    let FixtureCapability::Required(tasks) = &fixtures.tasks else {
+        panic!("tasks must be required");
+    };
+    assert_eq!(task_ids(&a2a_tasks), task_ids(&mcp_tasks));
+    assert!(task_ids(&a2a_tasks).contains(&tasks.task_id.as_str().to_owned()));
+    assert!(task_ids(&a2a_tasks).contains(&tasks.alternate_task_id.as_str().to_owned()));
+    assert!(!task_ids(&a2a_tasks).contains(&tasks.missing_task_id.as_str().to_owned()));
+    let started = mcp_value(
+        mcp,
+        A2aLabCommand::StartTask(StartTaskRequest::new(
+            tasks.task_id.clone(),
+            tasks.input.clone(),
+        )),
+        |result| match result {
+            A2aLabResult::StartTask(run) => Some(run),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(started.state, TaskState::Completed);
+}
+
+async fn assert_same_images(
+    a2a: &A2aClient,
+    mcp: &McpLab,
+    fixtures: &FixtureDeclaration,
+    page: PageRequest,
+) {
+    let sources = ListImageSourcesRequest::new(page).unwrap();
+    let a2a_sources = a2a.list_image_sources(sources.clone()).await.unwrap();
+    let mcp_sources = mcp_page(
+        mcp,
+        A2aLabCommand::ListImageSources(sources),
+        |result| match result {
+            A2aLabResult::ListImageSources(page) => Some(page),
+            _ => None,
+        },
+    )
+    .await;
+    let FixtureCapability::Required(images) = &fixtures.images else {
+        panic!("images must be required");
+    };
     assert_eq!(
-        report.enabled_checks,
-        [ComplianceCheck::BasicOperations].into_iter().collect()
+        image_source_ids(&a2a_sources),
+        image_source_ids(&mcp_sources)
     );
-    assert_eq!(report.cases.len(), compliance_profile().cases.len());
+    assert!(image_source_ids(&a2a_sources).contains(&images.source_id.as_str().to_owned()));
     assert!(
-        report
-            .cases
-            .iter()
-            .all(|case| !case.required || case.outcome == ComplianceOutcome::Pass)
+        image_source_ids(&a2a_sources).contains(&images.alternate_source_id.as_str().to_owned())
     );
-    assert!(report.scenarios.is_empty());
-    assert_eq!(fixture.model_invocations(), 0);
-    fixture.shutdown().await;
+    assert!(
+        !image_source_ids(&a2a_sources).contains(&images.missing_source_id.as_str().to_owned())
+    );
+    let a2a_image = a2a
+        .get_image(GetImageRequest::new(images.image_id.clone()))
+        .await
+        .unwrap();
+    let mcp_image = mcp_value(
+        mcp,
+        A2aLabCommand::GetImage(GetImageRequest::new(images.image_id.clone())),
+        |result| match result {
+            A2aLabResult::GetImage(image) => Some(image),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(a2a_image.data(), mcp_image.data());
+    assert_eq!(a2a_image.descriptor().id(), &images.image_id);
 }
 
 #[tokio::test]
-async fn full_suite_passes_all_linked_interface_journeys_repeatably() {
-    let standard = FixtureServer::start(FixtureConfig::default())
+async fn deterministic_model_preserves_the_discovered_task_identifier() {
+    let first = FixtureServer::start(FixtureConfig::default())
         .await
         .unwrap();
-    let report = run_compliance(compliance_config(standard.readiness(), true))
-        .await
-        .unwrap();
-    assert!(report.compliant);
-    assert_eq!(report.selected_suite, ComplianceSuite::Full);
-    assert_eq!(report.cases.len(), compliance_profile().cases.len());
-    assert!(
-        report
-            .cases
-            .iter()
-            .all(|case| { !case.required || matches!(case.outcome, ComplianceOutcome::Pass) })
-    );
-    for case_id in ["tasks.start.success", "tasks.status.success"] {
-        assert_eq!(
-            report
-                .cases
-                .iter()
-                .find(|case| case.case_id == case_id)
-                .unwrap()
-                .outcome,
-            ComplianceOutcome::Pass
-        );
-    }
-    assert_eq!(report.scenarios.len(), 17);
-    assert!(
-        report
-            .scenarios
-            .iter()
-            .all(|scenario| scenario.required && scenario.outcome == ComplianceOutcome::Pass)
-    );
-    for capability in ["logs", "metrics", "tasks", "images"] {
-        for path in ["a2a-a2a", "mcp-mcp", "a2a-mcp", "mcp-a2a"] {
-            let scenario_id = format!("{capability}.link.{path}");
-            assert_eq!(
-                report
-                    .scenarios
-                    .iter()
-                    .find(|scenario| scenario.scenario_id == scenario_id)
-                    .unwrap()
-                    .outcome,
-                ComplianceOutcome::Pass
-            );
-        }
-    }
-    assert_eq!(
-        report
-            .scenarios
-            .iter()
-            .find(|scenario| scenario.scenario_id == "agent-message.a2a")
-            .unwrap()
-            .outcome,
-        ComplianceOutcome::Pass
-    );
-    assert_eq!(standard.model_invocations(), 2);
-    standard.shutdown().await;
+    let reply = ask_for_task(&first, "pause_run").await;
+    assert_eq!(reply, "MCP list_tasks returned task `pause_run`.");
+    assert_eq!(first.model_invocations(), 2);
+    first.shutdown().await;
 
-    let repeated = FixtureServer::start(FixtureConfig::default())
+    let second = FixtureServer::start(FixtureConfig::default())
         .await
         .unwrap();
-    let repeated_report = run_compliance(compliance_config(repeated.readiness(), true))
-        .await
-        .unwrap();
-    assert!(repeated_report.compliant);
-    assert_eq!(repeated_report.scenarios, report.scenarios);
-    repeated.shutdown().await;
+    let repeated = ask_for_task(&second, "pause_run").await;
+    assert_eq!(repeated, reply);
+    assert_eq!(second.model_invocations(), 2);
+    second.shutdown().await;
 }
 
 #[tokio::test]
-async fn controlled_variants_produce_step_specific_full_suite_diagnostics() {
+async fn controlled_variants_diverge_only_on_the_selected_surface() {
+    let fixtures = fixture_declaration();
+    let FixtureCapability::Required(metrics) = &fixtures.metrics else {
+        panic!("metrics must be required");
+    };
+    let page = PageRequest::new(None, 100).unwrap();
+    let query = QueryMetricRequest {
+        metric_id: metrics.metric_id.clone(),
+        range: fixtures.range,
+        page: page.clone(),
+    };
     let mismatched = FixtureServer::start(FixtureConfig {
         variant: FixtureVariant::McpMetricError,
         ..FixtureConfig::default()
     })
     .await
     .unwrap();
-    let report = run_compliance(compliance_config(mismatched.readiness(), true))
+    let a2a = A2aClient::new(&mismatched.readiness().a2a_url).unwrap();
+    let mcp = McpLab::connect(&mismatched.readiness().mcp_url)
         .await
         .unwrap();
-    assert!(!report.compliant);
-    let diagnostic = report
-        .cases
-        .iter()
-        .find(|case| case.case_id == "metrics.query.success")
-        .unwrap()
-        .diagnostics
-        .join(" ");
-    assert!(diagnostic.contains("normalized interface difference"));
-    assert!(diagnostic.contains("a2a="));
-    assert!(diagnostic.contains("mcp="));
     assert!(
-        report
-            .cases
-            .iter()
-            .filter(|case| !case.case_id.starts_with("metrics.query."))
-            .all(|case| !case.required || case.outcome == ComplianceOutcome::Pass)
+        !a2a.query_metric(query.clone())
+            .await
+            .unwrap()
+            .items()
+            .is_empty()
     );
+    let error = mcp
+        .execute(A2aLabCommand::QueryMetric(query))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "not_found");
     assert!(
-        report
-            .scenarios
-            .iter()
-            .filter(|scenario| {
-                scenario.scenario_id != "metrics.link.a2a-mcp"
-                    && scenario.scenario_id != "metrics.link.mcp-mcp"
-            })
-            .all(|scenario| scenario.outcome == ComplianceOutcome::Pass)
+        error.to_string().contains("controlled-compliance-mismatch"),
+        "{error}"
     );
+    let listed = mcp
+        .execute(A2aLabCommand::ListTasks(ListTasksRequest { page }))
+        .await
+        .unwrap();
+    assert!(matches!(listed.task.result, A2aLabResult::ListTasks(_)));
+    assert_eq!(mismatched.model_invocations(), 0);
     mismatched.shutdown().await;
 
     let empty = FixtureServer::start(FixtureConfig {
@@ -268,110 +375,71 @@ async fn controlled_variants_produce_step_specific_full_suite_diagnostics() {
     })
     .await
     .unwrap();
-    let report = run_compliance(compliance_config(empty.readiness(), true))
+    let a2a = A2aClient::new(&empty.readiness().a2a_url).unwrap();
+    let mcp = McpLab::connect(&empty.readiness().mcp_url).await.unwrap();
+    let page = PageRequest::new(None, 100).unwrap();
+    let a2a_logs = a2a
+        .list_log_sources(ListLogSourcesRequest { page: page.clone() })
         .await
         .unwrap();
-    assert!(!report.compliant);
-    for scenario_id in ["logs.link.mcp-mcp", "logs.link.mcp-a2a"] {
-        let scenario = report
-            .scenarios
-            .iter()
-            .find(|scenario| scenario.scenario_id == scenario_id)
-            .unwrap();
-        assert_eq!(scenario.outcome, ComplianceOutcome::Fail);
-        assert_eq!(
-            scenario.diagnostics,
-            ["list_log_sources: discovery returned no log source"]
-        );
-    }
-    assert_eq!(
-        report
-            .scenarios
-            .iter()
-            .find(|scenario| scenario.scenario_id == "logs.link.a2a-mcp")
-            .unwrap()
-            .outcome,
-        ComplianceOutcome::Pass
-    );
-    assert!(
-        report
-            .scenarios
-            .iter()
-            .filter(|scenario| {
-                scenario.scenario_id != "logs.link.mcp-mcp"
-                    && scenario.scenario_id != "logs.link.mcp-a2a"
-            })
-            .all(|scenario| scenario.outcome == ComplianceOutcome::Pass)
-    );
+    let mcp_logs = mcp_page(
+        &mcp,
+        A2aLabCommand::ListLogSources(ListLogSourcesRequest { page: page.clone() }),
+        |result| match result {
+            A2aLabResult::ListLogSources(page) => Some(page),
+            _ => None,
+        },
+    )
+    .await;
+    assert!(source_ids(&a2a_logs).contains(&"run_commands".to_owned()));
+    assert!(mcp_logs.items().is_empty());
+    let query = QueryMetricRequest {
+        metric_id: metrics.metric_id.clone(),
+        range: fixtures.range,
+        page,
+    };
+    let a2a_points = a2a.query_metric(query.clone()).await.unwrap();
+    let mcp_points = mcp_page(
+        &mcp,
+        A2aLabCommand::QueryMetric(query),
+        |result| match result {
+            A2aLabResult::QueryMetric(page) => Some(page),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(a2a_points, mcp_points);
     empty.shutdown().await;
 }
 
 #[tokio::test]
-async fn controlled_agent_failure_is_reported_and_opt_out_skips_the_model() {
+async fn ungrounded_reply_omits_the_task_identifier_and_idle_fixture_skips_the_model() {
+    let idle = FixtureServer::start(FixtureConfig::default())
+        .await
+        .unwrap();
+    let a2a = A2aClient::new(&idle.readiness().a2a_url).unwrap();
+    a2a.list_tasks(ListTasksRequest {
+        page: PageRequest::new(None, 10).unwrap(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(idle.model_invocations(), 0);
+    idle.shutdown().await;
+
     let ungrounded = FixtureServer::start(FixtureConfig {
         variant: FixtureVariant::UngroundedAgentReply,
         ..FixtureConfig::default()
     })
     .await
     .unwrap();
-    let report = run_compliance(compliance_config(ungrounded.readiness(), true))
-        .await
-        .unwrap();
-    assert!(!report.compliant);
-    let scenario = report
-        .scenarios
-        .iter()
-        .find(|scenario| scenario.scenario_id == "agent-message.a2a")
-        .unwrap();
-    assert_eq!(scenario.outcome, ComplianceOutcome::Fail);
-    assert_eq!(scenario.diagnostics.len(), 1);
-    assert!(
-        scenario.diagnostics[0]
-            .starts_with("a2a_agent_message: reply did not preserve MCP task identifier `"),
-        "{:?}",
-        scenario.diagnostics
-    );
-    assert_eq!(ungrounded.model_invocations(), 2);
-    assert!(
-        report
-            .cases
-            .iter()
-            .all(|case| !case.required || case.outcome == ComplianceOutcome::Pass)
-    );
-    assert!(
-        report
-            .scenarios
-            .iter()
-            .filter(|candidate| candidate.scenario_id != "agent-message.a2a")
-            .all(|candidate| candidate.outcome == ComplianceOutcome::Pass)
-    );
-    ungrounded.shutdown().await;
-
-    let opted_out = FixtureServer::start(FixtureConfig::default())
-        .await
-        .unwrap();
-    let report = run_compliance(compliance_config(opted_out.readiness(), false))
-        .await
-        .unwrap();
-    assert!(report.compliant);
-    assert_eq!(report.scenarios.len(), 16);
+    let reply = ask_for_task(&ungrounded, "pause_run").await;
     assert_eq!(
-        report.enabled_checks,
-        [
-            ComplianceCheck::BasicOperations,
-            ComplianceCheck::LinkedScenarios,
-        ]
-        .into_iter()
-        .collect()
+        reply,
+        "The deterministic fixture intentionally omitted the task identifier."
     );
-    assert!(
-        report
-            .scenarios
-            .iter()
-            .all(|scenario| scenario.scenario_id != "agent-message.a2a")
-    );
-    assert_eq!(opted_out.model_invocations(), 0);
-    opted_out.shutdown().await;
+    assert!(!reply.contains("pause_run"));
+    assert_eq!(ungrounded.model_invocations(), 2);
+    ungrounded.shutdown().await;
 }
 
 #[test]
@@ -405,6 +473,8 @@ fn fixture_command_ignores_external_dependency_configuration() {
         .unwrap();
     let readiness: FixtureReadiness = serde_json::from_str(&line).unwrap();
     assert_eq!(readiness.status, "ready");
+    assert_eq!(readiness.fixtures.suite_version, "1.1.0");
+    readiness.fixtures.validate().unwrap();
     assert!(readiness.a2a_url.starts_with("http://127.0.0.1:"));
     assert!(readiness.mcp_url.ends_with("/mcp"));
     child.kill().unwrap();
@@ -412,22 +482,91 @@ fn fixture_command_ignores_external_dependency_configuration() {
     std::fs::remove_dir_all(temp_root).unwrap();
 }
 
-fn compliance_config(
-    readiness: &FixtureReadiness,
-    agent_message_check: bool,
-) -> ComplianceRunnerConfig {
-    ComplianceRunnerConfig {
-        a2a_url: readiness.a2a_url.clone(),
-        mcp_url: readiness.mcp_url.clone(),
-        fixtures: readiness.fixtures.clone(),
-        implementation: ImplementationIdentity {
-            name: "a2a-lab-ot2".to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-        },
-        case_timeout: std::time::Duration::from_secs(2),
-        suite: ComplianceSuite::Full,
-        agent_message_check,
+fn assert_profile_document(server: &FixtureServer) {
+    let declaration = &server.readiness().fixtures;
+    declaration.validate().unwrap();
+    let json = serde_json::to_value(declaration).unwrap();
+    assert_eq!(json["suite_version"], "1.1.0");
+    for capability in ["logs", "metrics", "tasks", "images"] {
+        assert_eq!(json[capability]["availability"], "required", "{capability}");
+        assert!(json[capability]["fixtures"].is_object(), "{capability}");
     }
+    assert!(json["range"]["start"].is_string());
+    assert!(json["range"]["end"].is_string());
+    assert_eq!(
+        json.as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "images",
+            "logs",
+            "metrics",
+            "range",
+            "suite_version",
+            "tasks"
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+    let decoded: FixtureDeclaration =
+        serde_json::from_str(&serde_json::to_string(declaration).unwrap()).unwrap();
+    assert_eq!(&decoded, declaration);
+}
+
+async fn ask_for_task(server: &FixtureServer, task_id: &str) -> String {
+    let a2a = A2aClient::new(&server.readiness().a2a_url).unwrap();
+    let prompt = format!(
+        "Use your lab task tools to inspect task `{task_id}`. Reply with the exact task identifier `{task_id}`."
+    );
+    a2a.agent_message(&prompt, None).await.unwrap().text
+}
+
+async fn mcp_page<T>(
+    mcp: &McpLab,
+    command: A2aLabCommand,
+    take: impl FnOnce(A2aLabResult) -> Option<Page<T>>,
+) -> Page<T> {
+    mcp_value(mcp, command, take).await
+}
+
+async fn mcp_value<T>(
+    mcp: &McpLab,
+    command: A2aLabCommand,
+    take: impl FnOnce(A2aLabResult) -> Option<T>,
+) -> T {
+    let outcome = mcp.execute(command).await.unwrap();
+    take(outcome.task.result).expect("mcp result variant")
+}
+
+fn source_ids(page: &Page<LogSource>) -> Vec<String> {
+    page.items()
+        .iter()
+        .map(|source| source.id.as_str().to_owned())
+        .collect()
+}
+
+fn metric_ids(page: &Page<MetricDescriptor>) -> Vec<String> {
+    page.items()
+        .iter()
+        .map(|metric| metric.id.as_str().to_owned())
+        .collect()
+}
+
+fn task_ids(page: &Page<TaskDefinition>) -> Vec<String> {
+    page.items()
+        .iter()
+        .map(|task| task.id.as_str().to_owned())
+        .collect()
+}
+
+fn image_source_ids(page: &Page<ImageSource>) -> Vec<String> {
+    page.items()
+        .iter()
+        .map(|source| source.id.as_str().to_owned())
+        .collect()
 }
 
 async fn unused_port() -> u16 {

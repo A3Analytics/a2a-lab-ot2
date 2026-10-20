@@ -10,7 +10,7 @@ use a2a_lab_dev_kit::{
     MemoryMetrics, MemoryTasks, PageRequest, RunId, StartTaskRequest, TaskId, TaskState,
     bind_local,
 };
-use a2a_lab_ot2::{OidcConfig, OpentronsLab, with_oidc};
+use a2a_lab_ot2::{FixtureConfig, FixtureServer, OidcConfig, OpentronsLab, with_oidc};
 use rmcp::ServiceExt;
 use support::Mock;
 
@@ -563,6 +563,262 @@ async fn wait_for_card(base: &str) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("a2a did not start");
+}
+
+#[tokio::test]
+async fn packaged_web_ui_serves_shell_routes_and_assets() {
+    let service =
+        A2aLabService::new(MemoryLogs::new(), MemoryMetrics::new(), MemoryTasks::new()).share();
+    let base = serve_with_web_ui(A2aServer::new(&service).with_web_ui()).await;
+    let shell = assert_shell_routes(&base).await;
+    assert_referenced_assets(&base, &shell).await;
+    let unknown = http()
+        .get(format!("{base}/ui/assets/not-packaged.js"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), reqwest::StatusCode::NOT_FOUND);
+    let card = http()
+        .get(format!("{base}/.well-known/agent-card.json"))
+        .send()
+        .await
+        .unwrap();
+    assert!(card.status().is_success());
+    let body = card.text().await.unwrap();
+    assert!(body.contains("list-tasks"));
+    assert!(!body.contains("securityRequirements"));
+    assert!(!body.contains("securitySchemes"));
+}
+
+#[tokio::test]
+async fn oidc_bearer_alternative_keeps_the_shell_public_and_gates_protocol_routes() {
+    let keys = signing_keys();
+    let published = Arc::new(std::sync::Mutex::new(serde_json::json!({
+        "keys": [keys.jwk.clone()],
+    })));
+    let issuer = oidc_provider(Arc::clone(&published)).await;
+    let service =
+        A2aLabService::new(MemoryLogs::new(), MemoryMetrics::new(), MemoryTasks::new()).share();
+    let base = serve_with_web_ui(
+        with_oidc(
+            A2aServer::new(&service).with_web_ui(),
+            &OidcConfig {
+                issuer: issuer.clone(),
+                audience: "a2a-lab".to_owned(),
+                scope: "a2a.invoke".to_owned(),
+                discovery_url: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+
+    let shell = assert_shell_routes(&base).await;
+    assert_referenced_assets(&base, &shell).await;
+    let anonymous_shell = http().get(format!("{base}/ui/")).send().await.unwrap();
+    assert_eq!(anonymous_shell.status(), reqwest::StatusCode::OK);
+    let posted = http().post(format!("{base}/ui/")).send().await.unwrap();
+    assert_eq!(posted.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let card = http()
+        .get(format!("{base}/.well-known/agent-card.json"))
+        .send()
+        .await
+        .unwrap();
+    assert!(card.status().is_success());
+    let card_body = card.text().await.unwrap();
+    let card_json: serde_json::Value = serde_json::from_str(&card_body).unwrap();
+    assert_oidc_bearer_alternatives(&card_json, &issuer);
+
+    let missing = send_list(&base, None).await;
+    assert_eq!(missing.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let rejected = send_list(&base, Some(&access_token(&keys, &issuer, "profile"))).await;
+    assert_eq!(rejected.status(), reqwest::StatusCode::FORBIDDEN);
+    let accepted = send_list(&base, Some(&access_token(&keys, &issuer, "a2a.invoke"))).await;
+    assert!(accepted.status().is_success());
+    let body = accepted.text().await.unwrap();
+    assert!(body.contains("list_tasks"));
+}
+
+#[tokio::test]
+async fn fixture_does_not_serve_the_web_ui() {
+    let server = FixtureServer::start(FixtureConfig::default())
+        .await
+        .unwrap();
+    let base = server.readiness().a2a_url.clone();
+    let card = http()
+        .get(format!("{base}/.well-known/agent-card.json"))
+        .send()
+        .await
+        .unwrap();
+    assert!(card.status().is_success());
+    let body = card.text().await.unwrap();
+    assert!(body.contains("list-tasks"));
+    for path in [
+        "/ui",
+        "/ui/",
+        "/ui/index.html",
+        "/ui/assets/not-packaged.js",
+    ] {
+        let response = http().get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+    }
+    server.shutdown().await;
+}
+
+async fn serve_with_web_ui(server: A2aServer) -> String {
+    let (listener, address) = bind_local().await.unwrap();
+    tokio::spawn(async move {
+        server.listen(listener).await.unwrap();
+    });
+    let base = format!("http://{address}");
+    wait_for_card(&base).await;
+    base
+}
+
+fn http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap()
+}
+
+async fn assert_shell_routes(base: &str) -> String {
+    let mut shell = String::new();
+    for path in ["/ui", "/ui/", "/ui/index.html"] {
+        let response = http().get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8"),
+            "{path}"
+        );
+        let body = response.text().await.unwrap();
+        assert!(body.contains("id=\"app\""), "{path}");
+        if shell.is_empty() {
+            shell = body;
+        } else {
+            assert_eq!(shell, body, "{path}");
+        }
+    }
+    shell
+}
+
+async fn assert_referenced_assets(base: &str, html: &str) {
+    let mut pending = Vec::new();
+    collect_assets(html, &mut pending);
+    assert!(!pending.is_empty(), "shell does not reference /ui/assets/");
+    let mut index = 0;
+    while index < pending.len() {
+        let path = pending[index].clone();
+        index += 1;
+        let response = http().get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let bytes = response.bytes().await.unwrap();
+        assert!(!bytes.is_empty(), "{path}");
+        if content_type.starts_with("text/")
+            || content_type.contains("javascript")
+            || content_type.contains("json")
+        {
+            collect_assets(&String::from_utf8_lossy(&bytes), &mut pending);
+        }
+    }
+    for extension in ["css", "js", "wasm", "svg", "woff2"] {
+        assert!(
+            pending.iter().any(|path| has_extension(path, extension)),
+            "missing {extension}"
+        );
+    }
+}
+
+fn collect_assets(body: &str, assets: &mut Vec<String>) {
+    let mut rest = body;
+    while let Some(start) = rest.find("/ui/assets/") {
+        let after = &rest[start..];
+        let end = asset_token_end(after);
+        remember_asset(assets, &after[..end]);
+        rest = &after[end.max(1)..];
+    }
+    rest = body;
+    while let Some(start) = rest.find("app-") {
+        let after = &rest[start..];
+        let end = asset_token_end(after);
+        remember_asset(assets, &format!("/ui/assets/{}", &after[..end]));
+        rest = &after[end.max(1)..];
+    }
+}
+
+fn asset_token_end(value: &str) -> usize {
+    value
+        .find(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '/'))
+        })
+        .unwrap_or(value.len())
+}
+
+fn remember_asset(assets: &mut Vec<String>, path: &str) {
+    if is_asset_path(path) && !assets.iter().any(|item| item == path) {
+        assets.push(path.to_owned());
+    }
+}
+
+fn is_asset_path(path: &str) -> bool {
+    path.starts_with("/ui/assets/")
+        && !path.contains("..")
+        && ["css", "js", "wasm", "svg", "woff2"]
+            .iter()
+            .any(|extension| has_extension(path, extension))
+}
+
+fn has_extension(path: &str, extension: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+}
+
+fn assert_oidc_bearer_alternatives(card: &serde_json::Value, issuer: &str) {
+    let schemes = card["securitySchemes"]
+        .as_object()
+        .expect("security schemes");
+    let oidc = &schemes["oidc"]["openIdConnectSecurityScheme"];
+    assert!(oidc.is_object());
+    let discovery = oidc["openIdConnectUrl"].as_str().expect("discovery");
+    assert!(discovery.starts_with(issuer), "{discovery}");
+    assert!(discovery.ends_with("/.well-known/openid-configuration"));
+    let http = &schemes["bearer"]["httpAuthSecurityScheme"];
+    let scheme = http["scheme"].as_str().expect("bearer scheme");
+    assert!(scheme.eq_ignore_ascii_case("bearer"), "{scheme}");
+    assert_eq!(schemes.len(), 2);
+
+    let requirements = card["securityRequirements"]
+        .as_array()
+        .expect("security requirements");
+    assert_eq!(requirements.len(), 2);
+    let mut saw_oidc = false;
+    let mut saw_bearer = false;
+    for requirement in requirements {
+        let object = requirement.as_object().expect("requirement");
+        assert_eq!(object.len(), 1, "requirements are alternatives");
+        if let Some(scopes) = object.get("oidc") {
+            assert_eq!(scopes, &serde_json::json!(["a2a.invoke"]));
+            saw_oidc = true;
+        }
+        if let Some(scopes) = object.get("bearer") {
+            assert_eq!(scopes, &serde_json::json!(["a2a.invoke"]));
+            saw_bearer = true;
+        }
+    }
+    assert!(saw_oidc);
+    assert!(saw_bearer);
 }
 
 async fn send_list(base: &str, token: Option<&str>) -> reqwest::Response {

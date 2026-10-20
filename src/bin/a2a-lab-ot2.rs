@@ -14,7 +14,8 @@ use a2a_lab_dev_kit::{
     ImageProvider, ImageSourceId, JsonObject, ListImageSourcesRequest, ListLogSourcesRequest,
     ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider, LogRecord, McpLab, McpServer,
     MetricId, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
-    StartTaskRequest, TaskId, TaskProvider, TaskRun, TaskState, TimeRange, UtcTimestamp, start_run,
+    StartTaskRequest, TaskId, TaskProvider, TaskRun, TaskState, TimeRange, UtcTimestamp,
+    WEB_UI_PATH, start_run,
 };
 use a2a_lab_ot2::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use a2a_lab_ot2::{
@@ -176,7 +177,7 @@ impl From<ModelProviderArg> for ModelProvider {
 
 #[derive(Subcommand, Default)]
 enum Command {
-    /// Serve A2A, MCP, and `SiLA` backed by the OT-2 HTTP API
+    /// Serve A2A, MCP, `SiLA`, and the packaged web UI backed by the OT-2 HTTP API
     #[default]
     Serve,
     /// Run the deterministic A2A-LAB compliance fixture
@@ -434,7 +435,8 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
         .map_err(|error| startup_error(&model_target, error))?;
     let mcp_lab: Arc<dyn A2aLabApi> = Arc::new(mcp_lab);
     let mut a2a = A2aServer::new(&mcp_lab)
-        .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>);
+        .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>)
+        .with_web_ui();
     let a2a_listener = TcpListener::bind(format!("{}:31000", cli.a2alab_listen_host))
         .await
         .map_err(|error| startup_error("a2a", error))?;
@@ -467,6 +469,7 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     );
     println!("connected to {}", cli.opentrons_url);
     println!("A2A          {a2a_shown}");
+    println!("Web UI       {}", web_ui_url(&a2a_shown));
     println!("MCP          {mcp_shown}");
     println!("SiLA         {sila_shown}");
     println!("SiLA CA      {sila_ca}");
@@ -620,6 +623,11 @@ fn socket_host(host: &AdvertisedHost, port: u16) -> String {
 
 fn origin(host: &AdvertisedHost, port: u16) -> String {
     format!("{}://{}", host.scheme, socket_host(host, port))
+}
+
+#[must_use]
+fn web_ui_url(origin: &str) -> String {
+    format!("{origin}{WEB_UI_PATH}")
 }
 
 fn startup_error(dependency: &str, error: impl std::fmt::Display) -> A2aLabError {
@@ -976,5 +984,20 @@ fn run_state(state: TaskState) -> &'static str {
         TaskState::Completed => "completed",
         TaskState::Failed => "failed",
         TaskState::Canceled => "canceled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn web_ui_url_uses_the_advertised_a2a_origin() {
+        assert_eq!(
+            super::web_ui_url("http://127.0.0.1:31000"),
+            "http://127.0.0.1:31000/ui/"
+        );
+        assert_eq!(
+            super::web_ui_url("https://[2001:db8::1]:31000"),
+            "https://[2001:db8::1]:31000/ui/"
+        );
     }
 }

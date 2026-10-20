@@ -1,4 +1,4 @@
-const DEVKIT_REVISION: &str = "9d5327868d96b3e800fd89f6debf434bcc12709d";
+const DEVKIT_REVISION: &str = "4573c9ae307969aadbe30c5cd37f1ab2b5c2678e";
 const DEVKIT_URL: &str = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs";
 const TCK_REVISION: &str = "1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd";
 const TCK_URL: &str = "https://github.com/A3Analytics/a2a-lab-tck";
@@ -72,4 +72,38 @@ fn workflows_do_not_require_private_or_sibling_tck_access() {
         assert!(!workflow.contains("repository: A3Analytics/a2a-lab-dev-kit-rs"));
     }
     assert!(release.contains("cargo build --locked --release"));
+}
+
+#[test]
+fn web_ui_comes_from_the_devkit_feature() {
+    let manifest = include_str!("../Cargo.toml");
+    let devkit = manifest
+        .lines()
+        .find(|line| line.contains("a2a-lab-dev-kit"))
+        .expect("devkit dependency");
+    assert!(devkit.contains("git ="));
+    assert!(devkit.contains("default-features = false"));
+    assert!(!devkit.contains("path"));
+    assert!(manifest.contains("\"sila2\""));
+    assert!(manifest.contains("\"web-ui\""));
+    assert!(!manifest.contains("dioxus"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in ["web-ui", "web-ui/src", "web_ui_assets.rs"] {
+        assert!(
+            !root.join(relative).exists(),
+            "{relative} is vendored in this repository"
+        );
+    }
+}
+
+#[test]
+fn wasm32_target_is_installed_for_every_web_ui_build() {
+    let toolchain = include_str!("../rust-toolchain.toml");
+    assert!(toolchain.contains("targets = [\"wasm32-unknown-unknown\"]"));
+    let compliance = include_str!("../.github/workflows/a2a-lab-compliance.yml");
+    assert!(compliance.contains("targets: wasm32-unknown-unknown"));
+    let release = include_str!("../.github/workflows/release.yml");
+    assert!(release.contains("targets: \"${{ matrix.target }},wasm32-unknown-unknown\""));
+    let cross = include_str!("../.mise/scripts/build-linux-x86_64.sh");
+    assert!(cross.contains("rustup target add x86_64-unknown-linux-gnu wasm32-unknown-unknown"));
 }

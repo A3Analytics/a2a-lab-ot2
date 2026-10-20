@@ -12,7 +12,7 @@ created_date: "2026-10-07 02:15"
 
 Run the local quality gate, deterministic A2A-LAB compliance profile, and optional live smoke check. Local checks use controlled software fixtures. Smoke drives the pinned `v10.0.0` robot-server container and a Bedrock conversation.
 
-Install tools with `mise install` before these paths. All commands below go through mise.
+Install tools with `mise install` before these paths.
 
 ## Local quality checks
 
@@ -41,7 +41,7 @@ Run the default profile from the repository root:
 mise run compliance
 ```
 
-The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies standalone `A3Analytics/a2a-lab-tck` release `v0.1.0` at immutable suite revision `1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd`. `A2ALAB_TCK_ROOT` is an explicit local-source override; it does not change the default. The application separately pins the public devkit library at `9d5327868d96b3e800fd89f6debf434bcc12709d`; it does not depend on the TCK crate.
+The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies standalone `A3Analytics/a2a-lab-tck` release `v0.1.0` at immutable suite revision `1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd`. `A2ALAB_TCK_ROOT` is an explicit local-source override; it does not change the default. The application separately pins the public devkit library at `4573c9ae307969aadbe30c5cd37f1ab2b5c2678e`; it does not depend on the TCK crate.
 
 Choose a suite or disable the LLM check with these commands:
 
@@ -98,6 +98,7 @@ Deterministic compliance covers only the selected A2A-LAB profile behavior expos
 - on-board or external camera availability;
 - Bedrock, OpenAI, Anthropic, or other live model-provider behavior;
 - OpenID Connect (OIDC) authentication;
+- the packaged web interface at `/ui/` (the compliance fixture stays headless and does not serve it);
 - Standardization in Lab Automation (SiLA); or
 - the separate upstream A2A protocol Technology Compatibility Kit (TCK).
 
@@ -107,20 +108,20 @@ Those systems need their own checks. They do not inherit a compliance result or 
 
 Tests bind local listeners and a mock robot-server. They do not start the Docker simulator and they do not call Bedrock, OpenAI, or Anthropic.
 
-| File                   | Behavior under test                                                                                                                                                                                                              |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/inventory.rs`   | Every pinned OpenAPI operation is classified, inventory ids are unique, and read tasks are GET-backed.                                                                                                                           |
-| `tests/provider.rs`    | Task, log, and metric catalogs; schemas; pause, resume, stop, and delete; recovery and stateless commands; rejected input; logs and gauges; pagination; primitive HTTP tasks; readonly advertisement and start. |
-| `tests/a2a.rs`         | A2A run control, readonly over A2A, `agent-message` context, MCP tool listing, and OpenID Connect acceptance and rejection.                                                                                                      |
-| `tests/agent.rs`       | Model selection, conversation history, tool calls, and one-context turn ordering.                                                                                                                                                |
-| `tests/sila.rs`        | Default SiLA identity, operator PEM replacement, rejection of a partial PEM set, and a TLS bind.                                                                                                                                 |
-| `tests/image_catalog.rs` | Two injectable cameras, pagination, search bounds, retention, and an isolated capture failure.                                                                                                                                |
-| `tests/opentrons_camera.rs` | Mock `POST /camera/picture`, JPEG bytes and dimensions, and disabled, malformed, timeout, and unreachable failures.                                                                                                          |
-| `tests/v4l2_camera.rs` | Injected V4L2 grabs, `/dev/video4` as the default, and no video device opened by the suite.                                                                                                                                      |
-| `tests/image_serve.rs` | Serve limits, both source ids, readonly image reads, exact A2A skills, and exact MCP tools.                                                                                                                                      |
-| `tests/image_parity.rs` | The same camera calls compared across A2A and MCP.                                                                                                                                                                              |
-| `tests/image_demo.rs`  | `list-image-sources` and a saved current JPEG without a camera or the simulator.                                                                                                                                                 |
-| `tests/support/mod.rs` | The mock robot-server used by the suite.                                                                                                                                                                                         |
+| File                        | Behavior under test                                                                                                                                                                                             |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/inventory.rs`        | Every pinned OpenAPI operation is classified, inventory ids are unique, and read tasks are GET-backed.                                                                                                          |
+| `tests/provider.rs`         | Task, log, and metric catalogs; schemas; pause, resume, stop, and delete; recovery and stateless commands; rejected input; logs and gauges; pagination; primitive HTTP tasks; readonly advertisement and start. |
+| `tests/a2a.rs`              | A2A run control, readonly over A2A, `agent-message` context, MCP tool listing, OpenID Connect acceptance and rejection, packaged `/ui/` routes and assets, public shell under OIDC, and a headless fixture.     |
+| `tests/agent.rs`            | Model selection, conversation history, tool calls, and one-context turn ordering.                                                                                                                               |
+| `tests/sila.rs`             | Default SiLA identity, operator PEM replacement, rejection of a partial PEM set, and a TLS bind.                                                                                                                |
+| `tests/image_catalog.rs`    | Two injectable cameras, pagination, search bounds, retention, and an isolated capture failure.                                                                                                                  |
+| `tests/opentrons_camera.rs` | Mock `POST /camera/picture`, JPEG bytes and dimensions, and disabled, malformed, timeout, and unreachable failures.                                                                                             |
+| `tests/v4l2_camera.rs`      | Injected V4L2 grabs, `/dev/video4` as the default, and no video device opened by the suite.                                                                                                                     |
+| `tests/image_serve.rs`      | Serve limits, both source ids, readonly image reads, exact A2A skills, and exact MCP tools.                                                                                                                     |
+| `tests/image_parity.rs`     | The same camera calls compared across A2A and MCP.                                                                                                                                                              |
+| `tests/image_demo.rs`       | `list-image-sources` and a saved current JPEG without a camera or the simulator.                                                                                                                                |
+| `tests/support/mod.rs`      | The mock robot-server used by the suite.                                                                                                                                                                        |
 
 Provider tests require every non-skip inventory id to appear in `list_tasks`, `list_log_sources`, or `list_metrics`. That is the catalog contract. [doc-1](<../ot2-http/doc-1 - OT-2-robot-server-HTTP-mapping.md>) defines how each route is classified.
 
@@ -128,12 +129,24 @@ Image tests cover `list_image_sources`, `list_images`, `search_images`, `get_ima
 
 Expected outcomes differ by environment:
 
-| Environment | `opentrons-camera` | `external-camera` |
-| --- | --- | --- |
-| Deterministic tests | Mock JPEG, or a stable error for a disabled, malformed, or unreachable robot-server. | Injected JPEG, or a stable error for a missing, busy, or timed-out device. |
-| Pinned simulator | The source is advertised. A current image fails because the simulator has no camera. | Absent unless `--v4l2-device` names a node on this host. |
-| Real OT-2 | A JPEG from `POST /camera/picture` when the operator enabled the camera. | Absent unless a host device is configured. It reads that device, not the robot. |
-| Linux host with `--v4l2-device /dev/video4` | Depends on whether robot-server is a simulator or a real OT-2. | A JPEG from that device. |
+| Environment                                 | `opentrons-camera`                                                                   | `external-camera`                                                               |
+| ------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| Deterministic tests                         | Mock JPEG, or a stable error for a disabled, malformed, or unreachable robot-server. | Injected JPEG, or a stable error for a missing, busy, or timed-out device.      |
+| Pinned simulator                            | The source is advertised. A current image fails because the simulator has no camera. | Absent unless `--v4l2-device` names a node on this host.                        |
+| Real OT-2                                   | A JPEG from `POST /camera/picture` when the operator enabled the camera.             | Absent unless a host device is configured. It reads that device, not the robot. |
+| Linux host with `--v4l2-device /dev/video4` | Depends on whether robot-server is a simulator or a real OT-2.                       | A JPEG from that device.                                                        |
+
+## Packaged web interface
+
+Normal `serve` enables the dev-kit browser on the A2A listener. `GET /ui`, `GET /ui/`, and `GET /ui/index.html` return the shell, and referenced files load from `/ui/assets/`. An unknown asset returns 404. The page is a same-origin client of that listener.
+
+The shell and packaged assets stay public when OpenID Connect is configured. Protected A2A protocol routes still reject a missing token and a token without the required scope. A valid access token is accepted through the HTTP bearer alternative on the agent card. The browser does not run an OpenID Connect login flow. An operator pastes the access token into the bearer field, and the page keeps it only in page memory.
+
+The Tasks page does not cancel runs and does not call `get_current_image`. The Images page lists stored frames and previews only decoded payloads of at most 262144 bytes.
+
+`tests/a2a.rs` covers those routes, the public shell, the protocol gate, and the fixture. `fixture` does not call `with_web_ui`, so `/ui/` is absent there. `mise run compliance` talks to that headless fixture.
+
+The compliance workflow, the release workflow for every matrix target, and `mise run build-linux-x86_64` install `wasm32-unknown-unknown` before compiling. The dev-kit build script compiles the browser to wasm32 even when the OT-2 binary target is something else.
 
 ## Live smoke
 
@@ -144,9 +157,9 @@ Expected outcomes differ by environment:
 - free TCP ports `31950`, `31000`, and `31001`
 - Bedrock credentials that can invoke the selected model (`AWS_PROFILE` or the `default` profile, plus `AWS_REGION` or `AWS_DEFAULT_REGION` when the profile region is not enough)
 
-Smoke always rebuilds through `mise run ot2-simulator-setup`, removes the container named `a2a-lab-ot2-sim`, and exits if `127.0.0.1:31950` stays occupied. It then starts the simulator and `a2a-lab-ot2 serve` with `A2ALAB_SILA_PORT=0`. The check covers the agent card, an A2A `list_tasks` call, the MCP tool list, two Bedrock `agent-message` turns that share a context, and the direct CLI operations `list-tasks`, `list-log-sources`, `list-metrics`, `start-task`, `get-task-status`, `pause`, `resume`, `stop`, `home`, `query-logs`, and `query-metrics`.
+Smoke always rebuilds through `mise run ot2-simulator-setup`, removes the container named `a2a-lab-ot2-sim`, and exits if `127.0.0.1:31950` stays occupied. It then starts the simulator and `a2a-lab-ot2 serve` with `A2ALAB_SILA_PORT=0`. After the agent card is ready, it requests `/ui/` and checks that the shell loaded. It also covers an A2A `list_tasks` call, an A2A `start_task` of `get_protocols` plus `get_task_status` of that run, the MCP tool list, two Bedrock `agent-message` turns that share a context, and the direct CLI operations `list-tasks`, `list-log-sources`, `list-metrics`, `start-task`, `home`, `query-logs`, and `query-metrics`.
 
-Those CLI operations call the simulator. `start-task get_protocols` lists uploaded protocols. `home` issues a home command. On the way out, smoke stops its processes and removes the `a2a-lab-ot2-sim` container, including a simulator that was already using that name.
+Those CLI operations call the simulator. `start-task get_protocols` lists uploaded protocols. HTTP task run ids stay in that process, so smoke reads status from the live A2A listener instead of a second CLI process. `home` issues a home command. On the way out, smoke stops its processes and removes the `a2a-lab-ot2-sim` container, including a simulator that was already using that name.
 
 A successful run prints:
 

@@ -25,6 +25,7 @@ jobs:
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
           toolchain: 1.98.1
+          targets: wasm32-unknown-unknown
 
       - name: Build deterministic fixture
         run: cargo build --locked --bin a2a-lab-ot2
@@ -170,7 +171,7 @@ jobs:
 
           provenance = {
               "implementation_commit": os.environ["TESTED_COMMIT"],
-              "devkit_dependency_revision": "9d5327868d96b3e800fd89f6debf434bcc12709d",
+              "devkit_dependency_revision": "4573c9ae307969aadbe30c5cd37f1ab2b5c2678e",
               "tck_action_revision": "1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd",
               "tck_suite_revision": "1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd",
               "profile_version": "1.1.0",

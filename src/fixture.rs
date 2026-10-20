@@ -6,16 +6,19 @@ use std::path::{Path as FsPath, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::{collections::BTreeMap, fmt::Write as _};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
 use a2a_lab_dev_kit::{
     A2aClient, A2aLabApi, A2aLabCommand, A2aLabError, A2aLabFuture, A2aLabOutcome, A2aLabResult,
-    A2aLabService, A2aServer, AgentMessageHandler, COMPLIANCE_PROFILE_VERSION, ComplianceFixtures,
-    FixtureCapability, GetCurrentImageRequest, GetImageRequest, GetTaskStatusRequest, Image,
-    ImageDescriptor, ImageFixtures, ImageProvider, ImageSource, ImageSourceId, JsonObject,
-    ListImageSourcesRequest, ListImagesRequest, ListMetricsRequest, LogFixtures, McpLab, McpServer,
-    MetricDescriptor, MetricFixtures, MetricPoint, MetricProvider, Page, QueryMetricRequest, RunId,
-    SearchImagesRequest, SourceId, TaskFixtures, TaskId, TaskSnapshot, TimeRange, UtcTimestamp,
+    A2aLabService, A2aServer, AgentMessageHandler, GetCurrentImageRequest, GetImageRequest,
+    GetTaskStatusRequest, Image, ImageDescriptor, ImageId, ImageProvider, ImageSource,
+    ImageSourceId, JsonObject, ListImageSourcesRequest, ListImagesRequest, ListMetricsRequest,
+    McpLab, McpServer, MetricDescriptor, MetricId, MetricPoint, MetricProvider, Page,
+    QueryMetricRequest, RunId, SearchImagesRequest, SourceId, TaskId, TaskSnapshot, TimeRange,
+    UtcTimestamp,
 };
 use axum::Router;
 use axum::extract::{Path, Request};
@@ -44,6 +47,8 @@ const ALTERNATE_IMAGE_SOURCE: &str = "fixture-camera-secondary";
 const FIXTURE_RUN: &str = "fixture-run";
 const RANGE_START: &str = "1970-01-01T00:00:00Z";
 const RANGE_END: &str = "2100-01-01T00:00:00Z";
+/// Standalone TCK profile encoded by the fixture readiness document.
+const FIXTURE_PROFILE_VERSION: &str = "1.1.0";
 const HISTORY_LIMIT: usize = 40;
 const TASK_ID_MARKER: &str = "exact task identifier `";
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -112,8 +117,8 @@ pub struct FixtureReadiness {
     pub a2a_url: String,
     /// Bound MCP endpoint.
     pub mcp_url: String,
-    /// Validated fixtures consumed by the compliance runner.
-    pub fixtures: ComplianceFixtures,
+    /// Fixture document accepted by standalone TCK profile 1.1.0.
+    pub fixtures: FixtureDeclaration,
 }
 
 /// Running isolated fixture. Dropping it stops every fixture-owned listener.
@@ -129,9 +134,7 @@ impl FixtureServer {
     pub async fn start(config: FixtureConfig) -> Result<Self, A2aLabError> {
         let images = fixture_images().await?;
         let fixtures = fixture_declaration();
-        fixtures
-            .validate()
-            .map_err(|error| A2aLabError::invalid("fixtures", error.to_string()))?;
+        fixtures.validate()?;
         let robot_listener = bind("fixture robot-server", "127.0.0.1", 0).await?;
         let robot_address = local_addr("fixture robot-server", &robot_listener)?;
         let mcp_listener = bind("fixture MCP", &config.host, config.mcp_port).await?;
@@ -540,11 +543,182 @@ impl Drop for FixtureServer {
     }
 }
 
+/// Capability block in a standalone TCK profile 1.1.0 fixture document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "availability", content = "fixtures", rename_all = "snake_case")]
+pub enum FixtureCapability<T> {
+    /// The implementation serves this capability with the supplied identifiers.
+    Required(T),
+    /// The implementation does not serve this capability.
+    Unavailable,
+}
+
+/// Log identifiers in a standalone TCK fixture document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogFixtures {
+    /// Source queried for success cases.
+    pub source_id: SourceId,
+    /// Second source used to prove discovery is not a single hard-coded id.
+    pub alternate_source_id: SourceId,
+    /// Source id that discovery must not return.
+    pub missing_source_id: SourceId,
+}
+
+/// Metric identifiers in a standalone TCK fixture document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricFixtures {
+    /// Metric queried for success cases.
+    pub metric_id: MetricId,
+    /// Second metric used to prove discovery is not a single hard-coded id.
+    pub alternate_metric_id: MetricId,
+    /// Metric id that discovery must not return.
+    pub missing_metric_id: MetricId,
+}
+
+/// Task identifiers in a standalone TCK fixture document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskFixtures {
+    /// Task started for success cases.
+    pub task_id: TaskId,
+    /// Second task used to prove discovery is not a single hard-coded id.
+    pub alternate_task_id: TaskId,
+    /// Run id supplied to the started task.
+    pub run_id: RunId,
+    /// Task id that discovery must not return.
+    pub missing_task_id: TaskId,
+    /// Run id that status lookup must not find.
+    pub missing_run_id: RunId,
+    /// JSON object passed when starting `task_id`.
+    pub input: JsonObject,
+}
+
+/// Image identifiers in a standalone TCK fixture document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageFixtures {
+    /// Source that serves the primary image.
+    pub source_id: ImageSourceId,
+    /// Second source used to prove discovery is not a single hard-coded id.
+    pub alternate_source_id: ImageSourceId,
+    /// Image id returned by the primary source.
+    pub image_id: ImageId,
+    /// Second image id used by alternate-image cases.
+    pub alternate_image_id: ImageId,
+    /// Source id that discovery must not return.
+    pub missing_source_id: ImageSourceId,
+    /// Image id that lookup must not find.
+    pub missing_image_id: ImageId,
+}
+
+/// Local fixture document consumed by standalone TCK profile 1.1.0.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixtureDeclaration {
+    /// Profile version. Standalone TCK 1.1.0 accepts only `1.1.0`.
+    pub suite_version: String,
+    /// Half-open range used by log, metric, and image queries.
+    pub range: TimeRange,
+    /// Log capability.
+    pub logs: FixtureCapability<LogFixtures>,
+    /// Metric capability.
+    pub metrics: FixtureCapability<MetricFixtures>,
+    /// Task capability.
+    pub tasks: FixtureCapability<TaskFixtures>,
+    /// Image capability.
+    pub images: FixtureCapability<ImageFixtures>,
+}
+
+impl FixtureDeclaration {
+    /// Rejects a document that standalone TCK profile 1.1.0 would refuse.
+    pub fn validate(&self) -> Result<(), A2aLabError> {
+        if self.suite_version != FIXTURE_PROFILE_VERSION {
+            return Err(A2aLabError::invalid(
+                "suite_version",
+                format!("must be {FIXTURE_PROFILE_VERSION}"),
+            ));
+        }
+        self.range.check()?;
+        if let FixtureCapability::Required(value) = &self.logs {
+            require_distinct(
+                "logs",
+                [
+                    value.source_id.as_str(),
+                    value.alternate_source_id.as_str(),
+                    value.missing_source_id.as_str(),
+                ],
+            )?;
+        }
+        if let FixtureCapability::Required(value) = &self.metrics {
+            require_distinct(
+                "metrics",
+                [
+                    value.metric_id.as_str(),
+                    value.alternate_metric_id.as_str(),
+                    value.missing_metric_id.as_str(),
+                ],
+            )?;
+        }
+        if let FixtureCapability::Required(value) = &self.tasks {
+            require_distinct(
+                "tasks.definitions",
+                [
+                    value.task_id.as_str(),
+                    value.alternate_task_id.as_str(),
+                    value.missing_task_id.as_str(),
+                ],
+            )?;
+            require_distinct(
+                "tasks.runs",
+                [value.run_id.as_str(), value.missing_run_id.as_str()],
+            )?;
+        }
+        if let FixtureCapability::Required(value) = &self.images {
+            require_distinct(
+                "images.sources",
+                [
+                    value.source_id.as_str(),
+                    value.alternate_source_id.as_str(),
+                    value.missing_source_id.as_str(),
+                ],
+            )?;
+            require_distinct(
+                "images.images",
+                [
+                    value.image_id.as_str(),
+                    value.alternate_image_id.as_str(),
+                    value.missing_image_id.as_str(),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn require_distinct(
+    field: &'static str,
+    values: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<(), A2aLabError> {
+    let mut seen = BTreeSet::new();
+    if values
+        .into_iter()
+        .any(|value| !seen.insert(value.as_ref().to_owned()))
+    {
+        return Err(A2aLabError::invalid(
+            field,
+            "fixture identifiers must be distinct",
+        ));
+    }
+    Ok(())
+}
+
 /// Stable fixture declaration used by the OT-2 compliance adaptor.
 #[must_use]
-pub fn fixture_declaration() -> ComplianceFixtures {
-    ComplianceFixtures {
-        suite_version: COMPLIANCE_PROFILE_VERSION.to_owned(),
+pub fn fixture_declaration() -> FixtureDeclaration {
+    FixtureDeclaration {
+        suite_version: FIXTURE_PROFILE_VERSION.to_owned(),
         range: TimeRange::new(timestamp(RANGE_START), timestamp(RANGE_END)).expect("fixture range"),
         logs: FixtureCapability::Required(LogFixtures {
             source_id: SourceId::new("run_commands").expect("source id"),
@@ -552,11 +726,9 @@ pub fn fixture_declaration() -> ComplianceFixtures {
             missing_source_id: SourceId::new("fixture-missing-log").expect("source id"),
         }),
         metrics: FixtureCapability::Required(MetricFixtures {
-            metric_id: a2a_lab_dev_kit::MetricId::new("healthy").expect("metric id"),
-            alternate_metric_id: a2a_lab_dev_kit::MetricId::new("disk_available_mb")
-                .expect("metric id"),
-            missing_metric_id: a2a_lab_dev_kit::MetricId::new("fixture-missing-metric")
-                .expect("metric id"),
+            metric_id: MetricId::new("healthy").expect("metric id"),
+            alternate_metric_id: MetricId::new("disk_available_mb").expect("metric id"),
+            missing_metric_id: MetricId::new("fixture-missing-metric").expect("metric id"),
         }),
         tasks: FixtureCapability::Required(TaskFixtures {
             task_id: TaskId::new("pause_run").expect("task id"),
@@ -570,13 +742,11 @@ pub fn fixture_declaration() -> ComplianceFixtures {
             source_id: ImageSourceId::new(PRIMARY_IMAGE_SOURCE).expect("image source id"),
             alternate_source_id: ImageSourceId::new(ALTERNATE_IMAGE_SOURCE)
                 .expect("image source id"),
-            image_id: a2a_lab_dev_kit::ImageId::new("img-00000000000000000001").expect("image id"),
-            alternate_image_id: a2a_lab_dev_kit::ImageId::new("img-00000000000000000002")
-                .expect("image id"),
+            image_id: ImageId::new("img-00000000000000000001").expect("image id"),
+            alternate_image_id: ImageId::new("img-00000000000000000002").expect("image id"),
             missing_source_id: ImageSourceId::new("fixture-missing-camera")
                 .expect("image source id"),
-            missing_image_id: a2a_lab_dev_kit::ImageId::new("fixture-missing-image")
-                .expect("image id"),
+            missing_image_id: ImageId::new("fixture-missing-image").expect("image id"),
         }),
     }
 }

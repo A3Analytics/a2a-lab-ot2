@@ -84,21 +84,39 @@ expected = [
     "list-tasks",
     "start-task",
     "get-task-status",
+    "list-image-sources",
+    "list-images",
+    "search-images",
+    "get-image",
+    "get-current-image",
     "agent-message",
 ]
 if ids != expected:
     raise SystemExit(f"agent card skills {ids}")
 '
 
-a2a_tasks="$(curl -fsS \
-  -H 'Content-Type: application/a2a+json' \
-  -H 'A2A-Version: 1.0' \
-  --data-binary @- \
-  http://127.0.0.1:31000/message:send <<'EOF'
-{"message":{"messageId":"smoke-list-tasks","role":"ROLE_USER","parts":[{"mediaType":"application/json","data":{"operation":"list_tasks","params":{"page":{"limit":1000}}}}]}}
+ui="$(curl -fsS http://127.0.0.1:31000/ui/)"
+printf '%s' "$ui" | python3 -c '
+import sys
+body = sys.stdin.read()
+if "id=\"app\"" not in body:
+    raise SystemExit("web ui shell did not load")
+'
+
+a2a_send() {
+  local message_id="$1"
+  local data="$2"
+  curl -fsS \
+    -H 'Content-Type: application/a2a+json' \
+    -H 'A2A-Version: 1.0' \
+    --data-binary @- \
+    http://127.0.0.1:31000/message:send <<EOF
+{"message":{"messageId":"${message_id}","role":"ROLE_USER","parts":[{"mediaType":"application/json","data":${data}}]}}
 EOF
-)"
-printf '%s' "$a2a_tasks" | python3 -c '
+}
+
+a2a_result() {
+  python3 -c '
 import json, sys
 body = json.load(sys.stdin)
 task = body.get("task", body)
@@ -108,10 +126,19 @@ parts = [
     for part in artifact.get("parts", [])
 ]
 data = next(part["data"] for part in parts if "data" in part)
+expected = sys.argv[1]
 operation = data.get("operation")
-if operation != "list_tasks":
+if operation != expected:
     raise SystemExit("a2a operation " + str(operation))
-ids = [item["id"] for item in data["result"]["items"]]
+print(json.dumps(data["result"]))
+' "$1"
+}
+
+a2a_tasks="$(a2a_send smoke-list-tasks '{"operation":"list_tasks","params":{"page":{"limit":1000}}}')"
+printf '%s' "$a2a_tasks" | a2a_result list_tasks | python3 -c '
+import json, sys
+page = json.load(sys.stdin)
+ids = [item["id"] for item in page["items"]]
 if "get_protocols" not in ids:
     raise SystemExit("a2a list_tasks missing get_protocols")
 if "run_serial_dilution" in ids:
@@ -203,12 +230,31 @@ cargo run --quiet --bin a2a-lab-ot2 -- list-log-sources
 cargo run --quiet --bin a2a-lab-ot2 -- list-metrics
 run_out="$(cargo run --quiet --bin a2a-lab-ot2 -- start-task get_protocols)"
 printf '%s\n' "$run_out"
-run_id="$(printf '%s\n' "$run_out" | awk '/^run_id / { print $2; exit }')"
-if [[ -z "$run_id" ]]; then
+if ! printf '%s\n' "$run_out" | awk '/^run_id / { found = 1 } END { exit !found }'; then
   printf 'a2a-lab-ot2 start-task did not print a run_id\n' >&2
   exit 1
 fi
-cargo run --quiet --bin a2a-lab-ot2 -- get-task-status "$run_id"
+started="$(a2a_send smoke-start-task '{"operation":"start_task","params":{"task_id":"get_protocols","input":{}}}')"
+run_id="$(printf '%s' "$started" | a2a_result start_task | python3 -c '
+import json, sys
+run = json.load(sys.stdin)
+run_id = run.get("id")
+if not run_id:
+    raise SystemExit("a2a start_task missing id")
+if run.get("state") != "completed":
+    raise SystemExit("a2a start_task state " + str(run.get("state")))
+print(run_id)
+')"
+status="$(a2a_send smoke-get-task-status "{\"operation\":\"get_task_status\",\"params\":{\"id\":\"${run_id}\"}}")"
+printf '%s' "$status" | a2a_result get_task_status | python3 -c '
+import json, sys
+run = json.load(sys.stdin)
+expected = sys.argv[1]
+if run.get("id") != expected:
+    raise SystemExit("a2a get_task_status id " + str(run.get("id")))
+if run.get("state") != "completed":
+    raise SystemExit("a2a get_task_status state " + str(run.get("state")))
+' "$run_id"
 cargo run --quiet --bin a2a-lab-ot2 -- home
 cargo run --quiet --bin a2a-lab-ot2 -- query-logs
 cargo run --quiet --bin a2a-lab-ot2 -- query-metrics run_command_count

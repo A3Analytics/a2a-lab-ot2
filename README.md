@@ -89,7 +89,7 @@ mise run images -- opentrons-camera frame.jpg
 A2ALAB_EXTERNAL_CAMERA_INDEX=0 mise run images -- external-camera frame.jpg
 ```
 
-`mise run start` serves A2A, MCP, and SiLA after robot-server is healthy. To print logs from the robot:
+`mise run start` serves A2A, MCP, SiLA, and the packaged web UI after robot-server is healthy. Startup prints the UI on the same origin as A2A, at `/ui/`. To print logs from the robot:
 
 ```bash
 mise run a2a-lab-ot2-example
@@ -139,7 +139,24 @@ A2ALAB_OPENTRONS_URL=http://<robot-host>:31950 mise run images -- opentrons-came
 | ----------------- | ---------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | robot-server      | `http://127.0.0.1:31950`     | `--opentrons-url` or `A2ALAB_OPENTRONS_URL`                                                 | none in this adapter                                               |
 | A2A 1.0 HTTP+JSON | `http://127.0.0.1:31000`     | `--a2alab-listen-host` / `A2ALAB_LISTEN_HOST`; `A2ALAB_PUBLIC_URL` sets the advertised host | OpenID Connect when `--oidc-issuer` or `A2ALAB_OIDC_ISSUER` is set |
+| Web UI            | `http://127.0.0.1:31000/ui/` | same A2A listener and advertised origin; always on for `serve`                              | shell and assets are public; protocol routes follow A2A            |
 | MCP               | `http://127.0.0.1:31001/mcp` | same bind host; `A2ALAB_PUBLIC_URL` keeps port `31001`                                      | open                                                               |
 | SiLA 2            | `127.0.0.1:50052`            | `--sila-host`, `--sila-port`, and `A2ALAB_SILA_*`; `A2ALAB_PUBLIC_URL` keeps the SiLA port  | open; TLS                                                          |
 
-A2A serves `/.well-known/agent-card.json` and `POST /message:send`. OpenID Connect protects that A2A listener only. MCP and SiLA stay open. With an issuer, A2A expects a bearer token for audience `a2a-lab` and scope `a2a.invoke`.
+A2A serves `/.well-known/agent-card.json` and `POST /message:send`. OpenID Connect protects those A2A protocol routes only. MCP and SiLA stay open. With an issuer, A2A expects a bearer token for audience `a2a-lab` and scope `a2a.invoke`.
+
+## Web interface
+
+`serve` always serves the packaged dev-kit browser on the existing A2A listener. There is no flag. `GET /ui`, `GET /ui/`, and `GET /ui/index.html` return the shell. Packaged assets are under `/ui/assets/`. Startup prints `Web UI` with the same origin already printed for A2A and the path `/ui/`. `A2ALAB_PUBLIC_URL` changes that origin for both lines.
+
+The page is a same-origin client of the listener that served it. It loads the agent card and calls A2A HTTP+JSON on that origin. It does not open a second API.
+
+Shell and asset routes are public. A2A protocol routes keep the listener's access gate.
+
+When an issuer is set, the agent card advertises two alternative requirements: OpenID Connect, and HTTP bearer. Both use the same token check and the same required scope. The browser has no OpenID Connect login flow. Paste an access token into the bearer field. The page keeps that token in memory for the page load and sends it as `Authorization: Bearer`. A missing token is rejected. A token without the required scope is rejected. A valid token is accepted.
+
+The Tasks page does not cancel runs and does not call `get_current_image`. The Images page lists stored frames. It previews a decoded payload only when that payload is at most 262144 bytes.
+
+Compiling this crate builds that browser for `wasm32-unknown-unknown`. `rust-toolchain.toml` installs the target. The release workflow and `mise run build-linux-x86_64` install it too, including when the OT-2 binary is cross-compiled.
+
+The compliance `fixture` command does not serve `/ui/`.

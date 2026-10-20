@@ -20,7 +20,7 @@ docker run --platform linux/arm64 --rm \
     apt-get update >/dev/null &&
     apt-get install -y --no-install-recommends \
       clang libclang-dev gcc-x86-64-linux-gnu g++-x86-64-linux-gnu >/dev/null &&
-    /usr/local/cargo/bin/rustup target add x86_64-unknown-linux-gnu &&
+    /usr/local/cargo/bin/rustup target add x86_64-unknown-linux-gnu wasm32-unknown-unknown &&
     /usr/local/cargo/bin/cargo build --release --locked \
       --target x86_64-unknown-linux-gnu --bin a2a-lab-ot2
     status=$?
