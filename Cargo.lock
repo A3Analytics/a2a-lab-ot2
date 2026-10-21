@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "a2a-lab-ot2"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "a2a-lab-dev-kit",
  "aws-config",
