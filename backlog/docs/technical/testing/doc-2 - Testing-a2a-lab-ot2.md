@@ -41,7 +41,7 @@ Run the default profile from the repository root:
 mise run compliance
 ```
 
-The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies standalone `A3Analytics/a2a-lab-tck` release `v0.1.0` at immutable suite revision `1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd`. `A2ALAB_TCK_ROOT` is an explicit local-source override; it does not change the default. The application separately pins the public devkit library at `2793e0558d8d98e78c4c10591880eeb47a2da618`; it does not depend on the TCK crate.
+The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies standalone `A3Analytics/a2a-lab-tck` release `v0.1.0` at immutable suite revision `1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd`. `A2ALAB_TCK_ROOT` is an explicit local-source override; it does not change the default. The application separately pins the public devkit library at release `v0.2.0`, commit `a86ddd74f391c287925be87c4ad8b50675d9e122`; it does not depend on the TCK crate.
 
 Choose a suite or disable the LLM check with these commands:
 
