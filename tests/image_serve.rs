@@ -7,9 +7,9 @@ use std::time::Duration;
 use a2a_lab_dev_kit::{
     A2aClient, A2aLabApi, A2aLabCommand, A2aLabError, A2aLabResult, A2aLabService, A2aServer,
     AgentMessageFuture, AgentMessageHandler, AgentMessageReply, AgentMessageRequest,
-    GetCurrentImageRequest, Image, ImageProvider, ImageSourceId, JsonObject,
-    ListImageSourcesRequest, ListTasksRequest, McpLab, McpServer, Page, PageRequest,
-    StartTaskRequest, TaskId, bind_local,
+    GetCurrentImageRequest, GetImageRequest, Image, ImageProvider, ImageSourceId, JsonObject,
+    ListImageSourcesRequest, ListImagesRequest, ListTasksRequest, McpLab, McpServer, Page,
+    PageRequest, StartTaskRequest, TaskId, bind_local,
 };
 use a2a_lab_ot2::camera::{
     CameraCapture, CameraCaptureError, DEFAULT_EXTERNAL_CAMERA_DESCRIPTION,
@@ -56,6 +56,8 @@ fn help_lists_image_defaults() {
     assert!(help.contains("10000"));
     assert!(help.contains("--image-retention"));
     assert!(help.contains("32"));
+    assert!(!help.contains("--image-history-db"));
+    assert!(!help.contains("A2ALAB_IMAGE_HISTORY_DB"));
 }
 
 #[test]
@@ -177,6 +179,10 @@ fn config_rejects_zero_and_overflow() {
     let off = ImageServeConfig::new(None, None, 1024, 1_000, 4).unwrap();
     assert_eq!(off.camera_index(), None);
     assert!(off.summary().contains("external-camera off"));
+    assert!(
+        off.summary()
+            .contains("history .a2a-lab-ot2/images.sqlite age 7d")
+    );
     let config = ImageServeConfig::new(Some(4), None, 1024, 1_000, 4).unwrap();
     assert_eq!(config.camera_index(), Some(4));
     assert_eq!(config.max_image_bytes(), 1024);
@@ -326,7 +332,30 @@ struct Endpoints {
 }
 
 async fn serve(url: &str, config: &ImageServeConfig, grab: Script, readonly: bool) -> Endpoints {
+    serve_history(url, config, grab, readonly, None).await
+}
+
+async fn serve_history(
+    url: &str,
+    config: &ImageServeConfig,
+    grab: Script,
+    readonly: bool,
+    history: Option<&std::path::Path>,
+) -> Endpoints {
     let catalog = image_catalog(url, config, Some(Arc::new(grab))).unwrap();
+    let catalog = match history {
+        Some(path) => catalog
+            .with_persisted_sources(
+                &[
+                    ImageSourceId::new(EXTERNAL_CAMERA_SOURCE_ID).unwrap(),
+                    ImageSourceId::new("opentrons-camera").unwrap(),
+                ],
+                path,
+            )
+            .await
+            .unwrap(),
+        None => catalog,
+    };
     let lab = OpentronsLab::new(url).unwrap().with_readonly(readonly);
     let service = A2aLabService::new(lab.clone(), lab.clone(), lab)
         .with_images(catalog)
@@ -359,6 +388,72 @@ async fn serve(url: &str, config: &ImageServeConfig, grab: Script, readonly: boo
             .unwrap(),
         mcp_url,
     }
+}
+
+#[tokio::test]
+async fn restored_camera_history_matches_across_a2a_and_mcp() {
+    let bytes = jpeg(2, 3);
+    let (url, _) = picture_server(PictureBody::Jpeg(bytes.clone())).await;
+    let dir = std::env::temp_dir().join(format!(
+        "a2a-lab-ot2-image-serve-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("images.sqlite");
+    let grab = Script::ok(bytes.clone());
+    let endpoints = serve_history(&url, &config(1024), grab, false, Some(&db)).await;
+    let external = ImageSourceId::new(EXTERNAL_CAMERA_SOURCE_ID).unwrap();
+    let robot = ImageSourceId::new("opentrons-camera").unwrap();
+    let external_frame = endpoints
+        .a2a
+        .get_current_image(GetCurrentImageRequest::new(external.clone()))
+        .await
+        .unwrap();
+    let robot_frame = endpoints
+        .a2a
+        .get_current_image(GetCurrentImageRequest::new(robot.clone()))
+        .await
+        .unwrap();
+    drop(endpoints);
+
+    let grab = Script::ok(jpeg(1, 1));
+    let endpoints = serve_history(&url, &config(1024), grab.clone(), false, Some(&db)).await;
+    assert!(grab.calls.lock().expect("calls").is_empty());
+    let listed = endpoints
+        .a2a
+        .list_images(ListImagesRequest::new(external, page()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(listed.items().len(), 1);
+    assert_eq!(listed.items()[0].id(), external_frame.descriptor().id());
+    let robot_listed = endpoints
+        .a2a
+        .list_images(ListImagesRequest::new(robot, page()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(robot_listed.items().len(), 1);
+    assert_eq!(robot_listed.items()[0].id(), robot_frame.descriptor().id());
+    let id = external_frame.descriptor().id().clone();
+    let loaded = endpoints
+        .a2a
+        .get_image(GetImageRequest::new(id.clone()))
+        .await
+        .unwrap();
+    let outcome = endpoints
+        .mcp
+        .execute(A2aLabCommand::GetImage(GetImageRequest::new(id)))
+        .await
+        .unwrap();
+    let A2aLabResult::GetImage(mcp_image) = outcome.task.result else {
+        panic!("get_image");
+    };
+    assert_eq!(loaded.data(), bytes.as_slice());
+    assert_eq!(mcp_image.data(), bytes.as_slice());
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 fn config(max_bytes: u64) -> ImageServeConfig {

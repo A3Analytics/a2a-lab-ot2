@@ -19,8 +19,9 @@ pub use fixture::{
     FixtureConfig, FixtureReadiness, FixtureServer, FixtureVariant, fixture_declaration,
 };
 pub use images::{
-    CapturedFrame, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_IMAGE_RETENTION_PER_SOURCE, ImageCapture,
-    ImageCatalogConfig, ImageServeConfig, LiveImageCatalog, image_catalog,
+    CapturedFrame, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_IMAGE_HISTORY_DB,
+    DEFAULT_IMAGE_RETENTION_PER_SOURCE, IMAGE_HISTORY_MAX_AGE, ImageCapture, ImageCatalogConfig,
+    ImageHistoryMaintenance, ImageServeConfig, LiveImageCatalog, image_catalog, open_image_catalog,
 };
 pub use memory::ConversationStore;
 pub use oidc::{OidcConfig, with_oidc};

@@ -41,7 +41,7 @@ Run the default profile from the repository root:
 mise run compliance
 ```
 
-The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies standalone `A3Analytics/a2a-lab-tck` release `v0.1.0` at immutable suite revision `1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd`. `A2ALAB_TCK_ROOT` is an explicit local-source override; it does not change the default. The application separately pins the public devkit library at `4573c9ae307969aadbe30c5cd37f1ab2b5c2678e`; it does not depend on the TCK crate.
+The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies standalone `A3Analytics/a2a-lab-tck` release `v0.1.0` at immutable suite revision `1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd`. `A2ALAB_TCK_ROOT` is an explicit local-source override; it does not change the default. The application separately pins the public devkit library at `2793e0558d8d98e78c4c10591880eeb47a2da618`; it does not depend on the TCK crate.
 
 Choose a suite or disable the LLM check with these commands:
 
@@ -118,14 +118,15 @@ Tests bind local listeners and a mock robot-server. They do not start the Docker
 | `tests/image_catalog.rs`    | Two injectable cameras, pagination, search bounds, retention, and an isolated capture failure.                                                                                                                  |
 | `tests/opentrons_camera.rs` | Mock `POST /camera/picture`, JPEG bytes and dimensions, and disabled, malformed, timeout, and unreachable failures.                                                                                             |
 | `tests/v4l2_camera.rs`      | Injected V4L2 grabs, `/dev/video4` as the default, and no video device opened by the suite.                                                                                                                     |
-| `tests/image_serve.rs`      | Serve limits, both source ids, readonly image reads, exact A2A skills, and exact MCP tools.                                                                                                                     |
+| `tests/image_serve.rs`      | Serve limits, both source ids, readonly image reads, exact A2A skills, exact MCP tools, and restored camera history across A2A and MCP.                                                                         |
+| `tests/image_history.rs`    | Restart restoration for both cameras, per-source retention, seven-day expiry, corrupt and oversized history, failed capture, and no database creation when only sources are listed.                             |
 | `tests/image_parity.rs`     | The same camera calls compared across A2A and MCP.                                                                                                                                                              |
 | `tests/image_demo.rs`       | `list-image-sources` and a saved current JPEG without a camera or the simulator.                                                                                                                                |
 | `tests/support/mod.rs`      | The mock robot-server used by the suite.                                                                                                                                                                        |
 
 Provider tests require every non-skip inventory id to appear in `list_tasks`, `list_log_sources`, or `list_metrics`. That is the catalog contract. [doc-1](<../ot2-http/doc-1 - OT-2-robot-server-HTTP-mapping.md>) defines how each route is classified.
 
-Image tests cover `list_image_sources`, `list_images`, `search_images`, `get_image`, and `get_current_image` for `opentrons-camera` and, when a device is configured, `external-camera`. They mock `POST /camera/picture` and inject the V4L2 grab. `mise run quality` does not open a video device, start Docker, or use model credentials. `mise run images` lists the OT-2 camera. `A2ALAB_V4L2_DEVICE=/dev/video4 mise run images` adds the extra camera.
+Image tests cover `list_image_sources`, `list_images`, `search_images`, `get_image`, and `get_current_image` for `opentrons-camera` and, when a camera index is configured, `external-camera`. They mock `POST /camera/picture` and inject the native grab. History tests use a temporary SQLite file and check restart, the 7-day age, retention, and failed writes. `mise run quality` does not open a video device, start Docker, or use model credentials. `mise run images` lists the OT-2 camera. `A2ALAB_EXTERNAL_CAMERA_INDEX=4 mise run images` adds the extra camera.
 
 Expected outcomes differ by environment:
 
@@ -142,7 +143,7 @@ Normal `serve` enables the dev-kit browser on the A2A listener. `GET /ui`, `GET 
 
 The shell and packaged assets stay public when OpenID Connect is configured. Protected A2A protocol routes still reject a missing token and a token without the required scope. A valid access token is accepted through the HTTP bearer alternative on the agent card. The browser does not run an OpenID Connect login flow. An operator pastes the access token into the bearer field, and the page keeps it only in page memory.
 
-The Tasks page does not cancel runs and does not call `get_current_image`. The Images page lists stored frames and previews only decoded payloads of at most 262144 bytes.
+The Tasks page does not cancel runs and does not call `get_current_image`. The Images page calls it when the operator captures from one selected source, then refreshes the stored-frame list. It previews only decoded payloads of at most 262144 bytes. Frames from both cameras come from `.a2a-lab-ot2/images.sqlite`. They survive a restart until they are older than 7 days or beyond the per-source `--image-retention`. Listing and searching do not capture, and opening the database does not open a camera. The service user needs write access to the database directory. Back up the SQLite file together with its `-wal` and `-shm` companions.
 
 `tests/a2a.rs` covers those routes, the public shell, the protocol gate, and the fixture. `fixture` does not call `with_web_ui`, so `/ui/` is absent there. `mise run compliance` talks to that headless fixture.
 

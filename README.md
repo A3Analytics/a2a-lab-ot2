@@ -29,6 +29,10 @@ The OT-2 robot-server is an a2a-lab. These operations are how a caller lists, ru
 
 `external-camera` is off unless you set `--external-camera-index` or `A2ALAB_EXTERNAL_CAMERA_INDEX` to a zero-based native camera index. Capture reads that camera directly and never goes through robot-server. Omitting the setting serves only `opentrons-camera`. Its description defaults to "Still frame from the configured external camera." Set `--external-camera-description` or `A2ALAB_EXTERNAL_CAMERA_DESCRIPTION` to replace that text. An empty description is rejected.
 
+A requested `opentrons-camera` or `external-camera` frame is stored in `.a2a-lab-ot2/images.sqlite`. The service user must be able to create that directory and write the database. `list_images` and `search_images` read this file and do not capture. Loading it does not open either camera.
+
+The file keeps at most `--image-retention` frames per source, and none older than 7 days.
+
 `agent-message` is an A2A skill beside those seven. A model takes plain text and calls the lab operations through MCP. MCP and SiLA serve the A2A-LAB operations.
 
 `--readonly` limits `list_tasks` and `start_task` to reads. Image reads stay available.
@@ -155,7 +159,7 @@ Shell and asset routes are public. A2A protocol routes keep the listener's acces
 
 When an issuer is set, the agent card advertises two alternative requirements: OpenID Connect, and HTTP bearer. Both use the same token check and the same required scope. The browser has no OpenID Connect login flow. Paste an access token into the bearer field. The page keeps that token in memory for the page load and sends it as `Authorization: Bearer`. A missing token is rejected. A token without the required scope is rejected. A valid token is accepted.
 
-The Tasks page does not cancel runs and does not call `get_current_image`. The Images page lists stored frames. It previews a decoded payload only when that payload is at most 262144 bytes.
+The Tasks page does not cancel runs and does not call `get_current_image`. The Images page captures the current image when one source is selected and lists stored frames from both cameras, including frames captured before the current process started. The page previews a decoded payload only when that payload is at most 262144 bytes.
 
 Compiling this crate builds that browser for `wasm32-unknown-unknown`. `rust-toolchain.toml` installs the target. The release workflow and `mise run build-linux-x86_64` install it too, including when the OT-2 binary is cross-compiled.
 

@@ -21,8 +21,9 @@ use a2a_lab_ot2::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use a2a_lab_ot2::{
     ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_IMAGE_RETENTION_PER_SOURCE,
     DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, FixtureConfig, FixtureServer, FixtureVariant,
-    ImageServeConfig, LabAgent, LiveImageCatalog, ModelProvider, OidcConfig, OpentronsLab,
-    SilaConfig, image_catalog, prepare_sila, selected_model, sila_server, with_oidc,
+    ImageHistoryMaintenance, ImageServeConfig, LabAgent, LiveImageCatalog, ModelProvider,
+    OidcConfig, OpentronsLab, SilaConfig, image_catalog, open_image_catalog, prepare_sila,
+    selected_model, sila_server, with_oidc,
 };
 use clap::{Parser, Subcommand};
 
@@ -383,22 +384,38 @@ fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
     Ok(OpentronsLab::new(&cli.opentrons_url)?.with_readonly(cli.readonly))
 }
 
-fn prepare_images(
-    cli: &Cli,
-) -> Result<(ImageServeConfig, LiveImageCatalog), Box<dyn std::error::Error>> {
+fn prepare_images(cli: &Cli) -> Result<ImageServeConfig, Box<dyn std::error::Error>> {
     let images = image_config(cli)?;
     println!("{}", images.summary());
-    let catalog = image_catalog(&cli.opentrons_url, &images, None)?;
-    Ok((images, catalog))
+    Ok(images)
 }
 
-async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let (images, catalog) = prepare_images(cli)?;
+async fn prepare_serve_images(
+    lab: &OpentronsLab,
+    cli: &Cli,
+) -> Result<
+    (
+        ImageServeConfig,
+        LiveImageCatalog,
+        Option<ImageHistoryMaintenance>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let images = prepare_images(cli)?;
     let opentrons = format!("opentrons robot-server at {}", cli.opentrons_url);
     lab.client()
         .health()
         .await
         .map_err(|error| startup_error(&opentrons, error))?;
+    let catalog = open_image_catalog(&cli.opentrons_url, &images, None)
+        .await
+        .map_err(|error| startup_error("images", error))?;
+    let maintenance = catalog.maintain_history();
+    Ok((images, catalog, maintenance))
+}
+
+async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (images, catalog, _history_maintenance) = prepare_serve_images(&lab, cli).await?;
     let conversation = format!("conversation store at {}", cli.conversation_db.display());
     let store = ConversationStore::open(&cli.conversation_db, cli.history_limit)
         .await
@@ -684,7 +701,7 @@ async fn get_current_image(
     source: &str,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let catalog = camera_catalog(cli)?;
+    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None).await?;
     let image = catalog
         .get_current_image(GetCurrentImageRequest::new(ImageSourceId::new(source)?))
         .await?;

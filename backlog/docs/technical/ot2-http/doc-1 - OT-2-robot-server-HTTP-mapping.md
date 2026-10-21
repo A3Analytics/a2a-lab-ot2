@@ -64,7 +64,7 @@ Image operations are `list_image_sources`, `list_images`, `search_images`, `get_
 
 The pinned simulator can advertise `opentrons-camera` and does not emulate a usable on-board camera. A current-image call against the simulator fails. A real OT-2 returns a JPEG when the camera is enabled. A Linux host returns a JPEG from `external-camera` only after that device is configured. Deterministic tests mock `POST /camera/picture` and the V4L2 grab, and they do not open a video device.
 
-Frames are inline base64. Each process keeps a bounded number of recent frames per source. A restart drops them. A missing, disabled, busy, permission-denied, timed-out, malformed, or oversized camera fails only that source.
+Frames are inline base64. Requested frames from `opentrons-camera` and `external-camera` are stored in the image-history database, reloaded on startup, and removed when they are older than 7 days or beyond the per-source retention count. A missing, disabled, busy, permission-denied, timed-out, malformed, or oversized camera fails only that source. A failed history write also leaves that source unchanged.
 
 ## Coverage
 

@@ -52,7 +52,7 @@ dependencies = [
 [[package]]
 name = "a2a-lab-dev-kit"
 version = "0.1.0"
-source = "git+https://github.com/A3Analytics/a2a-lab-dev-kit-rs?rev=4573c9ae307969aadbe30c5cd37f1ab2b5c2678e#4573c9ae307969aadbe30c5cd37f1ab2b5c2678e"
+source = "git+https://github.com/A3Analytics/a2a-lab-dev-kit-rs?rev=2793e0558d8d98e78c4c10591880eeb47a2da618#2793e0558d8d98e78c4c10591880eeb47a2da618"
 dependencies = [
  "a2a-client-lf",
  "a2a-grpc",

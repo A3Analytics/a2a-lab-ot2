@@ -104,8 +104,12 @@ fn list_image_sources_adds_the_extra_camera_for_the_chosen_index() {
 async fn demo_saves_a_mock_frame_without_printing_bytes() {
     let bytes = jpeg();
     let (url, hits) = picture_server(bytes.clone()).await;
-    let path = std::env::temp_dir().join(format!("a2a-lab-ot2-image-{}.jpg", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("a2a-lab-ot2-image-demo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("frame.jpg");
     let output = bin()
+        .current_dir(&dir)
         .args([
             "--opentrons-url",
             &url,
@@ -141,5 +145,6 @@ async fn demo_saves_a_mock_frame_without_printing_bytes() {
             .windows(2)
             .any(|pair| pair == [0xFF, 0xD8])
     );
-    std::fs::remove_file(&path).ok();
+    assert!(dir.join(".a2a-lab-ot2/images.sqlite").exists());
+    std::fs::remove_dir_all(&dir).ok();
 }

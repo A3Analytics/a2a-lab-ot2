@@ -1,16 +1,17 @@
 //! Serve-mode image sources for the on-board and external cameras.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use a2a_lab_dev_kit::{A2aLabError, ImageSource, ImageTransportConfig};
+use a2a_lab_dev_kit::{A2aLabError, ImageSource, ImageSourceId, ImageTransportConfig};
 
 use crate::camera::{
-    CameraCapture, DEFAULT_EXTERNAL_CAMERA_DESCRIPTION, ExternalCamera,
+    CameraCapture, DEFAULT_EXTERNAL_CAMERA_DESCRIPTION, EXTERNAL_CAMERA_SOURCE_ID, ExternalCamera,
     external_camera_source_with_description,
 };
-use crate::images::{ImageCapture, ImageCatalogConfig, LiveImageCatalog};
-use crate::opentrons::{OpentronsCamera, opentrons_camera_source};
+use crate::images::{DEFAULT_IMAGE_HISTORY_DB, ImageCapture, ImageCatalogConfig, LiveImageCatalog};
+use crate::opentrons::{OPENTRONS_CAMERA_SOURCE_ID, OpentronsCamera, opentrons_camera_source};
 
 /// Default still-capture budget for both cameras.
 pub const DEFAULT_CAPTURE_TIMEOUT_MS: u64 = 10_000;
@@ -107,7 +108,7 @@ impl ImageServeConfig {
             None => "external-camera off".to_owned(),
         };
         format!(
-            "images       opentrons-camera asset opentrons-ot2; {external} timeout {}ms retention {} max-bytes {}",
+            "images       opentrons-camera asset opentrons-ot2; {external} timeout {}ms retention {} max-bytes {} history {DEFAULT_IMAGE_HISTORY_DB} age 7d",
             self.capture_timeout.as_millis(),
             self.retention_per_source,
             self.max_image_bytes()
@@ -151,6 +152,24 @@ pub fn image_catalog(
         sources,
         ImageCatalogConfig::new(config.retention_per_source, config.max_image_bytes())?,
     )
+}
+
+/// Builds the serve catalog and opens history for every configured camera.
+///
+/// Restoring history does not open either camera.
+pub async fn open_image_catalog(
+    opentrons_url: &str,
+    config: &ImageServeConfig,
+    external_capture: Option<Arc<dyn CameraCapture>>,
+) -> Result<LiveImageCatalog, A2aLabError> {
+    let catalog = image_catalog(opentrons_url, config, external_capture)?;
+    let mut sources = vec![ImageSourceId::new(OPENTRONS_CAMERA_SOURCE_ID)?];
+    if config.camera_index().is_some() {
+        sources.push(ImageSourceId::new(EXTERNAL_CAMERA_SOURCE_ID)?);
+    }
+    catalog
+        .with_persisted_sources(&sources, Path::new(DEFAULT_IMAGE_HISTORY_DB))
+        .await
 }
 
 fn capture_timeout(millis: u64) -> Result<Duration, A2aLabError> {
