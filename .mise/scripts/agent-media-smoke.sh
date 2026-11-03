@@ -94,18 +94,24 @@ def post(path, payload):
         return json.load(resp)
 
 
-def a2a_result(body, operation):
+def a2a_results(body, operation):
     task = body.get("task", body)
-    parts = [
-        part
-        for artifact in task.get("artifacts", [])
-        for part in artifact.get("parts", [])
-        if "data" in part
-    ]
-    data = parts[0]["data"]
-    if data.get("operation") != operation:
-        raise RuntimeError(f"expected {operation}, got {data.get('operation')}")
-    return data["result"]
+    found = []
+    for artifact in task.get("artifacts", []):
+        for part in artifact.get("parts", []):
+            data = part.get("data")
+            if not isinstance(data, dict) or "result" not in data:
+                continue
+            if data.get("operation") != operation:
+                raise RuntimeError(f"expected {operation}, got {data.get('operation')}")
+            found.append(data["result"])
+    if not found:
+        raise RuntimeError(f"{operation} returned no result")
+    return found
+
+
+def a2a_result(body, operation):
+    return a2a_results(body, operation)[0]
 
 
 def list_sources(kind):
@@ -131,8 +137,11 @@ def list_sources(kind):
             }
         },
     )
-    page = a2a_result(body, op)
-    return {item["id"] for item in page.get("items", [])}
+    return {
+        item["id"]
+        for result in a2a_results(body, op)
+        for item in result.get("items", [])
+    }
 
 
 def decode_image(result):
@@ -226,15 +235,36 @@ def follow_live(source_id):
     return a2a_result(body, "follow_video")
 
 
-def fetch_live_frame(path):
-    url = f"{origin}{path.rstrip('/')}/"
-    with urllib.request.urlopen(url, timeout=30) as resp:
-        chunk = resp.read(65536)
-    start = chunk.find(b"\xff\xd8\xff")
-    end = chunk.find(b"\xff\xd9", start + 3)
-    if start < 0 or end < 0:
-        raise RuntimeError("live gateway stream did not contain a JPEG")
-    return chunk[start : end + 2]
+def tight_jpeg(data):
+    start = data.find(b"\xff\xd8\xff")
+    end = data.rfind(b"\xff\xd9")
+    if start < 0 or end < start:
+        raise RuntimeError("payload is not a JPEG")
+    return data[start : end + 2]
+
+
+class LiveFrames:
+    def __init__(self, path):
+        self.resp = urllib.request.urlopen(f"{origin}{path.rstrip('/')}/", timeout=90)
+        self.buf = b""
+
+    def frame(self):
+        while True:
+            split = self.buf.find(b"\r\n\r\n")
+            if split >= 0:
+                header = self.buf[:split].decode("latin1", "replace")
+                length = None
+                for line in header.split("\r\n"):
+                    if line.lower().startswith("content-length:"):
+                        length = int(line.split(":", 1)[1].strip())
+                if length is not None and len(self.buf) >= split + 4 + length:
+                    payload = self.buf[split + 4 : split + 4 + length]
+                    self.buf = self.buf[split + 4 + length :]
+                    return tight_jpeg(payload)
+            chunk = self.resp.read(1024 * 1024)
+            if not chunk:
+                raise RuntimeError("live gateway stream did not contain a JPEG")
+            self.buf += chunk
 
 
 image_ids = list_sources("image")
@@ -261,18 +291,33 @@ for source_id in expected:
         path = follow.get("path") or ""
         if not path.startswith("/media/video-live/"):
             raise RuntimeError(f"unexpected follow path {path!r}")
-        first = fetch_live_frame(path)
-        time.sleep(2)
-        second = fetch_live_frame(path)
-        if first == second:
+        stream = LiveFrames(path)
+        previous = stream.frame()
+        reused_meta, reused = get_current(source_id, 5)
+        still = tight_jpeg(reused)
+        frames = [previous]
+        matched = previous == still
+        advanced = False
+        for _ in range(8):
+            nxt = stream.frame()
+            if nxt != frames[-1]:
+                advanced = True
+            frames.append(nxt)
+            if nxt == still:
+                matched = True
+            if matched and advanced:
+                break
+        if not matched:
+            raise RuntimeError("still JPEG was not reused on the live gateway")
+        if not advanced:
             raise RuntimeError("live gateway frame did not advance")
         verified[source_id] = {
-            "jpeg_bytes": len(live),
+            "jpeg_bytes": len(tight_jpeg(live)),
             "media_type": "image/jpeg",
-            "live_bytes_first": len(first),
-            "live_bytes_second": len(second),
+            "stored_id": image_id(reused_meta),
+            "live_frame_bytes": [len(frame) for frame in frames[:2]],
         }
-        print(f"{source_id}: verified JPEG {len(live)} bytes; live frames advanced")
+        print(f"{source_id}: verified JPEG {len(tight_jpeg(live))} bytes; live frames advanced")
     except Exception as error:  # noqa: BLE001
         failures.append(f"{source_id}: {error}")
         print(f"{source_id}: FAILED ({error})", file=sys.stderr)
