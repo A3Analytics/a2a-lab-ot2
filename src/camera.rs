@@ -130,7 +130,7 @@ impl CameraCapture for NativeCameraCapture {
 static LATEST_EXTERNAL_JPEG: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
 
 /// Stores the newest live JPEG so still capture can reuse the video session.
-pub(crate) fn remember_external_frame(bytes: Vec<u8>) {
+pub fn remember_external_frame(bytes: Vec<u8>) {
     if let Ok(mut slot) = LATEST_EXTERNAL_JPEG.lock() {
         *slot = Some(bytes);
     }

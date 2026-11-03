@@ -68,6 +68,7 @@ fn summary_tracks_the_external_index() {
     assert_eq!(off.summary(), "videos       off");
     let on = VideoServeConfig::new(Some(4), None, 4, 120, 1024).unwrap();
     assert!(on.summary().contains("external-camera index 4"));
+    assert!(on.summary().contains("memory 5s"));
 }
 
 #[test]
@@ -92,7 +93,7 @@ fn invalid_video_limits_fail_before_robot_contact() {
 async fn injected_external_camera_is_listed_and_followed() {
     let bytes = jpeg(2, 3);
     let config = VideoServeConfig::new(Some(4), None, 4, 2, 1024).unwrap();
-    let catalog = open_video_catalog(&config, Some(Box::new(Repeat(bytes))))
+    let catalog = open_video_catalog(&config, Some(Box::new(Repeat(bytes.clone()))), None)
         .await
         .unwrap()
         .expect("video on");
@@ -132,7 +133,7 @@ async fn injected_external_camera_is_listed_and_followed() {
 async fn video_skills_appear_on_the_shared_service() {
     let bytes = jpeg(4, 4);
     let config = VideoServeConfig::new(Some(4), None, 4, 2, 1024).unwrap();
-    let catalog = open_video_catalog(&config, Some(Box::new(Repeat(bytes))))
+    let catalog = open_video_catalog(&config, Some(Box::new(Repeat(bytes.clone()))), None)
         .await
         .unwrap()
         .unwrap();

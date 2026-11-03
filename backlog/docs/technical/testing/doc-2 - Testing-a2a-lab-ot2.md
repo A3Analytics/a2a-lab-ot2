@@ -134,6 +134,26 @@ Explicit non-goals for TASK-42: full DVR disk archive (`src/videos/archive.rs`,
 `persist.rs`, `scale.rs` on deploy), TASK-43–TASK-47 session/serve work, and
 any change under `a2a-lab-dev-kit-rs`.
 
+## Warm capture sessions and first-frame behavior (TASK-43)
+
+Each enabled native camera keeps one long-lived MJPEG session for live video.
+The external path uses Nokhwa after a thirty-frame settle period. The Orbbec
+path opens the SDK color pipeline once and waits up to twenty seconds for the
+first color frame on a cold start; later reads use a two-second per-frame
+budget on the same session. Service shutdown or catalog cancellation stops the
+pump threads and drops the native sessions so device handles are released.
+
+While a session is running, `get-current-image` for that source returns the
+latest validated JPEG published by the same session (via in-process frame
+memory) instead of opening a second capture session. Capture failures on one
+source do not stop the other.
+
+Hardware-free coverage lives in `tests/camera_warm_sessions.rs`. Injected
+`LiveJpegSource` producers stand in for Nokhwa and Orbbec SDK sessions. Those
+tests cover cold-start budget, sustained capture, exact still/live byte reuse,
+reconnect, cancellation, and independent failure without USB, Docker, or
+systemd.
+
 ## What the unit test suite covers
 
 Tests bind local listeners and a mock robot-server. They do not start the Docker simulator and they do not call Bedrock, OpenAI, or Anthropic.
@@ -150,6 +170,7 @@ Tests bind local listeners and a mock robot-server. They do not start the Docker
 | `tests/opentrons_camera_stream.rs` | Pinned v10.0.0 `GET /camera/stream` metadata, settings rejection, and proof that OT-2 has no ingestible native stream.                                                                                     |
 | `tests/external_camera.rs`    | Injected V4L2 grabs, `/dev/video4` as the default, and no video device opened by the suite.                                                                                                                     |
 | `tests/external_video.rs`     | External live video catalog defaults, invalid CLI limits, injected MJPEG follow, and shared A2A/MCP video skills.                                                                                               |
+| `tests/camera_warm_sessions.rs` | Warm external and Orbbec MJPEG sessions, twenty-second Orbbec cold start, still/live JPEG reuse, reconnect, shutdown, and independent source failure through injected producers.                              |
 | `tests/image_serve.rs`        | Serve limits, both source ids, readonly image reads, exact A2A skills, exact MCP tools, and restored camera history across A2A and MCP.                                                                         |
 | `tests/image_history.rs`      | Restart restoration for both cameras, per-source retention, seven-day expiry, corrupt and oversized history, failed capture, and no database creation when only sources are listed.                             |
 | `tests/image_parity.rs`       | The same camera calls compared across A2A and MCP.                                                                                                                                                              |

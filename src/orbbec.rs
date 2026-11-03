@@ -129,14 +129,12 @@ pub trait OrbbecCapture: Send + Sync {
 }
 
 /// Open Orbbec color pipeline that stays running for live video.
-#[allow(dead_code)] // wired when Orbbec live video lands after TASK-42
 pub(crate) struct NativeOrbbecJpeg {
     session: sdk::Session,
     max_bytes: u64,
     pending: Option<Vec<u8>>,
 }
 
-#[allow(dead_code)] // wired when Orbbec live video lands after TASK-42
 impl NativeOrbbecJpeg {
     pub(crate) fn open(serial: Option<&str>, max_bytes: u64) -> Result<Self, A2aLabError> {
         let mut session = sdk::open_color(serial, ORBBEC_FIRST_FRAME_WAIT, max_bytes)
@@ -208,7 +206,7 @@ impl OrbbecCapture for SdkOrbbecCapture {
 }
 
 /// Keeps the latest synchronized color JPEG for the next `orbbec-camera` read.
-pub(crate) fn remember_color_frame(bytes: Vec<u8>) {
+pub fn remember_color_frame(bytes: Vec<u8>) {
     if let Ok(mut slot) = COLOR_REUSE.lock() {
         *slot = Some(bytes);
     }
@@ -328,6 +326,9 @@ impl OrbbecCamera {
     }
 
     async fn read_frame(&self) -> Result<Vec<u8>, A2aLabError> {
+        if let Some(bytes) = take_remembered_color() {
+            return Ok(bytes);
+        }
         let capture = Arc::clone(&self.capture);
         let serial = self.serial.clone();
         let timeout = self.timeout;

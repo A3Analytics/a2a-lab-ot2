@@ -513,7 +513,7 @@ async fn prepare_serve_images(
 #[allow(clippy::cognitive_complexity)]
 async fn serve(mut lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (images, catalog, _history_maintenance) = prepare_serve_images(&lab, cli).await?;
-    let videos = prepare_serve_videos(cli).await?;
+    let videos = prepare_serve_videos(cli, &images).await?;
     let frame_sets = open_frame_sets(&images, &catalog, cli).await?;
     if let Some(api) = &frame_sets {
         lab = lab.with_frame_sets(Arc::clone(api));
@@ -608,9 +608,13 @@ async fn serve(mut lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::erro
 
 async fn prepare_serve_videos(
     cli: &Cli,
+    images: &ImageServeConfig,
 ) -> Result<Option<LiveVideoCatalog>, Box<dyn std::error::Error>> {
-    let videos_config = video_config(cli)?;
-    open_video_catalog(&videos_config, None)
+    let mut videos_config = video_config(cli)?;
+    if images.orbbec_enabled() {
+        videos_config = videos_config.with_orbbec(images.orbbec_serial())?;
+    }
+    open_video_catalog(&videos_config, None, None)
         .await
         .map_err(|error| startup_error("videos", error).into())
 }
