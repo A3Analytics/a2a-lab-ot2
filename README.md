@@ -24,17 +24,17 @@ The OT-2 robot-server is an a2a-lab. These operations are how a caller lists, ru
 | `search_images`      | Metadata matching a source, time range, and/or caption text              |
 | `get_image`          | One stored frame, inline                                                 |
 | `get_current_image`  | A newly captured frame from one source, inline                           |
-| `list_video_sources` | `external-camera` live MJPEG when a host camera index is set             |
-| `get_video_frame_at` | A retained live JPEG from that source                                    |
-| `get_video_clip`     | A finite retained clip                                                   |
-| `get_video_timeline` | Retained coverage for one source                                         |
-| `follow_video`       | Live follow in the packaged Videos UI                                    |
+| `list_video_sources` | `external-camera` and/or `orbbec-camera` when those native sources are enabled |
+| `get_video_frame_at` | A retained MJPEG frame from disk or the live window for one source              |
+| `get_video_clip`     | A finite retained clip from the indexed DVR                                     |
+| `get_video_timeline` | Retained coverage for one source                                                |
+| `follow_video`       | Live follow; playback bytes are served on `/media/video-live/` on the A2A host |
 
 `opentrons-camera` is the OT-2 on-board camera, asset `opentrons-ot2`. Current frames come from pinned robot-server `v10.0.0` `POST /camera/picture`. This agent does not call `GET /camera/stream`, does not enable the camera, and does not use the Flex live-stream service. OT-2 live streaming is unsupported. The operator enables the camera on the robot.
 
 `external-camera` is off unless you set `--external-camera-index` or `A2ALAB_EXTERNAL_CAMERA_INDEX` to a zero-based native camera index. Capture reads that camera directly and never goes through robot-server. Omitting the setting serves only `opentrons-camera`. Its description defaults to "Still frame from the configured external camera." Set `--external-camera-description` or `A2ALAB_EXTERNAL_CAMERA_DESCRIPTION` to replace that text. An empty description is rejected.
 
-When that index is set, serve also registers `external-camera` as a live video source. The packaged Videos UI can follow it in the single player (`--video-fps`, default 4; `--video-retention-secs`, default 120). The OT-2 onboard camera remains stills-only: `GET /camera/stream` is JSON metadata for the Flex live-stream service, which OT-2 does not run.
+When `--external-camera-index` or `--orbbec-camera` enables a native source, serve registers that source for live MJPEG and the indexed DVR. Each enabled source keeps an independent warm capture session. One source failing to start or capture does not remove the other. Live follow keeps five seconds of frames in memory per source (`--video-retention-secs`, default 5). The indexed DVR retains MJPEG on disk for three days by default (`--video-disk-retention-secs`) under `--video-dvr-root` (default `.a2a-lab-ot2/video-dvr`). Still-image history in `.a2a-lab-ot2/images.sqlite` remains capped by `--image-retention` and a separate thirty-day age limit. A2A and MCP return timeline, frame-at, clip, and follow metadata only; clip and live bytes are fetched from the authenticated `/media/video-clips/` and `/media/video-live/` routes on the same A2A listener through the dev-kit in-process gateway (no loopback A2A client to the process's own provider). The OT-2 onboard camera remains stills-only: `GET /camera/stream` is JSON metadata for the Flex live-stream service, which OT-2 does not run.
 
 A requested `opentrons-camera` or `external-camera` frame is stored in `.a2a-lab-ot2/images.sqlite`. The service user must be able to create that directory and write the database. `list_images` and `search_images` read this file and do not capture. Loading it does not open either camera.
 

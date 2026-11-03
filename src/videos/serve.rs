@@ -169,7 +169,11 @@ impl VideoServeConfig {
         if parts.is_empty() {
             "videos       off".to_owned()
         } else {
-            format!("videos       {}", parts.join("; "))
+            format!(
+                "videos       {} dvr {}",
+                parts.join("; "),
+                self.disk_root.display()
+            )
         }
     }
 }

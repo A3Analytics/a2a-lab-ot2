@@ -165,7 +165,8 @@ synthesizing gapless coverage; timeline intervals and discontinuities are
 derived from indexed segment starts and the source frame period.
 
 The live capture pump keeps a short in-memory window (default five seconds,
-`--video-retention-secs`) distinct from disk retention. Startup and hourly
+`--video-retention-secs`) distinct from disk retention (`--video-disk-retention-secs`,
+default three days under `--video-dvr-root`). Startup and hourly
 cleanup drop expired index rows, payload files, temp files, and orphaned clip
 handles per source without touching another source's tree. Clip and follow
 session TTLs remain bounded in memory; expired or missing media returns stable
@@ -177,6 +178,19 @@ starts.
 Hardware-free coverage lives in `tests/video_dvr.rs` (restart, source
 isolation, genuine gaps, paginated window reads, clip expiry, cleanup,
 partial files, and concurrent reads during writes).
+
+## Serve-mode video wiring (TASK-45)
+
+`serve` merges image and video configuration: Orbbec still capture also enables
+`orbbec-camera` live video when configured. `prepare_serve_videos` opens the
+indexed DVR catalog with native pumps (or stays off when no native source is
+enabled). The shared `A2aLabService` uses `with_videos`; A2A and MCP expose the
+same source list and metadata operations, while `A2aServer` serves
+`/media/video-*` through the dev-kit default in-process gateway.
+
+Hardware-free coverage lives in `tests/video_serve.rs` (CLI/env validation,
+startup summaries, disabled video, dual-source A2A/MCP parity, live gateway
+routes, and independent pump failure).
 
 ## What the unit test suite covers
 
@@ -196,6 +210,7 @@ Tests bind local listeners and a mock robot-server. They do not start the Docker
 | `tests/external_video.rs`     | External live video catalog defaults, invalid CLI limits, injected MJPEG follow, and shared A2A/MCP video skills.                                                                                               |
 | `tests/camera_warm_sessions.rs` | Warm external and Orbbec MJPEG sessions, twenty-second Orbbec cold start, still/live JPEG reuse, reconnect, shutdown, and independent source failure through injected producers.                              |
 | `tests/video_dvr.rs`          | Indexed disk DVR restart, source-isolated cleanup, gap vs outside-retention frame-at, paginated window reads, clip expiry, partial tmp recovery, and async read responsiveness.                               |
+| `tests/video_serve.rs`        | Serve video CLI and env defaults, startup summaries and DVR path, disabled video, dual-source A2A/MCP listing, in-process live gateway routes, and independent live pump failure (hardware-free).                 |
 | `tests/image_serve.rs`        | Serve limits, both source ids, readonly image reads, exact A2A skills, exact MCP tools, and restored camera history across A2A and MCP.                                                                         |
 | `tests/image_history.rs`      | Restart restoration for both cameras, per-source retention, seven-day expiry, corrupt and oversized history, failed capture, and no database creation when only sources are listed.                             |
 | `tests/image_parity.rs`       | The same camera calls compared across A2A and MCP.                                                                                                                                                              |

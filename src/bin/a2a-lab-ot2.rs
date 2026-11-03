@@ -19,12 +19,13 @@ use a2a_lab_dev_kit::{
 };
 use a2a_lab_ot2::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use a2a_lab_ot2::{
-    ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_IMAGE_RETENTION_PER_SOURCE,
-    DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS,
-    FixtureConfig, FixtureServer, FixtureVariant, ImageHistoryMaintenance, ImageServeConfig,
-    LabAgent, LiveImageCatalog, LiveVideoCatalog, ModelProvider, OidcConfig, OpentronsLab,
-    SilaConfig, VideoServeConfig, image_catalog, open_image_catalog, open_video_catalog,
-    prepare_sila, selected_model, sila_server, with_oidc,
+    ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_DISK_VIDEO_RETENTION_SECS,
+    DEFAULT_IMAGE_RETENTION_PER_SOURCE, DEFAULT_SILA_PORT, DEFAULT_SILA_UUID,
+    DEFAULT_VIDEO_DVR_ROOT, DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, FixtureConfig,
+    FixtureServer, FixtureVariant, ImageHistoryMaintenance, ImageServeConfig, LabAgent,
+    LiveImageCatalog, LiveVideoCatalog, ModelProvider, OidcConfig, OpentronsLab, SilaConfig,
+    VideoServeConfig, image_catalog, open_image_catalog, open_video_catalog, prepare_sila,
+    selected_model, sila_server, with_oidc,
 };
 use clap::{Parser, Subcommand};
 
@@ -192,13 +193,23 @@ struct Cli {
     /// Live video frames per second from the external camera. Zero is rejected.
     #[arg(long, env = "A2ALAB_VIDEO_FPS", default_value_t = DEFAULT_VIDEO_FPS)]
     video_fps: u32,
-    /// Seconds of live video retained for the external camera. Zero is rejected.
+    /// Seconds of live video retained in memory per enabled source. Zero is rejected.
     #[arg(
         long,
         env = "A2ALAB_VIDEO_RETENTION_SECS",
         default_value_t = DEFAULT_VIDEO_RETENTION_SECS
     )]
     video_retention_secs: u64,
+    /// Seconds of indexed DVR video retained on disk. Zero is rejected.
+    #[arg(
+        long,
+        env = "A2ALAB_VIDEO_DISK_RETENTION_SECS",
+        default_value_t = DEFAULT_DISK_VIDEO_RETENTION_SECS
+    )]
+    video_disk_retention_secs: u64,
+    /// Directory for indexed live-video payloads and the SQLite index.
+    #[arg(long, env = "A2ALAB_VIDEO_DVR_ROOT", default_value = DEFAULT_VIDEO_DVR_ROOT)]
+    video_dvr_root: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -446,7 +457,7 @@ fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
 
 fn prepare_images(cli: &Cli) -> Result<ImageServeConfig, Box<dyn std::error::Error>> {
     let images = image_config(cli)?;
-    let videos = video_config(cli)?;
+    let videos = merged_video_config(cli, &images)?;
     println!("{}", images.summary());
     println!("{}", videos.summary());
     if images.orbbec_enabled() {
@@ -610,13 +621,21 @@ async fn prepare_serve_videos(
     cli: &Cli,
     images: &ImageServeConfig,
 ) -> Result<Option<LiveVideoCatalog>, Box<dyn std::error::Error>> {
+    let videos_config = merged_video_config(cli, images)?;
+    open_video_catalog(&videos_config, None, None)
+        .await
+        .map_err(|error| startup_error("videos", error).into())
+}
+
+fn merged_video_config(
+    cli: &Cli,
+    images: &ImageServeConfig,
+) -> Result<VideoServeConfig, a2a_lab_dev_kit::A2aLabError> {
     let mut videos_config = video_config(cli)?;
     if images.orbbec_enabled() {
         videos_config = videos_config.with_orbbec(images.orbbec_serial())?;
     }
-    open_video_catalog(&videos_config, None, None)
-        .await
-        .map_err(|error| startup_error("videos", error).into())
+    Ok(videos_config)
 }
 
 fn share_with_videos(
@@ -840,11 +859,13 @@ fn mcp_task_error(
 }
 
 fn video_config(cli: &Cli) -> Result<VideoServeConfig, a2a_lab_dev_kit::A2aLabError> {
-    VideoServeConfig::new(
+    VideoServeConfig::with_disk(
         cli.external_camera_index,
         Some(cli.external_camera_description.as_str()),
         cli.video_fps,
         cli.video_retention_secs,
+        cli.video_disk_retention_secs,
+        cli.video_dvr_root.clone(),
         cli.max_image_bytes,
     )
 }

@@ -9,7 +9,9 @@ use a2a_lab_dev_kit::{
     VideoSourceId,
 };
 use a2a_lab_ot2::camera::EXTERNAL_CAMERA_SOURCE_ID;
-use a2a_lab_ot2::{LiveJpegSource, VideoServeConfig, open_video_catalog};
+use a2a_lab_ot2::{
+    DEFAULT_DISK_VIDEO_RETENTION_SECS, LiveJpegSource, VideoServeConfig, open_video_catalog,
+};
 
 fn jpeg(width: u16, height: u16) -> Vec<u8> {
     let mut data = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08];
@@ -38,6 +40,9 @@ fn help_lists_video_defaults() {
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("--video-fps"));
     assert!(help.contains("--video-retention-secs"));
+    assert!(help.contains("--video-disk-retention-secs"));
+    assert!(help.contains("--video-dvr-root"));
+    assert!(help.contains(&a2a_lab_ot2::DEFAULT_VIDEO_RETENTION_SECS.to_string()));
 }
 
 #[test]
@@ -69,7 +74,11 @@ fn summary_tracks_the_external_index() {
     let on = VideoServeConfig::new(Some(4), None, 4, 120, 1024).unwrap();
     assert!(on.summary().contains("external-camera index 4"));
     assert!(on.summary().contains("memory 120s"));
-    assert!(on.summary().contains("disk"));
+    assert!(
+        on.summary()
+            .contains(&format!("disk {DEFAULT_DISK_VIDEO_RETENTION_SECS}s"))
+    );
+    assert!(on.summary().contains("dvr "));
 }
 
 #[test]
@@ -77,6 +86,7 @@ fn invalid_video_limits_fail_before_robot_contact() {
     for args in [
         vec!["--video-fps", "0"],
         vec!["--video-retention-secs", "0"],
+        vec!["--video-disk-retention-secs", "0"],
     ] {
         let output = bin()
             .env("A2ALAB_OPENTRONS_URL", "http://127.0.0.1:9")
