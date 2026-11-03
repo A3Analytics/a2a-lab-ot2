@@ -1,5 +1,7 @@
 //! Serve-mode video configuration for native cameras.
 
+use std::path::{Path, PathBuf};
+
 use a2a_lab_dev_kit::A2aLabError;
 
 use crate::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
@@ -7,12 +9,15 @@ use crate::videos::catalog::{
     ExternalVideoConfig, LiveVideoCatalog, LiveVideoInjections, OrbbecVideoConfig,
     start_live_videos,
 };
+use crate::videos::dvr::DEFAULT_DISK_VIDEO_RETENTION_SECS;
 use crate::videos::external::LiveJpegSource;
 
 /// Default live catalog frame rate.
 pub const DEFAULT_VIDEO_FPS: u32 = 4;
-/// Default catalog retention flag for CLI validation; live memory uses five seconds.
-pub const DEFAULT_VIDEO_RETENTION_SECS: u64 = 120;
+/// Default in-memory live window (distinct from disk retention).
+pub const DEFAULT_LIVE_VIDEO_MEMORY_SECS: u64 = 5;
+/// Default in-memory retention passed to CLI (`--video-retention-secs`).
+pub const DEFAULT_VIDEO_RETENTION_SECS: u64 = DEFAULT_LIVE_VIDEO_MEMORY_SECS;
 
 /// Orbbec device selection for live video.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +32,9 @@ pub struct VideoServeConfig {
     description: String,
     orbbec: Option<OrbbecVideoSelection>,
     fps: u32,
-    retention_secs: u64,
+    live_retention_secs: u64,
+    disk_retention_secs: u64,
+    disk_root: PathBuf,
     max_image_bytes: u64,
 }
 
@@ -37,7 +44,28 @@ impl VideoServeConfig {
         camera_index: Option<u32>,
         description: Option<&str>,
         fps: u32,
-        retention_secs: u64,
+        live_retention_secs: u64,
+        max_image_bytes: u64,
+    ) -> Result<Self, A2aLabError> {
+        Self::with_disk(
+            camera_index,
+            description,
+            fps,
+            live_retention_secs,
+            DEFAULT_DISK_VIDEO_RETENTION_SECS,
+            PathBuf::from(crate::videos::dvr::DEFAULT_VIDEO_DVR_ROOT),
+            max_image_bytes,
+        )
+    }
+
+    /// Full configuration including indexed disk retention and storage root.
+    pub fn with_disk(
+        camera_index: Option<u32>,
+        description: Option<&str>,
+        fps: u32,
+        live_retention_secs: u64,
+        disk_retention_secs: u64,
+        disk_root: PathBuf,
         max_image_bytes: u64,
     ) -> Result<Self, A2aLabError> {
         if fps == 0 {
@@ -46,11 +74,20 @@ impl VideoServeConfig {
                 "must be greater than zero",
             ));
         }
-        if retention_secs == 0 {
+        if live_retention_secs == 0 {
             return Err(A2aLabError::invalid(
                 "video_retention_secs",
                 "must be greater than zero",
             ));
+        }
+        if disk_retention_secs == 0 {
+            return Err(A2aLabError::invalid(
+                "video_disk_retention_secs",
+                "must be greater than zero",
+            ));
+        }
+        if disk_root.as_os_str().is_empty() {
+            return Err(A2aLabError::invalid("video_dvr_root", "must not be empty"));
         }
         let description = match description {
             None => DEFAULT_EXTERNAL_CAMERA_DESCRIPTION.to_owned(),
@@ -62,7 +99,9 @@ impl VideoServeConfig {
             description,
             orbbec: None,
             fps,
-            retention_secs,
+            live_retention_secs,
+            disk_retention_secs,
+            disk_root,
             max_image_bytes,
         })
     }
@@ -90,15 +129,29 @@ impl VideoServeConfig {
         self.orbbec.is_some()
     }
 
+    #[must_use]
+    pub fn disk_root(&self) -> &Path {
+        &self.disk_root
+    }
+
+    #[must_use]
+    pub const fn disk_retention_secs(&self) -> u64 {
+        self.disk_retention_secs
+    }
+
+    #[must_use]
+    pub const fn live_retention_secs(&self) -> u64 {
+        self.live_retention_secs
+    }
+
     /// One startup line.
     #[must_use]
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         if let Some(index) = self.camera_index {
             parts.push(format!(
-                "external-camera index {index} fps {} memory {}s",
-                self.fps,
-                crate::videos::catalog::LIVE_MEMORY_SECS
+                "external-camera index {index} fps {} memory {}s disk {}s",
+                self.fps, self.live_retention_secs, self.disk_retention_secs
             ));
         }
         if self.orbbec.is_some() {
@@ -108,7 +161,10 @@ impl VideoServeConfig {
                 .and_then(|selection| selection.serial.as_deref())
                 .map(|value| format!(" serial {value}"))
                 .unwrap_or_default();
-            parts.push(format!("orbbec-camera{serial} fps {}", self.fps));
+            parts.push(format!(
+                "orbbec-camera{serial} fps {} memory {}s disk {}s",
+                self.fps, self.live_retention_secs, self.disk_retention_secs
+            ));
         }
         if parts.is_empty() {
             "videos       off".to_owned()
@@ -139,6 +195,9 @@ pub async fn open_video_catalog(
             external,
             orbbec,
             config.fps,
+            config.live_retention_secs,
+            config.disk_retention_secs,
+            &config.disk_root,
             config.max_image_bytes,
             LiveVideoInjections {
                 external: external_source,

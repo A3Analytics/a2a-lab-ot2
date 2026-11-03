@@ -1,5 +1,6 @@
 //! Warm capture sessions, still/live reuse, and independent camera failure.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,6 +32,17 @@ fn jpeg(width: u16, height: u16, marker: u8) -> Vec<u8> {
 
 fn page() -> PageRequest {
     PageRequest::new(None, 10).unwrap()
+}
+
+fn temp_dvr() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "a2a-lab-ot2-warm-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ))
 }
 
 struct RepeatJpeg {
@@ -185,6 +197,9 @@ async fn external_live_session_pumps_multiple_frames_before_shutdown() {
         }),
         None,
         30,
+        5,
+        86_400,
+        &temp_dvr(),
         1024,
         LiveVideoInjections {
             external: Some(Box::new(RepeatJpeg {
@@ -214,6 +229,9 @@ async fn external_still_reuses_live_session_without_second_open() {
         }),
         None,
         30,
+        5,
+        86_400,
+        &temp_dvr(),
         1024,
         LiveVideoInjections {
             external: Some(Box::new(RememberingExternal {
@@ -320,6 +338,9 @@ async fn external_live_reconnects_after_transient_disconnect() {
         }),
         None,
         30,
+        5,
+        86_400,
+        &temp_dvr(),
         1024,
         LiveVideoInjections {
             external: Some(Box::new(FlakyExternal {
@@ -345,6 +366,9 @@ async fn shutdown_stops_live_capture_without_leaking_threads() {
         }),
         None,
         30,
+        5,
+        86_400,
+        &temp_dvr(),
         1024,
         LiveVideoInjections {
             external: Some(Box::new(RememberingExternal {
@@ -370,6 +394,9 @@ async fn orbbec_live_survives_external_failure() {
         }),
         Some(OrbbecVideoConfig { serial: None }),
         30,
+        5,
+        86_400,
+        &temp_dvr(),
         1024,
         LiveVideoInjections {
             external: Some(Box::new(FailExternal)),
@@ -451,6 +478,9 @@ async fn orbbec_live_and_still_share_exact_bytes_from_session() {
         None,
         Some(OrbbecVideoConfig { serial: None }),
         30,
+        5,
+        86_400,
+        &temp_dvr(),
         1024,
         LiveVideoInjections {
             external: None,

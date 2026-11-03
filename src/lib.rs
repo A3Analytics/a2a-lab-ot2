@@ -36,7 +36,8 @@ pub use sila::{
     DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, PreparedSila, SilaConfig, prepare_sila, sila_server,
 };
 pub use videos::{
-    DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, ExternalVideoConfig, LiveJpegSource,
-    LiveVideoCatalog, LiveVideoInjections, OrbbecVideoConfig, VideoServeConfig, open_video_catalog,
-    start_live_videos,
+    DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_LIVE_VIDEO_MEMORY_SECS, DEFAULT_VIDEO_DVR_ROOT,
+    DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, ExternalVideoConfig, IndexedVideoDvr,
+    LiveJpegSource, LiveVideoCatalog, LiveVideoInjections, OrbbecVideoConfig, VideoDvrCatalog,
+    VideoServeConfig, open_video_catalog, start_live_videos,
 };

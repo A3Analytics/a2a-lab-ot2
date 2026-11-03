@@ -68,7 +68,8 @@ fn summary_tracks_the_external_index() {
     assert_eq!(off.summary(), "videos       off");
     let on = VideoServeConfig::new(Some(4), None, 4, 120, 1024).unwrap();
     assert!(on.summary().contains("external-camera index 4"));
-    assert!(on.summary().contains("memory 5s"));
+    assert!(on.summary().contains("memory 120s"));
+    assert!(on.summary().contains("disk"));
 }
 
 #[test]
@@ -89,10 +90,28 @@ fn invalid_video_limits_fail_before_robot_contact() {
     }
 }
 
+fn isolated_config(live_retention_secs: u64, max_bytes: u64) -> VideoServeConfig {
+    let dir = std::env::temp_dir().join(format!(
+        "a2a-lab-ot2-video-serve-{}-{}",
+        std::process::id(),
+        live_retention_secs
+    ));
+    VideoServeConfig::with_disk(
+        Some(4),
+        None,
+        4,
+        live_retention_secs,
+        86_400,
+        dir,
+        max_bytes,
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn injected_external_camera_is_listed_and_followed() {
     let bytes = jpeg(2, 3);
-    let config = VideoServeConfig::new(Some(4), None, 4, 2, 1024).unwrap();
+    let config = isolated_config(2, 1024);
     let catalog = open_video_catalog(&config, Some(Box::new(Repeat(bytes.clone()))), None)
         .await
         .unwrap()
@@ -132,7 +151,7 @@ async fn injected_external_camera_is_listed_and_followed() {
 #[tokio::test]
 async fn video_skills_appear_on_the_shared_service() {
     let bytes = jpeg(4, 4);
-    let config = VideoServeConfig::new(Some(4), None, 4, 2, 1024).unwrap();
+    let config = isolated_config(2, 1024);
     let catalog = open_video_catalog(&config, Some(Box::new(Repeat(bytes.clone()))), None)
         .await
         .unwrap()
