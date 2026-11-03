@@ -121,8 +121,61 @@ build_agent_run_args() {
       args+=(--device "${device}:${device}")
     done
   fi
+  if [[ -n "${A2ALAB_EXTERNAL_CAMERA_INDEX:-}" ]]; then
+    args+=(-e "A2ALAB_EXTERNAL_CAMERA_INDEX=${A2ALAB_EXTERNAL_CAMERA_INDEX}")
+  fi
+  if [[ -n "${A2ALAB_EXTERNAL_CAMERA_DESCRIPTION:-}" ]]; then
+    args+=(-e "A2ALAB_EXTERNAL_CAMERA_DESCRIPTION=${A2ALAB_EXTERNAL_CAMERA_DESCRIPTION}")
+  fi
+  if [[ -n "${A2ALAB_EXTERNAL_VIDEO_DEVICES:-}" ]]; then
+    local device
+    local devices="${A2ALAB_EXTERNAL_VIDEO_DEVICES//,/ }"
+    for device in $devices; do
+      args+=(--device "${device}:${device}")
+    done
+  fi
+  if [[ -n "${A2ALAB_VIDEO_FPS:-}" ]]; then
+    args+=(-e "A2ALAB_VIDEO_FPS=${A2ALAB_VIDEO_FPS}")
+  fi
+  if [[ -n "${A2ALAB_VIDEO_RETENTION_SECS:-}" ]]; then
+    args+=(-e "A2ALAB_VIDEO_RETENTION_SECS=${A2ALAB_VIDEO_RETENTION_SECS}")
+  fi
+  if [[ -n "${A2ALAB_VIDEO_DISK_RETENTION_SECS:-}" ]]; then
+    args+=(-e "A2ALAB_VIDEO_DISK_RETENTION_SECS=${A2ALAB_VIDEO_DISK_RETENTION_SECS}")
+  fi
+  if [[ -n "${A2ALAB_VIDEO_DVR_ROOT:-}" ]]; then
+    args+=(-e "A2ALAB_VIDEO_DVR_ROOT=${A2ALAB_VIDEO_DVR_ROOT}")
+  fi
+  if [[ -n "${A2ALAB_IMAGE_RETENTION:-}" ]]; then
+    args+=(-e "A2ALAB_IMAGE_RETENTION=${A2ALAB_IMAGE_RETENTION}")
+  fi
   args+=("$image")
   printf '%s\n' "${args[@]}"
+}
+
+agent_default_state_dir() {
+  printf '%s\n' "${A2ALAB_STATE_DIR:-$(agent_root)/.a2a-lab-ot2-agent}"
+}
+
+agent_retention_policy_summary() {
+  cat <<'EOF'
+live video memory retention: 5 seconds per enabled source (A2ALAB_VIDEO_RETENTION_SECS default)
+indexed disk video retention: 259200 seconds (3 days) (A2ALAB_VIDEO_DISK_RETENTION_SECS default)
+still-image age retention: 30 days with per-source count cap (A2ALAB_IMAGE_RETENTION default)
+persistent state mount: /var/lib/a2a-lab-ot2 (images.sqlite, video-dvr/, frame-sets.sqlite, conversation db)
+EOF
+}
+
+print_agent_rollback_instructions() {
+  local state="${1:-$(agent_default_state_dir)}"
+  cat <<EOF
+Rollback without deleting retained media:
+1. Stop the agent container: mise run agent-stop (SIGTERM, then remove the container).
+2. Keep the host state directory intact: ${state}
+3. Do not delete images.sqlite, video-dvr/, or frame-sets.sqlite under that directory.
+4. Fix the reported device, permission, or SDK issue, then rerun mise run agent-run.
+5. To revert the container image only, rebuild with mise run agent-image and restart; retained files stay on the host mount.
+EOF
 }
 
 validate_agent_run() {

@@ -221,7 +221,7 @@ Tests bind local listeners and a mock robot-server. They do not start the Docker
 | `tests/frame_set_service.rs`  | A2A task results, media URLs, one-capture color reuse, and two fake backends. No RealSense SDK.                                                                                                                 |
 | `tests/camera_backend.rs`     | Camera selection and the Orbbec color adapter.                                                                                                                                                                  |
 | `tests/image_contract.rs`     | Shared image-source contract for `opentrons-camera`, `external-camera`, and `orbbec-camera`, including A2A and MCP parity.                                                                                      |
-| `tests/agent_image.rs`        | Agent image script checks for architecture, checksum, USB arguments, and writable state. No Docker and no camera.                                                                                               |
+| `tests/agent_image.rs`        | Agent image script checks for architecture, checksum, USB arguments, writable state, and media-smoke skip/rollback helpers. No Docker and no camera.                                                                                               |
 | `tests/image_demo.rs`         | `list-image-sources` and a saved current JPEG without a camera or the simulator.                                                                                                                                |
 | `tests/support/mod.rs`        | The mock robot-server used by the suite.                                                                                                                                                                        |
 
@@ -268,6 +268,22 @@ A successful run prints:
 ```text
 smoke ok
 ```
+
+## Agent deployment and dual-source media smoke
+
+`mise run quality` does not build the agent image, start the agent container, or open cameras. Hardware-free script checks live in `tests/agent_image.rs` (`agent-image-self-test.sh` and `agent-media-smoke-self-test.sh`).
+
+| Task | Effect |
+| ---- | ------ |
+| `mise run agent-image` / `agent-image-all` | Build pinned Orbbec-enabled agent images. |
+| `mise run agent-image-verify-all` | Verify image contents without a camera. |
+| `mise run agent-run` | Start the agent container with explicit USB and optional external camera device passthrough, non-root user, and writable `A2ALAB_STATE_DIR`. |
+| `mise run agent-stop` | Graceful stop; rollback text preserves retained SQLite and DVR files on the mount. |
+| `mise run agent-media-smoke` | Skipped unless `A2ALAB_MEDIA_SMOKE=1`. Verifies both configured sources over A2A/MCP and `/media/video-live/`, still/live reuse, restart recovery, and prints retention policy evidence. |
+| `mise run agent-media-smoke-native` | Skipped unless `A2ALAB_MEDIA_SMOKE=1` and `A2ALAB_MEDIA_SMOKE_NATIVE=1`. Host-native `serve` check for `external-camera` when container devices are unavailable (for example macOS). |
+| `A2ALAB_ORBBEC_LIVE=1 mise run agent-orbbec-live` | Single Orbbec JPEG capture inside a one-shot container. |
+
+Expected smoke evidence (no device identifiers in git): JPEG byte counts and `image/jpeg` for each verified source, advancing live MJPEG reads, matching stored still bytes, non-empty DVR timelines after restart, and printed policy lines for 5 s live memory, 259200 s disk video, and 30 d still history.
 
 ## Troubleshooting
 

@@ -107,6 +107,58 @@ A2ALAB_EXTERNAL_CAMERA_INDEX=4 mise run start
 mise run a2a-lab-ot2-example
 ```
 
+## Orbbec color camera
+
+`orbbec-camera` is off unless `--orbbec-camera`, `A2ALAB_ORBBEC_CAMERA=true`, or `--camera-backend orbbec` is set. It captures MJPEG color frames through Orbbec SDK `2.10.6`. The device is not opened until capture or live video starts. Orbbec still capture also enables `orbbec-camera` live video and the indexed DVR when configured.
+
+Omit `--orbbec-serial` / `A2ALAB_ORBBEC_SERIAL` to use the only connected device. A missing device, permission failure, or unsupported profile returns an error naming `orbbec-camera` without affecting `external-camera`.
+
+## Agent image deployment
+
+`a2a-lab-ot2-agent` is separate from `a2a-lab-ot2-sim`. The simulator remains pinned robot-server `v10.0.0` and does not contain the agent or a camera SDK. The agent image is published for `linux/amd64` and `linux/arm64` with the release binary and Orbbec SDK `v2.10.6` runtime from pinned Linux tarballs (checksum verified at build time). It does not use `--privileged` or host networking.
+
+```bash
+mise run agent-image -- arm64
+mise run agent-image-verify-all
+```
+
+Application state is the `/var/lib/a2a-lab-ot2` mount (`A2ALAB_STATE_DIR` on the host). The process writes `images.sqlite`, `video-dvr/`, `frame-sets.sqlite`, and the conversation database under that directory. The directory must be writable by the user that starts the container.
+
+Dual-source deployment passes explicit device access and camera settings:
+
+```bash
+A2ALAB_OPENTRONS_URL=http://host.docker.internal:31950 \
+A2ALAB_ORBBEC_CAMERA=true \
+A2ALAB_ORBBEC_USB_DEVICES=/dev/bus/usb/001/002 \
+A2ALAB_EXTERNAL_CAMERA_INDEX=4 \
+A2ALAB_EXTERNAL_VIDEO_DEVICES=/dev/video4 \
+A2ALAB_STATE_DIR=$PWD/.a2a-lab-ot2-agent \
+mise run agent-run
+```
+
+`mise run agent-stop` sends SIGTERM, removes the container, and prints rollback steps that preserve retained image and video files on the host mount. Fix missing USB nodes, SDK mismatch, or storage permission errors using the script diagnostics; do not delete the state directory to roll back.
+
+Opt-in media verification (not part of `mise run quality`):
+
+```bash
+# Linux agent container with both sources configured:
+A2ALAB_MEDIA_SMOKE=1 \
+A2ALAB_ORBBEC_CAMERA=true \
+A2ALAB_ORBBEC_USB_DEVICES=/dev/bus/usb/001/002 \
+A2ALAB_EXTERNAL_CAMERA_INDEX=4 \
+A2ALAB_EXTERNAL_VIDEO_DEVICES=/dev/video4 \
+mise run agent-media-smoke
+
+# Native serve on the host (external-camera only on macOS):
+A2ALAB_MEDIA_SMOKE=1 A2ALAB_MEDIA_SMOKE_NATIVE=1 \
+A2ALAB_EXTERNAL_CAMERA_INDEX=0 \
+mise run agent-media-smoke-native
+```
+
+The smoke check allows up to 20 seconds for the first Orbbec frame, verifies advancing live MJPEG on `/media/video-live/`, confirms `get_image` matches `get_current_image` for each verified source, restarts the agent to prove indexed DVR history survives, and prints retention policy values (5 s live memory, 259200 s disk video, 30 d still history). Each source failure is reported independently.
+
+Install the image udev rules on Linux hosts that use Orbbec USB, reload udev, replug the camera, and pass the resulting device node in `A2ALAB_ORBBEC_USB_DEVICES`.
+
 ## Choose an external camera
 
 Use the built-in inventory command for your operating system to identify candidate cameras:

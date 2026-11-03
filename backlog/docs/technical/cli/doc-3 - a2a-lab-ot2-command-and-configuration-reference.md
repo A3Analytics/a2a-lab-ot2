@@ -211,4 +211,17 @@ Expected camera outcomes:
 | Real OT-2                                   | `POST /camera/picture` returns a JPEG when the operator has enabled the on-board camera. This agent does not change that setting.         |
 | Linux host with `--v4l2-device /dev/video4` | `external-camera` returns a JPEG from that device and does not call robot-server. Without the setting, that source is not listed.         |
 
-See the [README](../../../../README.md) for the simulator and hardware quickstarts, and [doc-2](<../testing/doc-2 - Testing-a2a-lab-ot2.md>) for the test and smoke tasks.
+See the [README](../../../../README.md) for the simulator and hardware quickstarts, agent deployment, opt-in media smoke, and [doc-2](<../testing/doc-2 - Testing-a2a-lab-ot2.md>) for the test and smoke tasks.
+
+## Agent container environment
+
+| Variable | Role |
+| -------- | ---- |
+| `A2ALAB_STATE_DIR` | Host directory mounted at `/var/lib/a2a-lab-ot2` (images, DVR, frame sets, conversation). |
+| `A2ALAB_ORBBEC_CAMERA` / `A2ALAB_ORBBEC_USB_DEVICES` | Enable Orbbec capture with explicit USB device nodes (no `--privileged`). |
+| `A2ALAB_EXTERNAL_CAMERA_INDEX` | Enable `external-camera` and matching live video inside the container. |
+| `A2ALAB_EXTERNAL_VIDEO_DEVICES` | Optional V4L2 nodes passed through as `--device` entries. |
+| `A2ALAB_VIDEO_RETENTION_SECS` | In-memory live window (default 5). |
+| `A2ALAB_VIDEO_DISK_RETENTION_SECS` | Indexed disk DVR retention (default 259200). |
+| `A2ALAB_IMAGE_RETENTION` | Per-source still count cap with 30-day age cleanup. |
+| `A2ALAB_MEDIA_SMOKE` | Opt-in dual-source verification (`mise run agent-media-smoke`). |
