@@ -270,7 +270,7 @@ class LiveFrames:
 image_ids = list_sources("image")
 video_ids = list_sources("video")
 expected = [item.strip() for item in __import__("os").environ.get(
-    "A2ALAB_MEDIA_SMOKE_SOURCES", "external-camera,orbbec-camera"
+    "A2ALAB_MEDIA_SMOKE_SOURCES", "external-camera,camera"
 ).split(",") if item.strip()]
 failures = []
 verified = {}
@@ -281,7 +281,7 @@ for source_id in expected:
             raise RuntimeError("missing from list_image_sources")
         if source_id not in video_ids:
             raise RuntimeError("missing from list_video_sources")
-        wait = 25 if source_id == "orbbec-camera" else 15
+        wait = 15
         meta, live = get_current(source_id, wait)
         stored_id = image_id(meta)
         stored = get_stored(stored_id)

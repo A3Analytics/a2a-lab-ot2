@@ -147,27 +147,12 @@ struct Cli {
         default_value = DEFAULT_EXTERNAL_CAMERA_DESCRIPTION
     )]
     external_camera_description: String,
-    /// Enable `orbbec-camera` color capture through Orbbec SDK.
+    /// V4L2 index that enables source `camera`.
     ///
-    /// Omit this to leave the source off. The device is not opened until a current
-    /// image is requested.
-    #[arg(long, env = "A2ALAB_ORBBEC_CAMERA", default_value_t = false)]
-    orbbec_camera: bool,
-    /// Serial number of the Orbbec device used by `orbbec-camera`.
-    ///
-    /// Requires Orbbec color capture. Omit it to use the only connected device.
-    /// An empty value is rejected.
-    #[arg(long, env = "A2ALAB_ORBBEC_SERIAL")]
-    orbbec_serial: Option<String>,
-    /// Camera backend for frame-set and legacy Orbbec color capture.
-    ///
-    /// `orbbec` enables the same source as `--orbbec-camera`. Omit both to leave
-    /// that source off. The SDK is not loaded until a capture is requested.
-    #[arg(long, env = "A2ALAB_CAMERA_BACKEND")]
-    camera_backend: Option<String>,
-    /// Serial used by `--camera-backend`. An empty value is rejected.
-    #[arg(long, env = "A2ALAB_CAMERA_SERIAL")]
-    camera_serial: Option<String>,
+    /// Live video opens the closest 1280x720 MJPEG mode. Still capture reuses the
+    /// latest JPEG from that pump and does not open the device again.
+    #[arg(long, env = "A2ALAB_CAMERA_INDEX")]
+    camera_index: Option<u32>,
     /// SQLite file for synchronized frame sets.
     #[arg(
         long,
@@ -262,7 +247,7 @@ enum Command {
     ListImageSources,
     /// `get_current_image` for one camera, written to a file
     GetCurrentImage {
-        /// `opentrons-camera`, `external-camera`, or `orbbec-camera`
+        /// `opentrons-camera`, `external-camera`, or `camera`
         #[arg(long)]
         source: String,
         /// File that receives the JPEG bytes
@@ -278,8 +263,6 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Print the loaded Orbbec SDK version
-    OrbbecSdkVersion,
     /// `query_logs` (omit sources to merge every advertised source into one stream)
     QueryLogs { source_ids: Vec<String> },
     /// `query_metric` (omit to query every metric)
@@ -335,9 +318,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
     }
-    if let Command::OrbbecSdkVersion = &command {
-        return print_orbbec_sdk_version();
-    }
     if let Command::Fixture {
         a2a_port,
         mcp_port,
@@ -389,7 +369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
-        Command::Fixture { .. } | Command::AgentMessage { .. } | Command::OrbbecSdkVersion => {
+        Command::Fixture { .. } | Command::AgentMessage { .. } => {
             unreachable!("handled before the lab client connects");
         }
         Command::Engine {
@@ -457,44 +437,11 @@ fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
 
 fn prepare_images(cli: &Cli) -> Result<ImageServeConfig, Box<dyn std::error::Error>> {
     let images = image_config(cli)?;
-    let videos = merged_video_config(cli, &images)?;
+    let videos = merged_video_config(cli)?;
     println!("{}", images.summary());
     println!("{}", videos.summary());
-    if images.orbbec_enabled() {
-        println!(
-            "frame sets   http://{}:{}/ot2/frame-sets/ui",
-            cli.a2alab_listen_host, cli.frame_set_port
-        );
-    } else {
-        println!("frame sets   off");
-    }
+    println!("frame sets   off");
     Ok(images)
-}
-
-async fn open_frame_sets(
-    images: &ImageServeConfig,
-    catalog: &LiveImageCatalog,
-    cli: &Cli,
-) -> Result<Option<Arc<a2a_lab_ot2::frame_set_service::FrameSetApi>>, Box<dyn std::error::Error>> {
-    if !images.orbbec_enabled() {
-        return Ok(None);
-    }
-    let retention = usize::try_from(cli.frame_set_retention).unwrap_or(usize::MAX);
-    let origin = format!("http://{}:{}", cli.a2alab_listen_host, cli.frame_set_port);
-    let capture = Arc::new(a2a_lab_ot2::cameras::OrbbecFrameCapture::sdk(
-        images.orbbec_serial(),
-    ));
-    let api = a2a_lab_ot2::frame_set_service::FrameSetApi::open(
-        &cli.frame_set_db,
-        capture,
-        retention.max(1),
-        images.max_image_bytes(),
-        origin,
-        Some(catalog.clone()),
-    )
-    .await
-    .map_err(|error| startup_error("frame sets", error))?;
-    Ok(Some(Arc::new(api)))
 }
 
 async fn prepare_serve_images(
@@ -514,18 +461,18 @@ async fn prepare_serve_images(
         .health()
         .await
         .map_err(|error| startup_error(&opentrons, error))?;
-    let catalog = open_image_catalog(&cli.opentrons_url, &images, None, None)
+    let catalog = open_image_catalog(&cli.opentrons_url, &images, None)
         .await
         .map_err(|error| startup_error("images", error))?;
     let maintenance = catalog.maintain_history();
     Ok((images, catalog, maintenance))
 }
 
-#[allow(clippy::cognitive_complexity)]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 async fn serve(mut lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (images, catalog, _history_maintenance) = prepare_serve_images(&lab, cli).await?;
-    let videos = prepare_serve_videos(cli, &images).await?;
-    let frame_sets = open_frame_sets(&images, &catalog, cli).await?;
+    let videos = prepare_serve_videos(cli).await?;
+    let frame_sets = None;
     if let Some(api) = &frame_sets {
         lab = lab.with_frame_sets(Arc::clone(api));
     }
@@ -619,21 +566,17 @@ async fn serve(mut lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::erro
 
 async fn prepare_serve_videos(
     cli: &Cli,
-    images: &ImageServeConfig,
 ) -> Result<Option<LiveVideoCatalog>, Box<dyn std::error::Error>> {
-    let videos_config = merged_video_config(cli, images)?;
+    let videos_config = merged_video_config(cli)?;
     open_video_catalog(&videos_config, None, None)
         .await
         .map_err(|error| startup_error("videos", error).into())
 }
 
-fn merged_video_config(
-    cli: &Cli,
-    images: &ImageServeConfig,
-) -> Result<VideoServeConfig, a2a_lab_dev_kit::A2aLabError> {
+fn merged_video_config(cli: &Cli) -> Result<VideoServeConfig, a2a_lab_dev_kit::A2aLabError> {
     let mut videos_config = video_config(cli)?;
-    if images.orbbec_enabled() {
-        videos_config = videos_config.with_orbbec(images.orbbec_serial())?;
+    if let Some(index) = cli.camera_index {
+        videos_config = videos_config.with_camera_index(index);
     }
     Ok(videos_config)
 }
@@ -878,48 +821,10 @@ fn image_config(cli: &Cli) -> Result<ImageServeConfig, a2a_lab_dev_kit::A2aLabEr
         cli.capture_timeout_ms,
         cli.image_retention,
     )?;
-    let backend = cli
-        .camera_backend
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let orbbec = match backend {
-        Some("orbbec") => true,
-        Some(other) => {
-            return Err(a2a_lab_dev_kit::A2aLabError::invalid(
-                "camera_backend",
-                format!("unsupported camera backend `{other}`"),
-            ));
-        }
-        None => cli.orbbec_camera,
-    };
-    let serial = match (cli.camera_serial.as_deref(), cli.orbbec_serial.as_deref()) {
-        (Some(left), Some(right)) if left != right => {
-            return Err(a2a_lab_dev_kit::A2aLabError::invalid(
-                "camera_serial",
-                "does not match orbbec-serial",
-            ));
-        }
-        (Some(serial), _) | (None, Some(serial)) => Some(serial),
-        (None, None) => None,
-    };
-    if !orbbec && cli.orbbec_serial.is_some() {
-        return Err(a2a_lab_dev_kit::A2aLabError::invalid(
-            "orbbec_serial",
-            "requires Orbbec color capture",
-        ));
-    }
-    if serial.is_some() && !orbbec {
-        return Err(a2a_lab_dev_kit::A2aLabError::invalid(
-            "camera_serial",
-            "requires a camera backend",
-        ));
-    }
-    if orbbec {
-        config.with_orbbec(serial)
-    } else {
-        Ok(config)
-    }
+    Ok(match cli.camera_index {
+        Some(index) => config.with_camera_index(index),
+        None => config,
+    })
 }
 
 fn camera_catalog(cli: &Cli) -> Result<a2a_lab_ot2::LiveImageCatalog, Box<dyn std::error::Error>> {
@@ -927,18 +832,7 @@ fn camera_catalog(cli: &Cli) -> Result<a2a_lab_ot2::LiveImageCatalog, Box<dyn st
         &cli.opentrons_url,
         &image_config(cli)?,
         None,
-        None,
     )?)
-}
-
-fn print_orbbec_sdk_version() -> Result<(), Box<dyn std::error::Error>> {
-    match a2a_lab_ot2::orbbec::loaded_sdk_version() {
-        Ok(version) => {
-            println!("{version}");
-            Ok(())
-        }
-        Err(error) => Err(format!("orbbec-camera: {error}").into()),
-    }
 }
 
 async fn list_image_sources(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -962,7 +856,7 @@ async fn get_current_image(
     source: &str,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None, None).await?;
+    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None).await?;
     let image = catalog
         .get_current_image(GetCurrentImageRequest::new(ImageSourceId::new(source)?))
         .await?;
@@ -990,7 +884,7 @@ async fn get_stored_image(
     id: &str,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None, None).await?;
+    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None).await?;
     let image = catalog
         .get_image(GetImageRequest::new(ImageId::new(id)?))
         .await?;

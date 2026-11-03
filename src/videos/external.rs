@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use a2a_lab_dev_kit::A2aLabError;
 use nokhwa::Camera;
-use nokhwa::utils::{CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType};
+use nokhwa::utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType};
 
 use crate::camera::{
     CameraCaptureError, EXTERNAL_CAMERA_SETTLING_FRAMES, ExternalCameraFormat, NativeCameraCapture,
@@ -55,6 +55,41 @@ impl NativeLiveJpeg {
         Ok(session)
     }
 
+    /// Opens `index` at the closest MJPEG mode to 1280×720 at 5 fps.
+    pub fn open_mjpeg(index: u32, max_bytes: u64) -> Result<Self, A2aLabError> {
+        let wanted = CameraFormat::new_from(1280, 720, FrameFormat::MJPEG, 5);
+        let request = RequestedFormat::with_formats(
+            RequestedFormatType::Closest(wanted),
+            &[FrameFormat::MJPEG],
+        );
+        let mut camera = Camera::new(CameraIndex::Index(index), request).map_err(|error| {
+            A2aLabError::unavailable(format!(
+                "camera index {index}: MJPEG is unavailable ({error})"
+            ))
+        })?;
+        let format = camera.camera_format();
+        if format.format() != FrameFormat::MJPEG {
+            return Err(A2aLabError::unavailable(format!(
+                "camera index {index}: backend selected {format}"
+            )));
+        }
+        camera.open_stream().map_err(|error| {
+            A2aLabError::unavailable(format!(
+                "camera index {index}: native backend capture failed ({error})"
+            ))
+        })?;
+        eprintln!(
+            "camera index {index}: {}x{} MJPEG at {} fps",
+            format.width(),
+            format.height(),
+            format.frame_rate()
+        );
+        Ok(Self {
+            camera,
+            capture: NativeCameraCapture { max_bytes },
+        })
+    }
+
     fn read(&mut self) -> Result<Vec<u8>, A2aLabError> {
         self.capture.read_open(&mut self.camera).map_err(live_error)
     }
@@ -63,6 +98,11 @@ impl NativeLiveJpeg {
         let bytes = self.read()?;
         remember_external_frame(bytes.clone());
         Ok(bytes)
+    }
+
+    /// Reads one JPEG without storing it as the external-camera still.
+    pub(crate) fn read_jpeg(&mut self) -> Result<Vec<u8>, A2aLabError> {
+        self.read()
     }
 }
 

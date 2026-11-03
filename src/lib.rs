@@ -10,8 +10,6 @@ pub mod images;
 pub mod memory;
 pub mod oidc;
 pub mod opentrons;
-pub mod orbbec;
-mod orbbec_frames;
 pub mod page;
 pub mod sila;
 pub mod time;
@@ -38,6 +36,6 @@ pub use sila::{
 pub use videos::{
     DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_LIVE_VIDEO_MEMORY_SECS, DEFAULT_VIDEO_DVR_ROOT,
     DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, ExternalVideoConfig, IndexedVideoDvr,
-    LiveJpegSource, LiveVideoCatalog, LiveVideoInjections, OrbbecVideoConfig, VideoDvrCatalog,
-    VideoServeConfig, open_video_catalog, start_live_videos,
+    LiveJpegSource, LiveVideoCatalog, LiveVideoInjections, VideoDvrCatalog, VideoServeConfig,
+    WebcamVideoConfig, open_video_catalog, start_live_videos,
 };

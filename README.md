@@ -24,7 +24,7 @@ The OT-2 robot-server is an a2a-lab. These operations are how a caller lists, ru
 | `search_images`      | Metadata matching a source, time range, and/or caption text              |
 | `get_image`          | One stored frame, inline                                                 |
 | `get_current_image`  | A newly captured frame from one source, inline                           |
-| `list_video_sources` | `external-camera` and/or `orbbec-camera` when those native sources are enabled |
+| `list_video_sources` | `external-camera` and/or `camera` when those native sources are enabled |
 | `get_video_frame_at` | A retained MJPEG frame from disk or the live window for one source              |
 | `get_video_clip`     | A finite retained clip from the indexed DVR                                     |
 | `get_video_timeline` | Retained coverage for one source                                                |
@@ -34,7 +34,7 @@ The OT-2 robot-server is an a2a-lab. These operations are how a caller lists, ru
 
 `external-camera` is off unless you set `--external-camera-index` or `A2ALAB_EXTERNAL_CAMERA_INDEX` to a zero-based native camera index. Capture reads that camera directly and never goes through robot-server. Omitting the setting serves only `opentrons-camera`. Its description defaults to "Still frame from the configured external camera." Set `--external-camera-description` or `A2ALAB_EXTERNAL_CAMERA_DESCRIPTION` to replace that text. An empty description is rejected.
 
-When `--external-camera-index` or `--orbbec-camera` enables a native source, serve registers that source for live MJPEG and the indexed DVR. Each enabled source keeps an independent warm capture session. One source failing to start or capture does not remove the other. Live follow keeps five seconds of frames in memory per source (`--video-retention-secs`, default 5). The indexed DVR retains MJPEG on disk for three days by default (`--video-disk-retention-secs`) under `--video-dvr-root` (default `.a2a-lab-ot2/video-dvr`). Still-image history in `.a2a-lab-ot2/images.sqlite` remains capped by `--image-retention` and a separate thirty-day age limit. A2A and MCP return timeline, frame-at, clip, and follow metadata only; clip and live bytes are fetched from the authenticated `/media/video-clips/` and `/media/video-live/` routes on the same A2A listener through the dev-kit in-process gateway (no loopback A2A client to the process's own provider). The OT-2 onboard camera remains stills-only: `GET /camera/stream` is JSON metadata for the Flex live-stream service, which OT-2 does not run.
+When `--external-camera-index` or `--camera-index` enables a native source, serve registers that source for live MJPEG and the indexed DVR. Each enabled source keeps an independent warm capture session. One source failing to start or capture does not remove the other. Live follow keeps five seconds of frames in memory per source (`--video-retention-secs`, default 5). The indexed DVR retains MJPEG on disk for three days by default (`--video-disk-retention-secs`) under `--video-dvr-root` (default `.a2a-lab-ot2/video-dvr`). Still-image history in `.a2a-lab-ot2/images.sqlite` remains capped by `--image-retention` and a separate thirty-day age limit. A2A and MCP return timeline, frame-at, clip, and follow metadata only; clip and live bytes are fetched from the authenticated `/media/video-clips/` and `/media/video-live/` routes on the same A2A listener through the dev-kit in-process gateway (no loopback A2A client to the process's own provider). The OT-2 onboard camera remains stills-only: `GET /camera/stream` is JSON metadata for the Flex live-stream service, which OT-2 does not run.
 
 A requested `opentrons-camera` or `external-camera` frame is stored in `.a2a-lab-ot2/images.sqlite`. The service user must be able to create that directory and write the database. `list_images` and `search_images` read this file and do not capture. Loading it does not open either camera.
 
@@ -107,15 +107,13 @@ A2ALAB_EXTERNAL_CAMERA_INDEX=4 mise run start
 mise run a2a-lab-ot2-example
 ```
 
-## Orbbec color camera
+## Second webcam
 
-`orbbec-camera` is off unless `--orbbec-camera`, `A2ALAB_ORBBEC_CAMERA=true`, or `--camera-backend orbbec` is set. It captures MJPEG color frames through Orbbec SDK `2.10.6`. The device is not opened until capture or live video starts. Orbbec still capture also enables `orbbec-camera` live video and the indexed DVR when configured.
-
-Omit `--orbbec-serial` / `A2ALAB_ORBBEC_SERIAL` to use the only connected device. A missing device, permission failure, or unsupported profile returns an error naming `orbbec-camera` without affecting `external-camera`.
+Source `camera` is off unless `--camera-index` or `A2ALAB_CAMERA_INDEX` is set. Live video opens the closest 1280x720 MJPEG mode on that index. Still capture reuses the latest JPEG from that pump and does not open the device again. A failure on `camera` does not affect `external-camera`.
 
 ## Agent image deployment
 
-`a2a-lab-ot2-agent` is separate from `a2a-lab-ot2-sim`. The simulator remains pinned robot-server `v10.0.0` and does not contain the agent or a camera SDK. The agent image is published for `linux/amd64` and `linux/arm64` with the release binary and Orbbec SDK `v2.10.6` runtime from pinned Linux tarballs (checksum verified at build time). It does not use `--privileged` or host networking.
+`a2a-lab-ot2-agent` is separate from `a2a-lab-ot2-sim`. The simulator remains pinned robot-server `v10.0.0` and does not contain the agent. The agent image is published for `linux/amd64` and `linux/arm64` with the release binary. It does not use `--privileged` or host networking, and it does not install a camera SDK.
 
 ```bash
 mise run agent-image -- arm64
@@ -128,23 +126,21 @@ Dual-source deployment passes explicit device access and camera settings:
 
 ```bash
 A2ALAB_OPENTRONS_URL=http://host.docker.internal:31950 \
-A2ALAB_ORBBEC_CAMERA=true \
-A2ALAB_ORBBEC_USB_DEVICES=/dev/bus/usb/001/002 \
+A2ALAB_CAMERA_INDEX=0 \
 A2ALAB_EXTERNAL_CAMERA_INDEX=4 \
 A2ALAB_EXTERNAL_VIDEO_DEVICES=/dev/video4 \
 A2ALAB_STATE_DIR=$PWD/.a2a-lab-ot2-agent \
 mise run agent-run
 ```
 
-`mise run agent-stop` sends SIGTERM, removes the container, and prints rollback steps that preserve retained image and video files on the host mount. Fix missing USB nodes, SDK mismatch, or storage permission errors using the script diagnostics; do not delete the state directory to roll back.
+`mise run agent-stop` sends SIGTERM, removes the container, and prints rollback steps that preserve retained image and video files on the host mount. Fix missing device nodes or storage permission errors using the script diagnostics; do not delete the state directory to roll back.
 
 Opt-in media verification (not part of `mise run quality`):
 
 ```bash
 # Linux agent container with both sources configured:
 A2ALAB_MEDIA_SMOKE=1 \
-A2ALAB_ORBBEC_CAMERA=true \
-A2ALAB_ORBBEC_USB_DEVICES=/dev/bus/usb/001/002 \
+A2ALAB_CAMERA_INDEX=0 \
 A2ALAB_EXTERNAL_CAMERA_INDEX=4 \
 A2ALAB_EXTERNAL_VIDEO_DEVICES=/dev/video4 \
 mise run agent-media-smoke
@@ -155,9 +151,7 @@ A2ALAB_EXTERNAL_CAMERA_INDEX=0 \
 mise run agent-media-smoke-native
 ```
 
-The smoke check allows up to 20 seconds for the first Orbbec frame, verifies advancing live MJPEG on `/media/video-live/`, confirms `get_image` matches `get_current_image` for each verified source, restarts the agent to prove indexed DVR history survives, and prints retention policy values (5 s live memory, 259200 s disk video, 30 d still history). Each source failure is reported independently.
-
-Install the image udev rules on Linux hosts that use Orbbec USB, reload udev, replug the camera, and pass the resulting device node in `A2ALAB_ORBBEC_USB_DEVICES`.
+The smoke check verifies advancing live MJPEG on `/media/video-live/`, confirms `get_image` matches `get_current_image` for each verified source, restarts the agent to prove indexed DVR history survives, and prints retention policy values (5 s live memory, 259200 s disk video, 30 d still history). Each source failure is reported independently.
 
 ## Choose an external camera
 

@@ -3,10 +3,11 @@
 use std::time::Duration;
 
 use a2a_lab_dev_kit::{
-    DvrFrameAtRequest, DvrMediaStore, GetVideoClipRequest, MemoryVideos, PageRequest,
-    ReadDvrMediaWindowRequest, TimeRange, UtcTimestamp, VideoProvider, VideoSourceId,
+    DvrFrameAtRequest, DvrMediaPayload, DvrMediaStore, GetVideoClipRequest, MemoryVideos,
+    PageRequest, ReadDvrMediaWindowRequest, TimeRange, UtcTimestamp, VideoProvider, VideoSourceId,
 };
 use a2a_lab_ot2::videos::dvr::VideoDvrCatalog;
+use a2a_lab_ot2::videos::dvr::chunk::{chunk_relpath, crc32, minute_start_us};
 use a2a_lab_ot2::{DEFAULT_DISK_VIDEO_RETENTION_SECS, IndexedVideoDvr};
 
 fn temp_root(name: &str) -> std::path::PathBuf {
@@ -238,4 +239,198 @@ async fn startup_cleanup_drops_expired_rows() {
         .unwrap();
     store.cleanup_at(ts("2024-06-01T00:00:00Z")).await.unwrap();
     assert!(store.media_coverage(&source).await.is_err());
+}
+
+#[tokio::test]
+async fn legacy_per_frame_segments_remain_readable() {
+    let store = open_store("legacy-seg", 86_400).await;
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    store
+        .write_legacy_segment(
+            &source,
+            &track,
+            ts("2024-06-01T00:00:00Z"),
+            1_000_000,
+            true,
+            &jpeg(),
+        )
+        .await
+        .unwrap();
+    store
+        .append_mjpeg_frame(&source, ts("2024-06-01T00:00:01Z"), 1_000_000, &jpeg())
+        .await
+        .unwrap();
+    let frame = store
+        .frame_at(DvrFrameAtRequest::new(
+            source.clone(),
+            track.clone(),
+            ts("2024-06-01T00:00:00Z"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        frame.payload(),
+        DvrMediaPayload::MjpegFrame(bytes) if bytes == &jpeg()
+    ));
+}
+
+fn recent(offset_micros: i64) -> UtcTimestamp {
+    a2a_lab_ot2::time::now()
+        .unwrap()
+        .saturating_add_micros(offset_micros)
+}
+
+#[tokio::test]
+async fn chunk_checksum_mismatch_is_rejected() {
+    let dir = temp_root("checksum");
+    let _ = std::fs::remove_dir_all(&dir);
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let at = recent(0);
+    {
+        let store = IndexedVideoDvr::open(&dir, 86_400).await.unwrap();
+        store
+            .append_mjpeg_frame(&source, at, 1_000_000, &jpeg())
+            .await
+            .unwrap();
+    }
+    let minute = minute_start_us(at);
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    let relpath = chunk_relpath(source.as_str(), track.as_str(), minute);
+    let path = dir.join(format!("{relpath}.tmp"));
+    let mut bytes = std::fs::read(&path).unwrap();
+    if let Some(byte) = bytes.first_mut() {
+        *byte ^= 0xFF;
+    }
+    std::fs::write(&path, bytes).unwrap();
+    let store = IndexedVideoDvr::open(&dir, 86_400).await.unwrap();
+    let Err(error) = store
+        .frame_at(DvrFrameAtRequest::new(source, track, at, None))
+        .await
+    else {
+        panic!("expected checksum failure");
+    };
+    assert!(format!("{error}").contains("checksum"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn crash_recovery_truncates_unindexed_chunk_tail() {
+    let dir = temp_root("crash");
+    let _ = std::fs::remove_dir_all(&dir);
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let at = recent(0);
+    let retain_secs = 7 * 86_400;
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    let minute = minute_start_us(at);
+    let relpath = chunk_relpath(source.as_str(), track.as_str(), minute);
+    let tmp_path = dir.join(format!("{relpath}.tmp"));
+    let final_path = dir.join(&relpath);
+    {
+        let store = IndexedVideoDvr::open(&dir, retain_secs).await.unwrap();
+        store
+            .append_mjpeg_frame(&source, at, 1_000_000, &jpeg())
+            .await
+            .unwrap();
+    }
+    let mut bytes = std::fs::read(&tmp_path).unwrap();
+    bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    std::fs::write(&tmp_path, bytes).unwrap();
+    assert_eq!(
+        std::fs::metadata(&tmp_path).unwrap().len(),
+        jpeg().len() as u64 + 4
+    );
+    let store = IndexedVideoDvr::open(&dir, retain_secs).await.unwrap();
+    let frame = store
+        .frame_at(DvrFrameAtRequest::new(source, track, at, None))
+        .await
+        .unwrap();
+    assert!(matches!(
+        frame.payload(),
+        DvrMediaPayload::MjpegFrame(bytes) if bytes == &jpeg()
+    ));
+    let payload_path = if tmp_path.exists() {
+        tmp_path
+    } else {
+        final_path
+    };
+    assert_eq!(
+        std::fs::metadata(payload_path).unwrap().len(),
+        jpeg().len() as u64
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn chunk_reads_use_frame_byte_ranges() {
+    let store = open_store("range", 86_400).await;
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    let frame_a = vec![0xAA; 64];
+    let frame_b = vec![0xBB; 64];
+    store
+        .append_mjpeg_frame(&source, ts("2024-06-01T00:00:00Z"), 1_000_000, &frame_a)
+        .await
+        .unwrap();
+    store
+        .append_mjpeg_frame(&source, ts("2024-06-01T00:00:01Z"), 1_000_000, &frame_b)
+        .await
+        .unwrap();
+    let second = store
+        .frame_at(DvrFrameAtRequest::new(
+            source.clone(),
+            track.clone(),
+            ts("2024-06-01T00:00:01Z"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        second.payload(),
+        DvrMediaPayload::MjpegFrame(bytes) if bytes == &frame_b
+    ));
+    let minute = minute_start_us(ts("2024-06-01T00:00:00Z"));
+    let relpath = chunk_relpath(source.as_str(), track.as_str(), minute);
+    let on_disk = std::fs::read(store.root().join(format!("{relpath}.tmp"))).unwrap();
+    assert_eq!(on_disk.len(), frame_a.len() + frame_b.len());
+    assert_eq!(crc32(&frame_a), crc32(&on_disk[..frame_a.len()]));
+}
+
+#[tokio::test]
+async fn minute_rotation_finalizes_previous_chunk() {
+    let store = open_store("rotate", 86_400).await;
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    store
+        .append_mjpeg_frame(&source, ts("2024-06-01T00:00:59Z"), 1_000_000, &jpeg())
+        .await
+        .unwrap();
+    store
+        .append_mjpeg_frame(&source, ts("2024-06-01T00:01:01Z"), 1_000_000, &jpeg())
+        .await
+        .unwrap();
+    let first_minute = minute_start_us(ts("2024-06-01T00:00:00Z"));
+    let second_minute = minute_start_us(ts("2024-06-01T00:01:00Z"));
+    let first = chunk_relpath(source.as_str(), track.as_str(), first_minute);
+    let second = chunk_relpath(source.as_str(), track.as_str(), second_minute);
+    assert!(store.root().join(&first).is_file());
+    assert!(store.root().join(format!("{second}.tmp")).is_file());
+}
+
+#[tokio::test]
+async fn chunk_retention_removes_expired_payloads() {
+    let store = open_store("chunk-retain", 60).await;
+    let source = VideoSourceId::new("cam-a").unwrap();
+    store
+        .append_mjpeg_frame(&source, ts("2020-01-01T00:00:00Z"), 1_000_000, &jpeg())
+        .await
+        .unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    let minute = minute_start_us(ts("2020-01-01T00:00:00Z"));
+    let relpath = chunk_relpath(source.as_str(), track.as_str(), minute);
+    assert!(store.root().join(format!("{relpath}.tmp")).exists());
+    store.cleanup_at(ts("2024-06-01T00:00:00Z")).await.unwrap();
+    assert!(store.media_coverage(&source).await.is_err());
+    assert!(!store.root().join(format!("{relpath}.tmp")).exists());
 }

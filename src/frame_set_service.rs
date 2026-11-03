@@ -16,12 +16,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
+use crate::camera::CAMERA_SOURCE_ID;
 use crate::frame_sets::{
-    CaptureRequest, FrameChannelId, FrameSet, FrameSetCapture, FrameSetCatalog, FrameSetError,
-    FrameSetId, FrameSetMetadata, FrameSetSourceId,
+    CaptureRequest, FrameChannelId, FramePage, FrameSet, FrameSetCapture, FrameSetCatalog,
+    FrameSetError, FrameSetId, FrameSetMetadata, FrameSetSourceId,
 };
 use crate::images::{CapturedFrame, LiveImageCatalog};
-use crate::orbbec::{ORBBEC_CAMERA_SOURCE_ID, remember_color_frame};
 use crate::time::now;
 
 const TASK_PREFIX: &str = "ot2.frame-sets.";
@@ -80,10 +80,10 @@ impl FrameSetApi {
         id: &str,
         channel_id: &str,
     ) -> Result<(String, Vec<u8>), FrameSetError> {
+        let frame_id = frame_id(id)?;
+        let channel_id = channel_id_of(channel_id)?;
         let catalog = self.catalog.lock().await;
-        let channel = catalog
-            .channel(&frame_id(id)?, &channel_id_of(channel_id)?)
-            .await?;
+        let channel = catalog.channel(&frame_id, &channel_id).await?;
         Ok((channel.media_type().to_owned(), channel.data().to_vec()))
     }
 
@@ -134,17 +134,10 @@ impl FrameSetApi {
             ""
         };
         let catalog = self.catalog.lock().await;
-        let page = if search {
-            catalog
-                .search(source.as_ref(), query, cursor, limit)
-                .await?
-        } else {
-            let source = match source {
-                Some(source) => source,
-                None => FrameSetSourceId::new(ORBBEC_CAMERA_SOURCE_ID)?,
-            };
-            catalog.list(&source, cursor, limit).await?
-        };
+        let page = self
+            .list_page(&catalog, source.as_ref(), query, cursor, limit)
+            .await?;
+        drop(catalog);
         let frame_sets = page
             .items()
             .iter()
@@ -166,10 +159,10 @@ impl FrameSetApi {
     async fn get_channel(&self, input: &Value) -> Result<Value, FrameSetError> {
         let id = required_str(input, "id")?;
         let channel_id = required_str(input, "channel_id")?;
+        let frame_id = frame_id(id)?;
+        let channel_id = channel_id_of(channel_id)?;
         let catalog = self.catalog.lock().await;
-        let channel = catalog
-            .channel(&frame_id(id)?, &channel_id_of(channel_id)?)
-            .await?;
+        let channel = catalog.channel(&frame_id, &channel_id).await?;
         Ok(json!({
             "id": id,
             "channel_id": channel.id().as_str(),
@@ -245,16 +238,15 @@ impl FrameSetApi {
             color.media_type(),
             color.width(),
             color.height(),
-            Some("Orbbec camera".to_owned()),
+            Some("Camera".to_owned()),
             JsonObject::empty(),
             color.data().to_vec(),
         );
-        let source = ImageSourceId::new(ORBBEC_CAMERA_SOURCE_ID)
+        let source = ImageSourceId::new(CAMERA_SOURCE_ID)
             .map_err(|error| FrameSetError::Unavailable(format!("color source: {error}")))?;
         images.record_frame(source, frame).await.map_err(|error| {
             FrameSetError::Unavailable(format!("color image was not stored: {error}"))
         })?;
-        remember_color_frame(color.data().to_vec());
         Ok(())
     }
 
@@ -282,6 +274,24 @@ impl FrameSetApi {
             "{}/ot2/frame-sets/{id}/channels/{channel_id}",
             self.origin.trim_end_matches('/')
         )
+    }
+
+    async fn list_page(
+        &self,
+        catalog: &FrameSetCatalog,
+        source_id: Option<&FrameSetSourceId>,
+        query: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<FramePage<FrameSetMetadata>, FrameSetError> {
+        if query.is_empty() {
+            match source_id {
+                Some(source_id) => catalog.list(source_id, cursor, limit).await,
+                None => catalog.search(None, "", cursor, limit).await,
+            }
+        } else {
+            catalog.search(source_id, query, cursor, limit).await
+        }
     }
 }
 
@@ -354,7 +364,7 @@ pub fn router(api: Arc<FrameSetApi>) -> Router {
         .with_state(api)
 }
 
-/// Binds the media listener. The SDK stays unloaded until a request.
+/// Binds the media listener.
 pub async fn serve(
     api: Arc<FrameSetApi>,
     listener: tokio::net::TcpListener,
@@ -407,15 +417,17 @@ async fn channel_bytes(
     AxumPath((id, channel)): AxumPath<(String, String)>,
 ) -> Response {
     match api.channel_bytes(&id, &channel).await {
-        Ok((media_type, bytes)) => {
-            let mut response = bytes.into_response();
-            if let Ok(value) = HeaderValue::from_str(&media_type) {
-                response.headers_mut().insert(header::CONTENT_TYPE, value);
-            }
-            response
-        }
+        Ok((media_type, bytes)) => bytes_response(&media_type, bytes),
         Err(error) => error_response(&error),
     }
+}
+
+fn bytes_response(media_type: &str, bytes: Vec<u8>) -> Response {
+    let mut response = bytes.into_response();
+    if let Ok(value) = HeaderValue::from_str(media_type) {
+        response.headers_mut().insert(header::CONTENT_TYPE, value);
+    }
+    response
 }
 
 fn json_result(result: Result<Value, FrameSetError>) -> Response {
@@ -502,7 +514,7 @@ pre { white-space: pre-wrap; }
 </head>
 <body>
 <h1>Frame sets</h1>
-<p>This page is an OT-2 extension. Color and infrared show the stored image. Depth is a browser preview of the lossless PNG. Use the raw link for the 16-bit file.</p>
+<p>This page is an OT-2 extension for stored frame sets. Depth is a browser preview of the lossless PNG. Use the raw link for the 16-bit file.</p>
 <button id="capture" type="button">Capture</button>
 <div id="status"></div>
 <div id="views"></div>

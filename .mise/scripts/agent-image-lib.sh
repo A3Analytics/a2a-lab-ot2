@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared helpers for the Orbbec-enabled agent image. These functions do not start Docker.
+# Shared helpers for the agent image. These functions do not start Docker.
 
 agent_root() {
   cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd
@@ -29,52 +29,9 @@ normalize_architecture() {
   esac
 }
 
-sha256_file() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    shasum -a 256 "$1" | awk '{print $1}'
-  fi
-}
-
-verify_sha256() {
-  local file="$1"
-  local expected="$2"
-  local actual
-  actual="$(sha256_file "$file")"
-  if [[ "$actual" != "$expected" ]]; then
-    printf 'Orbbec SDK checksum failure for %s: expected %s, got %s\n' "$file" "$expected" "$actual" >&2
-    return 1
-  fi
-}
-
-accept_sdk_url() {
-  case "$1" in
-    https://github.com/orbbec/OrbbecSDK_v2/releases/download/v2.10.6/OrbbecSDK_v2.10.6_*_linux_*.tar.gz) return 0 ;;
-    *)
-      printf 'refusing unpinned Orbbec SDK download %s\n' "$1" >&2
-      return 1
-      ;;
-  esac
-}
-
-sdk_url_for() {
-  local arch
-  arch="$(normalize_architecture "$1")" || return 1
-  # shellcheck disable=SC1091
-  source "$(agent_root)/agent/orbbec-sdk.env"
-  local url sha
-  case "$arch" in
-    amd64) url="$ORBBEC_SDK_AMD64_URL"; sha="$ORBBEC_SDK_AMD64_SHA256" ;;
-    arm64) url="$ORBBEC_SDK_ARM64_URL"; sha="$ORBBEC_SDK_ARM64_SHA256" ;;
-  esac
-  accept_sdk_url "$url" || return 1
-  printf '%s %s\n' "$url" "$sha"
-}
-
 require_docker() {
   if ! command -v docker >/dev/null 2>&1; then
-    printf 'Docker is required for the Orbbec agent image. Install Docker and retry.\n' >&2
+    printf 'Docker is required for the agent image. Install Docker and retry.\n' >&2
     return 1
   fi
   if ! docker info >/dev/null 2>&1; then
@@ -108,18 +65,8 @@ build_agent_run_args() {
   if [[ -n "${A2ALAB_PUBLIC_URL:-}" ]]; then
     args+=(-e "A2ALAB_PUBLIC_URL=${A2ALAB_PUBLIC_URL}")
   fi
-  if [[ -n "${A2ALAB_ORBBEC_CAMERA:-}" ]]; then
-    args+=(-e "A2ALAB_ORBBEC_CAMERA=${A2ALAB_ORBBEC_CAMERA}")
-  fi
-  if [[ -n "${A2ALAB_ORBBEC_SERIAL:-}" ]]; then
-    args+=(-e "A2ALAB_ORBBEC_SERIAL=${A2ALAB_ORBBEC_SERIAL}")
-  fi
-  if [[ -n "${A2ALAB_ORBBEC_USB_DEVICES:-}" ]]; then
-    local device
-    local devices="${A2ALAB_ORBBEC_USB_DEVICES//,/ }"
-    for device in $devices; do
-      args+=(--device "${device}:${device}")
-    done
+  if [[ -n "${A2ALAB_CAMERA_INDEX:-}" ]]; then
+    args+=(-e "A2ALAB_CAMERA_INDEX=${A2ALAB_CAMERA_INDEX}")
   fi
   if [[ -n "${A2ALAB_EXTERNAL_CAMERA_INDEX:-}" ]]; then
     args+=(-e "A2ALAB_EXTERNAL_CAMERA_INDEX=${A2ALAB_EXTERNAL_CAMERA_INDEX}")
@@ -173,7 +120,7 @@ Rollback without deleting retained media:
 1. Stop the agent container: mise run agent-stop (SIGTERM, then remove the container).
 2. Keep the host state directory intact: ${state}
 3. Do not delete images.sqlite, video-dvr/, or frame-sets.sqlite under that directory.
-4. Fix the reported device, permission, or SDK issue, then rerun mise run agent-run.
+4. Fix the reported device or permission issue, then rerun mise run agent-run.
 5. To revert the container image only, rebuild with mise run agent-image and restart; retained files stay on the host mount.
 EOF
 }
@@ -184,9 +131,9 @@ validate_agent_run() {
     printf 'application state directory %s is not writable\n' "$state" >&2
     return 1
   fi
-  if [[ -n "${A2ALAB_ORBBEC_USB_DEVICES:-}" ]]; then
+  if [[ -n "${A2ALAB_EXTERNAL_VIDEO_DEVICES:-}" ]]; then
     local device
-    local devices="${A2ALAB_ORBBEC_USB_DEVICES//,/ }"
+    local devices="${A2ALAB_EXTERNAL_VIDEO_DEVICES//,/ }"
     for device in $devices; do
       if [[ ! -e "$device" ]]; then
         printf 'USB device %s is not accessible. Pass an existing device node. Do not use --privileged.\n' "$device" >&2

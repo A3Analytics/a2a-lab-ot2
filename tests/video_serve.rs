@@ -10,8 +10,8 @@ use a2a_lab_dev_kit::{
     GetVideoTimelineRequest, ListVideoSourcesRequest, McpLab, McpServer, PageRequest,
     VideoProvider, VideoSourceId, bind_local,
 };
+use a2a_lab_ot2::camera::CAMERA_SOURCE_ID;
 use a2a_lab_ot2::camera::EXTERNAL_CAMERA_SOURCE_ID;
-use a2a_lab_ot2::orbbec::ORBBEC_CAMERA_SOURCE_ID;
 use a2a_lab_ot2::{
     DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_VIDEO_DVR_ROOT, ImageServeConfig, LiveJpegSource,
     OpentronsLab, VideoServeConfig, image_catalog, open_video_catalog,
@@ -116,15 +116,15 @@ fn startup_summary_names_memory_disk_and_dvr_path() {
 }
 
 #[test]
-fn orbbec_only_startup_lists_video_without_external_index() {
+fn camera_only_startup_lists_video_without_external_index() {
     let output = bin()
         .env_remove("A2ALAB_EXTERNAL_CAMERA_INDEX")
-        .args(["--orbbec-camera"])
+        .args(["--camera-index", "2"])
         .env("A2ALAB_OPENTRONS_URL", "http://127.0.0.1:9")
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&output.stdout);
-    assert!(out.contains("orbbec-camera"));
+    assert!(out.contains("camera index 2"));
     assert!(out.contains("memory 5s"));
     assert!(out.contains(&format!("disk {DEFAULT_DISK_VIDEO_RETENTION_SECS}s")));
 }
@@ -141,7 +141,7 @@ async fn serve_stack_lists_the_same_sources_on_a2a_and_mcp() {
         .await
         .unwrap()
         .expect("videos on");
-    let images = image_catalog(&url, &image_config, None, None).unwrap();
+    let images = image_catalog(&url, &image_config, None).unwrap();
     let lab = OpentronsLab::new(&url).unwrap();
     let service = A2aLabService::new(lab.clone(), lab.clone(), lab)
         .with_images(images)
@@ -243,19 +243,18 @@ async fn one_live_pump_failure_does_not_remove_the_other_source() {
     let video_config =
         VideoServeConfig::with_disk(Some(4), None, 30, 5, 86_400, temp_dvr("isolation"), 1024)
             .unwrap()
-            .with_orbbec(None)
-            .unwrap();
-    let orbbec_bytes = jpeg(4, 4);
+            .with_camera_index(1);
+    let camera_bytes = jpeg(4, 4);
     let videos = open_video_catalog(
         &video_config,
         Some(Box::new(FailExternal)),
-        Some(Box::new(Repeat(orbbec_bytes))),
+        Some(Box::new(Repeat(camera_bytes))),
     )
     .await
     .unwrap()
     .unwrap();
     let provider = videos.provider();
-    wait_for_live_provider(&provider, ORBBEC_CAMERA_SOURCE_ID).await;
+    wait_for_live_provider(&provider, CAMERA_SOURCE_ID).await;
     let page = provider
         .list_video_sources(ListVideoSourcesRequest::new(page()).unwrap())
         .await

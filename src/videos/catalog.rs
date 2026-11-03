@@ -6,14 +6,17 @@ use std::time::{Duration, Instant};
 use a2a_lab_dev_kit::{A2aLabError, MJPEG_MEDIA_TYPE, MemoryVideos, VideoSource, VideoSourceId};
 use tokio::sync::watch;
 
-use crate::camera::{EXTERNAL_CAMERA_HEIGHT, EXTERNAL_CAMERA_SOURCE_ID, EXTERNAL_CAMERA_WIDTH};
+use crate::camera::{
+    CAMERA_SOURCE_ID, EXTERNAL_CAMERA_HEIGHT, EXTERNAL_CAMERA_SOURCE_ID, EXTERNAL_CAMERA_WIDTH,
+    remember_camera_frame,
+};
 use crate::images::jpeg_dimensions;
-use crate::orbbec::{DEFAULT_ORBBEC_CAMERA_DESCRIPTION, NativeOrbbecJpeg, ORBBEC_CAMERA_SOURCE_ID};
 use crate::videos::dvr::{IndexedVideoDvr, VideoDvrCatalog, VideoDvrMaintenance};
 use crate::videos::external::{LiveJpegSource, NativeLiveJpeg, frame_budget};
 
-const ORBBEC_VIDEO_WIDTH: u32 = 1280;
-const ORBBEC_VIDEO_HEIGHT: u32 = 720;
+const CAMERA_VIDEO_WIDTH: u32 = 1280;
+const CAMERA_VIDEO_HEIGHT: u32 = 720;
+const CAMERA_VIDEO_DESCRIPTION: &str = "Live MJPEG from the configured camera.";
 
 /// Live video catalog and the capture threads that fill it.
 pub struct LiveVideoCatalog {
@@ -48,11 +51,12 @@ impl Drop for LiveVideoCatalog {
 }
 
 /// Injectable producers for hardware-free tests.
+#[derive(Default)]
 pub struct LiveVideoInjections {
     /// Replaces the external Nokhwa session when set.
     pub external: Option<Box<dyn LiveJpegSource>>,
-    /// Replaces the Orbbec SDK session when set.
-    pub orbbec: Option<Box<dyn LiveJpegSource>>,
+    /// Replaces the second webcam session when set.
+    pub webcam: Option<Box<dyn LiveJpegSource>>,
 }
 
 impl LiveVideoInjections {
@@ -61,7 +65,7 @@ impl LiveVideoInjections {
     pub fn none() -> Self {
         Self {
             external: None,
-            orbbec: None,
+            webcam: None,
         }
     }
 }
@@ -74,23 +78,23 @@ pub struct ExternalVideoConfig<'a> {
     pub description: &'a str,
 }
 
-/// Orbbec selection when that source is enabled.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrbbecVideoConfig {
-    /// Device serial, or `None` for the sole connected device.
-    pub serial: Option<String>,
+/// Second webcam index when source `camera` is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebcamVideoConfig {
+    /// V4L2 index opened with the closest 1280×720 MJPEG mode.
+    pub index: u32,
 }
 
 enum PumpKind {
     External { index: u32 },
-    Orbbec { serial: Option<String> },
+    Webcam { index: u32 },
 }
 
 /// Starts live capture for every configured source and records frames in the indexed DVR.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_live_videos(
     external: Option<ExternalVideoConfig<'_>>,
-    orbbec: Option<OrbbecVideoConfig>,
+    webcam: Option<WebcamVideoConfig>,
     fps: u32,
     live_retention_secs: u64,
     disk_retention_secs: u64,
@@ -98,7 +102,7 @@ pub async fn start_live_videos(
     max_bytes: u64,
     injections: LiveVideoInjections,
 ) -> Result<LiveVideoCatalog, A2aLabError> {
-    if external.is_none() && orbbec.is_none() {
+    if external.is_none() && webcam.is_none() {
         return Err(A2aLabError::invalid(
             "video",
             "at least one live video source must be configured",
@@ -119,14 +123,14 @@ pub async fn start_live_videos(
         )
         .await?;
     }
-    if let Some(_config) = &orbbec {
+    if webcam.is_some() {
         insert_source(
             inner.live(),
-            ORBBEC_CAMERA_SOURCE_ID,
-            "Orbbec camera",
-            DEFAULT_ORBBEC_CAMERA_DESCRIPTION,
-            ORBBEC_VIDEO_WIDTH,
-            ORBBEC_VIDEO_HEIGHT,
+            CAMERA_SOURCE_ID,
+            "Camera",
+            CAMERA_VIDEO_DESCRIPTION,
+            CAMERA_VIDEO_WIDTH,
+            CAMERA_VIDEO_HEIGHT,
             fps,
         )
         .await?;
@@ -153,16 +157,16 @@ pub async fn start_live_videos(
             &runtime,
         );
     }
-    if let Some(config) = orbbec {
+    if let Some(config) = webcam {
         spawn_pump(
             inner.clone(),
-            VideoSourceId::new(ORBBEC_CAMERA_SOURCE_ID)?,
-            PumpKind::Orbbec {
-                serial: config.serial,
+            VideoSourceId::new(CAMERA_SOURCE_ID)?,
+            PumpKind::Webcam {
+                index: config.index,
             },
             fps,
             max_bytes,
-            injections.orbbec,
+            injections.webcam,
             rx,
             retain_us,
             frame_period_us,
@@ -199,7 +203,7 @@ pub async fn start_external_video(
         max_bytes,
         LiveVideoInjections {
             external: source,
-            orbbec: None,
+            webcam: None,
         },
     )
     .await
@@ -236,6 +240,7 @@ fn spawn_pump(
 }
 
 #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
+#[allow(clippy::too_many_lines)]
 fn pump(
     catalog: &VideoDvrCatalog,
     source_id: &VideoSourceId,
@@ -250,7 +255,7 @@ fn pump(
 ) {
     let budget = frame_budget(fps);
     let mut native_external: Option<NativeLiveJpeg> = None;
-    let mut native_orbbec: Option<NativeOrbbecJpeg> = None;
+    let mut native_webcam: Option<NativeLiveJpeg> = None;
     while !*stop.borrow() {
         let started = Instant::now();
         let next = match kind {
@@ -273,16 +278,16 @@ fn pump(
                     NativeLiveJpeg::next_frame,
                 )
             }
-            PumpKind::Orbbec { serial: _ } if injected.is_some() => injected.as_mut().map_or_else(
-                || Err(A2aLabError::unavailable("orbbec-camera is closed")),
+            PumpKind::Webcam { .. } if injected.is_some() => injected.as_mut().map_or_else(
+                || Err(A2aLabError::unavailable("camera is closed")),
                 |source| source.next_jpeg(),
             ),
-            PumpKind::Orbbec { serial } => {
-                if native_orbbec.is_none() {
-                    match NativeOrbbecJpeg::open(serial.as_deref(), max_bytes) {
-                        Ok(opened) => native_orbbec = Some(opened),
+            PumpKind::Webcam { index } => {
+                if native_webcam.is_none() {
+                    match NativeLiveJpeg::open_mjpeg(*index, max_bytes) {
+                        Ok(opened) => native_webcam = Some(opened),
                         Err(error) => {
-                            eprintln!("orbbec-camera video: {error}");
+                            eprintln!("camera video: {error}");
                             if mark_down(catalog, source_id, runtime, &mut stop) {
                                 return;
                             }
@@ -290,17 +295,18 @@ fn pump(
                         }
                     }
                 }
-                native_orbbec.as_mut().map_or_else(
-                    || Err(A2aLabError::unavailable("orbbec-camera is closed")),
-                    NativeOrbbecJpeg::next_frame,
+                native_webcam.as_mut().map_or_else(
+                    || Err(A2aLabError::unavailable("camera is closed")),
+                    NativeLiveJpeg::read_jpeg,
                 )
             }
         };
         let jpeg = match next {
             Ok(jpeg) => jpeg,
             Err(error) => {
-                if matches!(kind, PumpKind::Orbbec { .. }) {
-                    eprintln!("orbbec-camera video: {error}");
+                if matches!(kind, PumpKind::Webcam { .. }) {
+                    eprintln!("camera video: {error}");
+                    native_webcam = None;
                     let _ = runtime.block_on(catalog.live().set_live_available(source_id, false));
                     if wait(&mut stop, std::time::Duration::from_millis(200)) {
                         return;
@@ -318,6 +324,9 @@ fn pump(
         if jpeg_dimensions(&jpeg).is_err() {
             continue;
         }
+        if matches!(kind, PumpKind::Webcam { .. }) {
+            remember_camera_frame(jpeg.clone());
+        }
         if runtime
             .block_on(publish(
                 catalog,
@@ -325,6 +334,7 @@ fn pump(
                 jpeg,
                 retain_us,
                 frame_period_us,
+                false,
             ))
             .is_err()
         {
@@ -368,6 +378,7 @@ async fn publish(
     jpeg: Vec<u8>,
     live_retain_us: i64,
     frame_period_us: u64,
+    skip_dvr_append: bool,
 ) -> Result<(), A2aLabError> {
     let stamp = crate::time::now()?;
     catalog
@@ -378,10 +389,12 @@ async fn publish(
         .live()
         .forget_before(source_id, stamp.saturating_add_micros(-live_retain_us))
         .await?;
-    catalog
-        .dvr()
-        .append_mjpeg_frame(source_id, stamp, frame_period_us, &jpeg)
-        .await?;
+    if !skip_dvr_append {
+        catalog
+            .dvr()
+            .append_mjpeg_frame(source_id, stamp, frame_period_us, &jpeg)
+            .await?;
+    }
     catalog.dvr().cleanup_source(source_id, stamp).await
 }
 

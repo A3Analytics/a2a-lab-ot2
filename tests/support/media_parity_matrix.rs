@@ -1,4 +1,4 @@
-//! Hardware-free external vs Orbbec media contract matrix.
+//! Hardware-free external vs webcam media contract matrix.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,30 +12,27 @@ use a2a_lab_dev_kit::{
     McpLab, McpServer, PageRequest, SecurityScheme, TimeRange, UtcTimestamp, VideoProvider,
     VideoSourceId, bind_local, video_clip_path,
 };
+use a2a_lab_ot2::camera::{CAMERA_SOURCE_ID, remember_camera_frame};
 use a2a_lab_ot2::camera::{
     CameraCapture, CameraCaptureError, EXTERNAL_CAMERA_SOURCE_ID, ExternalCameraFormat,
     remember_external_frame,
 };
-use a2a_lab_ot2::orbbec::{
-    ORBBEC_CAMERA_SOURCE_ID, ORBBEC_FIRST_FRAME_WAIT, OrbbecCamera, OrbbecCapture,
-    OrbbecCaptureError, remember_color_frame,
-};
 use a2a_lab_ot2::{
-    ImageCatalogConfig, ImageServeConfig, LiveImageCatalog, LiveJpegSource, LiveVideoCatalog,
-    LiveVideoInjections, OpentronsLab, VideoServeConfig, image_catalog, open_video_catalog,
+    ImageServeConfig, LiveImageCatalog, LiveJpegSource, LiveVideoCatalog, LiveVideoInjections,
+    OpentronsLab, VideoServeConfig, image_catalog, open_video_catalog,
 };
 use tokio::net::TcpListener;
 
 pub(crate) const INTENTIONAL_MEDIA_PARITY_DIFFERENCES: &str = "
-intentional external vs orbbec media differences:
-- source ids are external-camera and orbbec-camera; descriptions name the native index vs OrbbecSDK color capture.
-- hardware selection uses A2ALAB_EXTERNAL_CAMERA_INDEX / --external-camera-index vs --orbbec-camera and optional serial.
-- Orbbec still capture allows a twenty-second (20-second) cold-start budget (`ORBBEC_FIRST_FRAME_WAIT`); external capture uses the shared capture-timeout-ms budget and native camera index selection only.
-- diagnostic text names Nokhwa, OrbbecSDK, libusb, or serial ambiguity; shared contract uses the same error code classes and metadata fields.
+intentional external vs camera media differences:
+- source ids are external-camera and camera; descriptions name the native index vs the second webcam.
+- hardware selection uses A2ALAB_EXTERNAL_CAMERA_INDEX / --external-camera-index vs A2ALAB_CAMERA_INDEX / --camera-index.
+- external still capture uses the shared capture-timeout-ms budget and can open its camera index; camera still capture reuses the latest JPEG from the video pump and does not open a second device.
+- diagnostic text names Nokhwa for the external camera; shared contract uses the same error code classes and metadata fields.
 ";
 
 const EXT: &str = EXTERNAL_CAMERA_SOURCE_ID;
-const ORB: &str = ORBBEC_CAMERA_SOURCE_ID;
+const CAM: &str = CAMERA_SOURCE_ID;
 
 struct Endpoints {
     a2a: A2aClient,
@@ -97,13 +94,7 @@ fn mismatch(
 #[allow(clippy::needless_pass_by_value)]
 fn compare_sources(interface: &str, case: &str, ext: ContractObs, orb: ContractObs) {
     if ext != orb {
-        mismatch(
-            interface,
-            case,
-            "external-camera vs orbbec-camera",
-            &ext,
-            &orb,
-        );
+        mismatch(interface, case, "external-camera vs camera", &ext, &orb);
     }
 }
 
@@ -121,14 +112,14 @@ struct Remembering {
 
 enum Side {
     External,
-    Orbbec,
+    Webcam,
 }
 
 impl LiveJpegSource for Remembering {
     fn next_jpeg(&mut self) -> Result<Vec<u8>, A2aLabError> {
         match self.side {
             Side::External => remember_external_frame(self.bytes.clone()),
-            Side::Orbbec => remember_color_frame(self.bytes.clone()),
+            Side::Webcam => remember_camera_frame(self.bytes.clone()),
         }
         Ok(self.bytes.clone())
     }
@@ -145,7 +136,7 @@ impl LiveJpegSource for Advancing {
         let bytes = jpeg(4, 4, u8::try_from(n % 250).unwrap_or(1));
         match self.side {
             Side::External => remember_external_frame(bytes.clone()),
-            Side::Orbbec => remember_color_frame(bytes.clone()),
+            Side::Webcam => remember_camera_frame(bytes.clone()),
         }
         Ok(bytes)
     }
@@ -182,7 +173,7 @@ impl LiveJpegSource for FlakyLive {
         }
         match self.side {
             Side::External => remember_external_frame(self.bytes.clone()),
-            Side::Orbbec => remember_color_frame(self.bytes.clone()),
+            Side::Webcam => remember_camera_frame(self.bytes.clone()),
         }
         Ok(self.bytes.clone())
     }
@@ -199,19 +190,6 @@ impl CameraCapture for CaptureOnce {
     ) -> Result<Vec<u8>, CameraCaptureError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(self.1.clone())
-    }
-}
-
-struct OrbScript(Arc<Mutex<Result<Vec<u8>, OrbbecCaptureError>>>);
-
-impl OrbbecCapture for OrbScript {
-    fn capture_color(
-        &self,
-        _serial: Option<&str>,
-        _timeout: Duration,
-        _max_bytes: u64,
-    ) -> Result<Vec<u8>, OrbbecCaptureError> {
-        self.0.lock().expect("orb").clone()
     }
 }
 
@@ -235,27 +213,23 @@ async fn open_lab(dvr_root: &Path, injections: LiveVideoInjections) -> Lab {
     let video_config =
         VideoServeConfig::with_disk(Some(4), None, 8, 5, 86_400, dvr_root.to_path_buf(), 1024)
             .unwrap()
-            .with_orbbec(None)
-            .unwrap();
-    let videos = open_video_catalog(&video_config, injections.external, injections.orbbec)
+            .with_camera_index(1);
+    let videos = open_video_catalog(&video_config, injections.external, injections.webcam)
         .await
         .unwrap()
         .expect("videos on");
     let provider = videos.provider();
     wait_for_follow(&provider, EXT).await;
-    wait_for_follow(&provider, ORB).await;
+    wait_for_follow(&provider, CAM).await;
 
     let image_config = ImageServeConfig::new(Some(4), None, 1024, 100, 4)
         .unwrap()
-        .with_orbbec(None)
-        .unwrap();
+        .with_camera_index(1);
     let ext_still = CaptureOnce(Arc::new(AtomicUsize::new(0)), jpeg(1, 1, 9));
-    let orb_still = OrbScript(Arc::new(Mutex::new(Ok(jpeg(1, 1, 8)))));
     let images = image_catalog(
         "http://127.0.0.1:9",
         &image_config,
         Some(Arc::new(ext_still)),
-        Some(Arc::new(OrbScript(Arc::clone(&orb_still.0)))),
     )
     .unwrap();
 
@@ -495,7 +469,7 @@ async fn still_bytes(images: &LiveImageCatalog, source: &str) -> ContractObs {
 
 async fn compare_still_live(lab: &Lab, case: &str) {
     let ext = still_bytes(&lab.images, EXT).await;
-    let orb = still_bytes(&lab.images, ORB).await;
+    let orb = still_bytes(&lab.images, CAM).await;
     compare_sources("provider still", case, ext.clone(), orb.clone());
     compare_a2a_mcp(
         case,
@@ -504,8 +478,8 @@ async fn compare_still_live(lab: &Lab, case: &str) {
     );
     compare_a2a_mcp(
         case,
-        a2a_still(&lab.endpoints, ORB).await,
-        mcp_still(&lab.endpoints, ORB).await,
+        a2a_still(&lab.endpoints, CAM).await,
+        mcp_still(&lab.endpoints, CAM).await,
     );
     assert!(matches!(ext, ContractObs::Count(len) if len > 0));
     assert!(matches!(orb, ContractObs::Count(len) if len > 0));
@@ -555,22 +529,6 @@ async fn compare_interface_parity(lab: &Lab, case: &str, source: &str) {
 
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 pub async fn run() {
-    // Orbbec cold-start timeout before any live session publishes remembered frames.
-    let timeout_capture = OrbScript(Arc::new(Mutex::new(Err(OrbbecCaptureError::Timeout))));
-    let camera =
-        OrbbecCamera::with_capture(None, ORBBEC_FIRST_FRAME_WAIT, 1024, timeout_capture).unwrap();
-    let images = LiveImageCatalog::new(
-        vec![(
-            a2a_lab_ot2::orbbec::orbbec_camera_source().unwrap(),
-            Arc::new(camera),
-        )],
-        ImageCatalogConfig::new(4, 1024).unwrap(),
-    )
-    .unwrap();
-    let orb_timeout = still_bytes(&images, ORB).await;
-    assert_eq!(orb_timeout, ContractObs::Code("unavailable".to_owned()));
-    assert!(ORBBEC_FIRST_FRAME_WAIT >= Duration::from_secs(20));
-
     let dvr = temp_dvr("matrix");
     let ext_live = jpeg(8, 6, 20);
     let orb_live = jpeg(8, 6, 21);
@@ -581,9 +539,9 @@ pub async fn run() {
                 bytes: ext_live.clone(),
                 side: Side::External,
             })),
-            orbbec: Some(Box::new(Remembering {
+            webcam: Some(Box::new(Remembering {
                 bytes: orb_live.clone(),
-                side: Side::Orbbec,
+                side: Side::Webcam,
             })),
         },
     )
@@ -594,13 +552,13 @@ pub async fn run() {
         "provider",
         "video source discovery",
         provider_list_contains(&lab.provider, EXT).await,
-        provider_list_contains(&lab.provider, ORB).await,
+        provider_list_contains(&lab.provider, CAM).await,
     );
     compare_sources(
         "A2A",
         "video source discovery",
         a2a_list(&lab.endpoints, EXT).await,
-        a2a_list(&lab.endpoints, ORB).await,
+        a2a_list(&lab.endpoints, CAM).await,
     );
     compare_a2a_mcp(
         "video source discovery external",
@@ -608,14 +566,14 @@ pub async fn run() {
         mcp_list(&lab.endpoints, EXT).await,
     );
     compare_a2a_mcp(
-        "video source discovery orbbec",
-        a2a_list(&lab.endpoints, ORB).await,
-        mcp_list(&lab.endpoints, ORB).await,
+        "video source discovery camera",
+        a2a_list(&lab.endpoints, CAM).await,
+        mcp_list(&lab.endpoints, CAM).await,
     );
 
     compare_still_live(&lab, "still/live JPEG reuse").await;
     compare_interface_parity(&lab, "live follow", EXT).await;
-    compare_interface_parity(&lab, "live follow", ORB).await;
+    compare_interface_parity(&lab, "live follow", CAM).await;
 
     // Advancing frames
     lab.videos.shutdown();
@@ -627,9 +585,9 @@ pub async fn run() {
                 step: AtomicUsize::new(0),
                 side: Side::External,
             })),
-            orbbec: Some(Box::new(Advancing {
+            webcam: Some(Box::new(Advancing {
                 step: AtomicUsize::new(0),
-                side: Side::Orbbec,
+                side: Side::Webcam,
             })),
         },
     )
@@ -639,7 +597,7 @@ pub async fn run() {
         "provider",
         "advancing frames timeline",
         provider_timeline(&advancing.provider, EXT).await,
-        provider_timeline(&advancing.provider, ORB).await,
+        provider_timeline(&advancing.provider, CAM).await,
     );
 
     // Half-open clip bounds (end excluded) via no_recording when empty range miss
@@ -652,7 +610,7 @@ pub async fn run() {
     .await;
     let clip_orb = provider_clip(
         &advancing.provider,
-        ORB,
+        CAM,
         "2099-01-01T00:00:00Z",
         "2099-01-01T00:00:01Z",
     )
@@ -670,9 +628,9 @@ pub async fn run() {
                 bytes: jpeg(2, 2, 30),
                 side: Side::External,
             })),
-            orbbec: Some(Box::new(Remembering {
+            webcam: Some(Box::new(Remembering {
                 bytes: jpeg(2, 2, 31),
-                side: Side::Orbbec,
+                side: Side::Webcam,
             })),
         },
     )
@@ -682,7 +640,7 @@ pub async fn run() {
         "provider",
         "five-second live retention still follows",
         provider_follow(&live_lab.provider, EXT).await,
-        provider_follow(&live_lab.provider, ORB).await,
+        provider_follow(&live_lab.provider, CAM).await,
     );
     live_lab.videos.shutdown();
 
@@ -696,9 +654,9 @@ pub async fn run() {
                     bytes: jpeg(3, 3, 40),
                     side: Side::External,
                 })),
-                orbbec: Some(Box::new(Remembering {
+                webcam: Some(Box::new(Remembering {
                     bytes: jpeg(3, 3, 41),
-                    side: Side::Orbbec,
+                    side: Side::Webcam,
                 })),
             },
         )
@@ -713,9 +671,9 @@ pub async fn run() {
                 bytes: jpeg(3, 3, 42),
                 side: Side::External,
             })),
-            orbbec: Some(Box::new(Remembering {
+            webcam: Some(Box::new(Remembering {
                 bytes: jpeg(3, 3, 43),
-                side: Side::Orbbec,
+                side: Side::Webcam,
             })),
         },
     )
@@ -724,7 +682,7 @@ pub async fn run() {
         "provider",
         "restart recovery timeline",
         provider_timeline(&second.provider, EXT).await,
-        provider_timeline(&second.provider, ORB).await,
+        provider_timeline(&second.provider, CAM).await,
     );
     second.videos.shutdown();
 
@@ -737,15 +695,15 @@ pub async fn run() {
                 bytes: jpeg(2, 2, 50),
                 side: Side::External,
             })),
-            orbbec: Some(Box::new(Remembering {
+            webcam: Some(Box::new(Remembering {
                 bytes: jpeg(2, 2, 51),
-                side: Side::Orbbec,
+                side: Side::Webcam,
             })),
         },
     )
     .await;
     let store = gap_lab.videos.dvr();
-    for source in [EXT, ORB] {
+    for source in [EXT, CAM] {
         let id = video_id(source);
         store
             .append_mjpeg_frame(
@@ -774,7 +732,7 @@ pub async fn run() {
     .await;
     let gap_orb = provider_frame_at(
         &gap_lab.provider,
-        ORB,
+        CAM,
         UtcTimestamp::parse("2024-06-01T00:00:02Z").unwrap(),
     )
     .await;
@@ -794,7 +752,7 @@ pub async fn run() {
     .await;
     let half_orb = provider_clip(
         &gap_lab.provider,
-        ORB,
+        CAM,
         "2024-06-01T00:00:00Z",
         "2024-06-01T00:00:02Z",
     )
@@ -809,7 +767,7 @@ pub async fn run() {
     .await;
     let outside_orb = provider_frame_at(
         &gap_lab.provider,
-        ORB,
+        CAM,
         UtcTimestamp::parse("2019-01-01T00:00:00Z").unwrap(),
     )
     .await;
@@ -836,7 +794,7 @@ pub async fn run() {
     let follow_open = lab
         .endpoints
         .a2a
-        .follow_video(FollowVideoRequest::new(video_id(ORB)))
+        .follow_video(FollowVideoRequest::new(video_id(CAM)))
         .await
         .unwrap();
     let open = reqwest::Client::new()
@@ -857,8 +815,7 @@ async fn run_failure_matrix() {
     let dvr = temp_dvr("failures");
     let config = VideoServeConfig::with_disk(Some(4), None, 8, 5, 86_400, dvr.clone(), 1024)
         .unwrap()
-        .with_orbbec(None)
-        .unwrap();
+        .with_camera_index(1);
 
     // Unavailable hardware (both live pumps fail)
     let down = open_video_catalog(&config, Some(Box::new(FailLive)), Some(Box::new(FailLive)))
@@ -866,7 +823,7 @@ async fn run_failure_matrix() {
         .unwrap()
         .expect("videos");
     let ext_down = provider_follow(&down.provider(), EXT).await;
-    let orb_down = provider_follow(&down.provider(), ORB).await;
+    let orb_down = provider_follow(&down.provider(), CAM).await;
     compare_sources("provider", "unavailable hardware", ext_down, orb_down);
     down.shutdown();
 
@@ -876,15 +833,15 @@ async fn run_failure_matrix() {
         Some(Box::new(FailLive)),
         Some(Box::new(Remembering {
             bytes: jpeg(2, 2, 60),
-            side: Side::Orbbec,
+            side: Side::Webcam,
         })),
     )
     .await
     .unwrap()
     .expect("videos");
-    wait_for_follow(&split.provider(), ORB).await;
+    wait_for_follow(&split.provider(), CAM).await;
     let ext_follow = provider_follow(&split.provider(), EXT).await;
-    let orb_follow = provider_follow(&split.provider(), ORB).await;
+    let orb_follow = provider_follow(&split.provider(), CAM).await;
     assert_ne!(ext_follow, ContractObs::Ok);
     assert_eq!(orb_follow, ContractObs::Ok);
     split.shutdown();
@@ -896,7 +853,7 @@ async fn run_failure_matrix() {
         .expect("videos");
     tokio::time::sleep(Duration::from_millis(300)).await;
     let bad_ext = provider_follow(&bad.provider(), EXT).await;
-    let bad_orb = provider_follow(&bad.provider(), ORB).await;
+    let bad_orb = provider_follow(&bad.provider(), CAM).await;
     compare_sources("provider", "malformed live jpeg", bad_ext, bad_orb);
     bad.shutdown();
 
@@ -911,14 +868,14 @@ async fn run_failure_matrix() {
         Some(Box::new(FlakyLive {
             left: Mutex::new(20),
             bytes: jpeg(2, 2, 71),
-            side: Side::Orbbec,
+            side: Side::Webcam,
         })),
     )
     .await
     .unwrap()
     .expect("videos");
     wait_for_follow(&flaky.provider(), EXT).await;
-    wait_for_follow(&flaky.provider(), ORB).await;
+    wait_for_follow(&flaky.provider(), CAM).await;
     flaky.shutdown();
 
     // Expired clip session
@@ -954,7 +911,7 @@ async fn run_failure_matrix() {
         Ok(_) => panic!("expected expired clip"),
     }
 
-    // Source switching: operate external then orbbec with same error class
+    // Source switching: operate external then camera with same error class
     let switch = open_video_catalog(
         &config,
         Some(Box::new(Remembering {
@@ -963,19 +920,19 @@ async fn run_failure_matrix() {
         })),
         Some(Box::new(Remembering {
             bytes: jpeg(2, 2, 91),
-            side: Side::Orbbec,
+            side: Side::Webcam,
         })),
     )
     .await
     .unwrap()
     .expect("videos");
     wait_for_follow(&switch.provider(), EXT).await;
-    wait_for_follow(&switch.provider(), ORB).await;
+    wait_for_follow(&switch.provider(), CAM).await;
     compare_sources(
         "provider",
         "source switching follow",
         provider_follow(&switch.provider(), EXT).await,
-        provider_follow(&switch.provider(), ORB).await,
+        provider_follow(&switch.provider(), CAM).await,
     );
     switch.shutdown();
 

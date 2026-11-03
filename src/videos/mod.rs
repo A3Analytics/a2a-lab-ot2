@@ -6,7 +6,7 @@ mod external;
 mod serve;
 
 pub use catalog::{
-    ExternalVideoConfig, LiveVideoCatalog, LiveVideoInjections, OrbbecVideoConfig,
+    ExternalVideoConfig, LiveVideoCatalog, LiveVideoInjections, WebcamVideoConfig,
     start_live_videos,
 };
 pub use dvr::{

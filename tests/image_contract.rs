@@ -1,4 +1,4 @@
-//! Image-source contract shared by the OT-2, native, and Orbbec cameras.
+//! Image-source contract shared by the OT-2, external camera, and webcam.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,14 +10,12 @@ use a2a_lab_dev_kit::{
     SearchImagesRequest, bind_local,
 };
 use a2a_lab_ot2::camera::{
-    CameraCapture, CameraCaptureError, EXTERNAL_CAMERA_SOURCE_ID, ExternalCamera,
-    external_camera_source,
+    CAMERA_SOURCE_ID, CameraCapture, CameraCaptureError, CameraStill, EXTERNAL_CAMERA_SOURCE_ID,
+    ExternalCamera, camera_source, clear_camera_frame, external_camera_source,
+    remember_camera_frame,
 };
 use a2a_lab_ot2::opentrons::{
     OPENTRONS_CAMERA_SOURCE_ID, OpentronsCamera, opentrons_camera_source,
-};
-use a2a_lab_ot2::orbbec::{
-    ORBBEC_CAMERA_SOURCE_ID, OrbbecCamera, OrbbecCapture, OrbbecCaptureError, orbbec_camera_source,
 };
 use a2a_lab_ot2::{ImageCatalogConfig, LiveImageCatalog, OpentronsLab};
 use axum::Router;
@@ -32,7 +30,7 @@ const DIFFERENCES: &str = "
 intentional image-source differences:
 - opentrons-camera reads pinned robot-server POST /camera/picture. The operator enables that camera on the OT-2. Its description is the on-board camera sentence and its asset id is opentrons-ot2.
 - external-camera reads a native camera index through the host camera backend. Its id is external-camera and its description is the configured still-frame sentence.
-- orbbec-camera reads one MJPEG color frame through OrbbecSDK. It is absent until Orbbec color capture is enabled. A serial selects the device; omitting it uses the sole connected device and multiple devices are an ambiguity. Its id is orbbec-camera.
+- camera reads the latest JPEG stored by the live video pump. It is absent until --camera-index is set. Still capture does not open a second device. Its id is camera.
 - diagnostic text names the transport that failed. The shared result is the error code class, JPEG descriptor fields, stored bytes, and history behavior.
 - depth, infrared, stereo pairs, point clouds, and synchronization are outside this comparison.
 ";
@@ -112,34 +110,6 @@ impl CameraCapture for Native {
     }
 }
 
-#[derive(Clone)]
-struct Orb(Arc<Mutex<Result<Vec<u8>, OrbbecCaptureError>>>);
-
-impl OrbbecCapture for Orb {
-    fn capture_color(
-        &self,
-        _serial: Option<&str>,
-        _timeout: Duration,
-        _max_bytes: u64,
-    ) -> Result<Vec<u8>, OrbbecCaptureError> {
-        self.0.lock().expect("orbbec").clone()
-    }
-}
-
-struct Slow;
-
-impl OrbbecCapture for Slow {
-    fn capture_color(
-        &self,
-        _serial: Option<&str>,
-        _timeout: Duration,
-        _max_bytes: u64,
-    ) -> Result<Vec<u8>, OrbbecCaptureError> {
-        std::thread::sleep(Duration::from_millis(200));
-        Ok(jpeg(1, 1))
-    }
-}
-
 struct SlowNative;
 
 impl CameraCapture for SlowNative {
@@ -162,21 +132,12 @@ fn native_err(error: CameraCaptureError) -> Native {
     Native(Arc::new(Mutex::new(Err(error))))
 }
 
-fn orb_ok(bytes: Vec<u8>) -> Orb {
-    Orb(Arc::new(Mutex::new(Ok(bytes))))
-}
-
-fn orb_err(error: OrbbecCaptureError) -> Orb {
-    Orb(Arc::new(Mutex::new(Err(error))))
-}
-
 fn catalog(
     url: &str,
     retention: u64,
     max_bytes: u64,
     timeout: Duration,
     native: impl CameraCapture + 'static,
-    orbbec: impl OrbbecCapture + 'static,
 ) -> LiveImageCatalog {
     LiveImageCatalog::new(
         vec![
@@ -189,10 +150,8 @@ fn catalog(
                 Arc::new(ExternalCamera::with_capture(4, timeout, max_bytes, native).unwrap()),
             ),
             (
-                orbbec_camera_source().unwrap(),
-                Arc::new(
-                    OrbbecCamera::with_capture(Some("CAM"), timeout, max_bytes, orbbec).unwrap(),
-                ),
+                camera_source().unwrap(),
+                Arc::new(CameraStill::new(max_bytes).unwrap()),
             ),
         ],
         ImageCatalogConfig::new(retention, max_bytes).unwrap(),
@@ -352,9 +311,9 @@ fn intentional_differences_are_recorded() {
         "opentrons-ot2",
         "native camera index",
         "external-camera",
-        "OrbbecSDK",
-        "orbbec-camera",
-        "serial",
+        "--camera-index",
+        "does not open a second device",
+        "camera",
         "operator enables",
         "diagnostic text",
         "depth, infrared, stereo",
@@ -367,19 +326,21 @@ fn intentional_differences_are_recorded() {
 async fn image_source_contract_matrix() {
     let frame = jpeg(6, 7);
     let url = robot(Shot::Jpeg(frame.clone())).await;
+    remember_camera_frame(frame.clone());
     let images = catalog(
         &url,
         4,
         1024,
         Duration::from_millis(500),
         native_ok(frame.clone()),
-        orb_ok(frame.clone()),
     );
     let endpoints = serve(images, 1024, false).await;
     let card = endpoints.a2a.agent_card().await.unwrap();
     let skills: Vec<_> = card.skills.iter().map(|skill| skill.id.as_str()).collect();
     assert!(
-        !skills.iter().any(|skill| skill.contains("orbbec")),
+        !skills
+            .iter()
+            .any(|skill| skill.contains("orbbec") || skill.contains("librealsense")),
         "{skills:?}"
     );
 
@@ -416,16 +377,16 @@ async fn image_source_contract_matrix() {
     assert_eq!(
         ids,
         vec![
+            CAMERA_SOURCE_ID,
             EXTERNAL_CAMERA_SOURCE_ID,
             OPENTRONS_CAMERA_SOURCE_ID,
-            ORBBEC_CAMERA_SOURCE_ID
         ]
     );
 
     for id in [
         OPENTRONS_CAMERA_SOURCE_ID,
         EXTERNAL_CAMERA_SOURCE_ID,
-        ORBBEC_CAMERA_SOURCE_ID,
+        CAMERA_SOURCE_ID,
     ] {
         assert_success(&endpoints, id).await;
     }
@@ -463,33 +424,37 @@ async fn shared_failures_keep_the_same_code_and_no_partial_row() {
             "empty",
             Shot::Empty,
             native_ok(Vec::new()),
-            orb_ok(Vec::new()),
+            Some(Vec::new()),
             "invalid",
         ),
         (
             "malformed",
             Shot::Garbage,
             native_ok(b"not-a-jpeg".to_vec()),
-            orb_ok(b"not-a-jpeg".to_vec()),
+            Some(b"not-a-jpeg".to_vec()),
             "invalid",
         ),
         (
             "timeout",
             Shot::Delay,
             native_err(CameraCaptureError::Backend("timed out".to_owned())),
-            orb_err(OrbbecCaptureError::Timeout),
+            None,
             "unavailable",
         ),
     ];
-    for (case, shot, native, orbbec, code) in cases {
+    for (case, shot, native, camera_frame, code) in cases {
+        match camera_frame {
+            Some(bytes) => remember_camera_frame(bytes),
+            None => clear_camera_frame(),
+        }
         let url = robot(shot).await;
-        let images = catalog(&url, 4, 1024, Duration::from_millis(40), native, orbbec);
+        let images = catalog(&url, 4, 1024, Duration::from_millis(40), native);
         let endpoints = serve(images, 1024, false).await;
         let mut texts = Vec::new();
         for id in [
             OPENTRONS_CAMERA_SOURCE_ID,
             EXTERNAL_CAMERA_SOURCE_ID,
-            ORBBEC_CAMERA_SOURCE_ID,
+            CAMERA_SOURCE_ID,
         ] {
             let error = current_error(&endpoints, id, case).await;
             assert!(error.starts_with(code), "{id} {case}: {error}");
@@ -507,7 +472,11 @@ async fn shared_failures_keep_the_same_code_and_no_partial_row() {
                 .any(|text| text.contains("POST /camera/picture") || text.contains("OT-2"))
         );
         assert!(texts.iter().any(|text| text.contains("external camera")));
-        assert!(texts.iter().any(|text| text.contains("orbbec-camera")));
+        assert!(
+            texts.iter().any(
+                |text| text.contains("camera returned") || text.contains("camera has no frame")
+            )
+        );
     }
 
     let url = robot(Shot::Jpeg(jpeg(3, 3))).await;
@@ -517,13 +486,13 @@ async fn shared_failures_keep_the_same_code_and_no_partial_row() {
         8,
         Duration::from_millis(500),
         native_ok(jpeg(3, 3)),
-        orb_ok(jpeg(3, 3)),
     );
+    remember_camera_frame(jpeg(3, 3));
     let endpoints = serve(images, 8, false).await;
     for id in [
         OPENTRONS_CAMERA_SOURCE_ID,
         EXTERNAL_CAMERA_SOURCE_ID,
-        ORBBEC_CAMERA_SOURCE_ID,
+        CAMERA_SOURCE_ID,
     ] {
         let error = current_error(&endpoints, id, "maximum payload").await;
         assert!(error.starts_with("invalid"), "{id}: {error}");
@@ -546,17 +515,17 @@ async fn retention_readonly_isolation_and_restart_match() {
         1024,
         Duration::from_millis(500),
         native_ok(frame.clone()),
-        orb_ok(frame.clone()),
     );
+    remember_camera_frame(frame.clone());
     let endpoints = serve(images, 1024, true).await;
     let first = endpoints
         .a2a
-        .get_current_image(GetCurrentImageRequest::new(source(ORBBEC_CAMERA_SOURCE_ID)))
+        .get_current_image(GetCurrentImageRequest::new(source(CAMERA_SOURCE_ID)))
         .await
         .unwrap();
     let second = endpoints
         .a2a
-        .get_current_image(GetCurrentImageRequest::new(source(ORBBEC_CAMERA_SOURCE_ID)))
+        .get_current_image(GetCurrentImageRequest::new(source(CAMERA_SOURCE_ID)))
         .await
         .unwrap();
     let gone = endpoints
@@ -660,13 +629,13 @@ async fn assert_restart(url: &str, frame: &[u8]) {
         1024,
         Duration::from_millis(500),
         native_err(CameraCaptureError::Backend("external down".to_owned())),
-        orb_ok(frame.to_vec()),
     );
+    remember_camera_frame(frame.to_vec());
     let endpoints = serve(isolated, 1024, false).await;
     let error = current_error(&endpoints, EXTERNAL_CAMERA_SOURCE_ID, "isolation").await;
     assert!(error.starts_with("unavailable"), "{error}");
-    let orbbec = current(&endpoints, ORBBEC_CAMERA_SOURCE_ID, "isolation orbbec").await;
-    assert_eq!(orbbec.data(), frame);
+    let camera = current(&endpoints, CAMERA_SOURCE_ID, "isolation camera").await;
+    assert_eq!(camera.data(), frame);
     let robot_frame = current(&endpoints, OPENTRONS_CAMERA_SOURCE_ID, "isolation robot").await;
     assert_eq!(robot_frame.data(), frame);
 
@@ -678,21 +647,21 @@ async fn assert_restart(url: &str, frame: &[u8]) {
     let sources = [
         source(OPENTRONS_CAMERA_SOURCE_ID),
         source(EXTERNAL_CAMERA_SOURCE_ID),
-        source(ORBBEC_CAMERA_SOURCE_ID),
+        source(CAMERA_SOURCE_ID),
     ];
+    remember_camera_frame(frame.to_vec());
     let images = catalog(
         url,
         4,
         1024,
         Duration::from_millis(500),
         native_ok(frame.to_vec()),
-        orb_ok(frame.to_vec()),
     )
     .with_persisted_sources(&sources, &path)
     .await
     .unwrap();
     let saved = images
-        .get_current_image(GetCurrentImageRequest::new(source(ORBBEC_CAMERA_SOURCE_ID)))
+        .get_current_image(GetCurrentImageRequest::new(source(CAMERA_SOURCE_ID)))
         .await
         .unwrap();
     drop(images);
@@ -702,7 +671,6 @@ async fn assert_restart(url: &str, frame: &[u8]) {
         1024,
         Duration::from_millis(500),
         native_err(CameraCaptureError::Empty),
-        orb_err(OrbbecCaptureError::NoDevice),
     )
     .with_persisted_sources(&sources, &path)
     .await
@@ -718,7 +686,8 @@ async fn assert_restart(url: &str, frame: &[u8]) {
 #[tokio::test]
 async fn live_timeouts_use_the_capture_budget() {
     let url = robot(Shot::Delay).await;
-    let images = catalog(&url, 2, 1024, Duration::from_millis(30), SlowNative, Slow);
+    clear_camera_frame();
+    let images = catalog(&url, 2, 1024, Duration::from_millis(30), SlowNative);
     let robot_error = images
         .get_current_image(GetCurrentImageRequest::new(source(
             OPENTRONS_CAMERA_SOURCE_ID,
@@ -731,11 +700,11 @@ async fn live_timeouts_use_the_capture_budget() {
         )))
         .await
         .unwrap_err();
-    let orbbec_error = images
-        .get_current_image(GetCurrentImageRequest::new(source(ORBBEC_CAMERA_SOURCE_ID)))
+    let camera_error = images
+        .get_current_image(GetCurrentImageRequest::new(source(CAMERA_SOURCE_ID)))
         .await
         .unwrap_err();
-    for error in [robot_error, external_error, orbbec_error] {
+    for error in [robot_error, external_error, camera_error] {
         assert_eq!(error.code(), "unavailable", "{error}");
     }
 }

@@ -1,4 +1,4 @@
-//! External vs Orbbec media contract parity across provider, A2A, MCP, and gateway.
+//! External vs webcam media contract parity across provider, A2A, MCP, and gateway.
 
 #[path = "support/media_parity_matrix.rs"]
 mod matrix;
@@ -9,13 +9,10 @@ pub(crate) use matrix::INTENTIONAL_MEDIA_PARITY_DIFFERENCES;
 fn intentional_media_parity_differences_are_recorded() {
     for phrase in [
         "external-camera",
-        "orbbec-camera",
+        "camera",
         "native camera index",
-        "OrbbecSDK",
-        "serial",
-        "twenty-second",
-        "20-second",
-        "ORBBEC_FIRST_FRAME_WAIT",
+        "--camera-index",
+        "does not open a second device",
         "diagnostic",
         "Nokhwa",
     ] {
@@ -27,6 +24,6 @@ fn intentional_media_parity_differences_are_recorded() {
 }
 
 #[tokio::test]
-async fn external_orbbec_media_parity_matrix() {
+async fn external_camera_media_parity_matrix() {
     matrix::run().await;
 }

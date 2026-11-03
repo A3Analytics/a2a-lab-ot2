@@ -254,7 +254,6 @@ async fn configured_description_is_advertised_for_the_external_camera() {
         "http://127.0.0.1:9",
         &config,
         Some(Arc::new(Script::ok(jpeg(1, 1)))),
-        None,
     )
     .unwrap();
     let page = images
@@ -343,7 +342,7 @@ async fn serve_history(
     readonly: bool,
     history: Option<&std::path::Path>,
 ) -> Endpoints {
-    let catalog = image_catalog(url, config, Some(Arc::new(grab)), None).unwrap();
+    let catalog = image_catalog(url, config, Some(Arc::new(grab))).unwrap();
     let catalog = match history {
         Some(path) => catalog
             .with_persisted_sources(

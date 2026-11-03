@@ -1,5 +1,6 @@
 //! Live memory window plus indexed disk DVR.
 
+pub mod chunk;
 mod coverage;
 mod provider;
 mod store;

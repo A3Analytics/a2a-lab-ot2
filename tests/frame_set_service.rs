@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use a2a_lab_dev_kit::{
-    A2aLabError, GetImageRequest, ImageId, ImageProvider, JsonObject, ListImagesRequest,
-    ListTasksRequest, PageRequest, StartTaskRequest, TaskId, TaskProvider, TaskState,
+    A2aLabError, GetImageRequest, ImageId, ImageProvider, ImageSource, ImageSourceId, JsonObject,
+    ListImagesRequest, ListTasksRequest, PageRequest, StartTaskRequest, TaskId, TaskProvider,
+    TaskState,
 };
 use a2a_lab_ot2::frame_set_service::FrameSetApi;
 use a2a_lab_ot2::frame_sets::{
@@ -16,8 +17,9 @@ use a2a_lab_ot2::frame_sets::{
     FrameSetSourceId, frame_channel,
 };
 use a2a_lab_ot2::images::{CapturedFrame, ImageCapture, ImageCatalogConfig, LiveImageCatalog};
-use a2a_lab_ot2::orbbec::{ORBBEC_CAMERA_SOURCE_ID, orbbec_camera_source};
 use serde_json::{Value, json};
+
+const CAMERA_SOURCE_ID: &str = "camera";
 use tokio::net::TcpListener;
 
 struct Fake {
@@ -227,7 +229,16 @@ async fn api(fake: Fake, images: Option<LiveImageCatalog>, origin: &str) -> Fram
 async fn tasks_and_http_share_metadata_and_do_not_embed_pixels() {
     let capture_count = Arc::new(AtomicUsize::new(0));
     let images = LiveImageCatalog::new(
-        vec![(orbbec_camera_source().unwrap(), Arc::new(IdleCamera))],
+        vec![(
+            ImageSource {
+                id: ImageSourceId::new(CAMERA_SOURCE_ID).unwrap(),
+                name: "Camera".to_owned(),
+                description: "Still frame from the configured camera.".to_owned(),
+                asset_id: None,
+                semantic_id: None,
+            },
+            Arc::new(IdleCamera),
+        )],
         ImageCatalogConfig::new(4, 4096).unwrap(),
     )
     .unwrap();
@@ -237,7 +248,7 @@ async fn tasks_and_http_share_metadata_and_do_not_embed_pixels() {
     let service = Arc::new(
         api(
             Fake {
-                source: source(ORBBEC_CAMERA_SOURCE_ID, "orbbec"),
+                source: source(CAMERA_SOURCE_ID, "webcam"),
                 captures: Arc::clone(&capture_count),
                 class: None,
             },
@@ -252,10 +263,7 @@ async fn tasks_and_http_share_metadata_and_do_not_embed_pixels() {
     });
 
     let captured = service
-        .execute(
-            "capture-current",
-            &json!({ "source_id": ORBBEC_CAMERA_SOURCE_ID }),
-        )
+        .execute("capture-current", &json!({ "source_id": CAMERA_SOURCE_ID }))
         .await
         .unwrap();
     assert!(captured.get("data").is_none());
@@ -274,7 +282,7 @@ async fn tasks_and_http_share_metadata_and_do_not_embed_pixels() {
     let listed = service
         .execute(
             "list",
-            &json!({ "source_id": ORBBEC_CAMERA_SOURCE_ID, "limit": 10 }),
+            &json!({ "source_id": CAMERA_SOURCE_ID, "limit": 10 }),
         )
         .await
         .unwrap();
@@ -330,7 +338,7 @@ async fn assert_color_reused(images: &LiveImageCatalog) {
     let images_page = images
         .list_images(
             ListImagesRequest::new(
-                a2a_lab_dev_kit::ImageSourceId::new(ORBBEC_CAMERA_SOURCE_ID).unwrap(),
+                ImageSourceId::new(CAMERA_SOURCE_ID).unwrap(),
                 PageRequest::new(None, 10).unwrap(),
             )
             .unwrap(),
@@ -355,9 +363,9 @@ async fn two_fake_backends_share_the_contract_without_realsense() {
     assert!(!lower.contains("realsense"));
     assert!(!lower.contains("librealsense"));
 
-    let orbbec = api(
+    let webcam = api(
         Fake {
-            source: source(ORBBEC_CAMERA_SOURCE_ID, "orbbec"),
+            source: source(CAMERA_SOURCE_ID, "webcam"),
             captures: Arc::new(AtomicUsize::new(0)),
             class: None,
         },
@@ -375,11 +383,8 @@ async fn two_fake_backends_share_the_contract_without_realsense() {
         "http://127.0.0.1:31003",
     )
     .await;
-    let left = orbbec
-        .execute(
-            "capture-current",
-            &json!({ "source_id": ORBBEC_CAMERA_SOURCE_ID }),
-        )
+    let left = webcam
+        .execute("capture-current", &json!({ "source_id": CAMERA_SOURCE_ID }))
         .await
         .unwrap();
     let right = realsense
@@ -393,7 +398,7 @@ async fn two_fake_backends_share_the_contract_without_realsense() {
     assert_ne!(left["source_id"], right["source_id"]);
 
     for (service, source_id) in [
-        (&orbbec, ORBBEC_CAMERA_SOURCE_ID),
+        (&webcam, CAMERA_SOURCE_ID),
         (&realsense, "realsense-camera"),
     ] {
         let missing = service

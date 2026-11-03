@@ -88,11 +88,10 @@ build_one() {
   mkdir -p "$context"
   compile_binary "$arch" "$host" "$context/a2a-lab-ot2"
   cp "$root/agent/Dockerfile" "$context/Dockerfile"
-  cp "$root/agent/orbbec-sdk.env" "$context/orbbec-sdk.env"
   local image
   image="$(agent_image_name "$arch")"
   if ! docker build --platform "linux/${arch}" -t "$image" "$context"; then
-    printf 'agent image build failed for %s. Check the SDK download, checksum, shared library, and application startup.\n' "$arch" >&2
+    printf 'agent image build failed for %s. Check the application binary and startup.\n' "$arch" >&2
     return 1
   fi
   printf 'built %s\n' "$image"
@@ -116,35 +115,22 @@ verify_one() {
   }
   docker run --rm --platform "linux/${arch}" --entrypoint /bin/sh "$image" -c '
     test ! -e /usr/bin/gcc
-    test ! -d /opt/orbbec/examples
-    test ! -e /usr/local/bin/OrbbecViewer
+    test ! -d /opt/orbbec
     test ! -e /opt/opentrons
-    test -f /usr/share/doc/orbbec/LICENSE.txt
-    test -d /usr/share/doc/orbbec/licenses
-    test -f /opt/orbbec/lib/libOrbbecSDK.so.2.10.6
   '
-  local version
-  if ! version="$(docker run --rm --platform "linux/${arch}" "$image" orbbec-sdk-version)"; then
-    printf 'Orbbec shared library could not be loaded in %s\n' "$image" >&2
-    return 1
-  fi
-  [[ "$version" == "2.10.6" ]] || {
-    printf 'agent image %s reported Orbbec SDK %s, expected 2.10.6\n' "$image" "$version" >&2
-    return 1
-  }
   docker run --rm --platform "linux/${arch}" --entrypoint /usr/local/bin/a2a-lab-ot2 "$image" --version >/dev/null
   local startup
   startup="$(docker run --rm --platform "linux/${arch}" -e A2ALAB_OPENTRONS_URL=http://127.0.0.1:9 "$image" 2>&1 || true)"
-  [[ "$startup" == *"opentrons-camera"* && "$startup" == *"orbbec-camera off"* ]] || {
+  [[ "$startup" == *"opentrons-camera"* && "$startup" == *"camera off"* ]] || {
     printf 'agent image %s did not start the serve path:\n%s\n' "$image" "$startup" >&2
     return 1
   }
   local capture
-  if capture="$(docker run --rm --platform "linux/${arch}" -e A2ALAB_ORBBEC_CAMERA=true "$image" get-current-image --source orbbec-camera --output /var/lib/a2a-lab-ot2/frame.jpg 2>&1)"; then
+  if capture="$(docker run --rm --platform "linux/${arch}" -e A2ALAB_CAMERA_INDEX=0 "$image" get-current-image --source camera --output /var/lib/a2a-lab-ot2/frame.jpg 2>&1)"; then
     printf 'agent image %s captured a frame without a camera:\n%s\n' "$image" "$capture" >&2
     return 1
   fi
-  [[ "$capture" == *"orbbec-camera"* && "$capture" == *"no Orbbec device"* ]] || {
+  [[ "$capture" == *"camera"* && "$capture" == *"no frame"* ]] || {
     printf 'agent image %s capture failure was not actionable:\n%s\n' "$image" "$capture" >&2
     return 1
   }

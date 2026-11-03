@@ -1,13 +1,11 @@
 //! Camera backend selection without hardware.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use a2a_lab_ot2::cameras::{
-    CameraBackend, CameraDevice, CameraError, CameraSelection, OrbbecColorBackend, select_camera,
+    CameraBackend, CameraDevice, CameraError, CameraSelection, select_camera,
 };
 use a2a_lab_ot2::frame_sets::{ChannelProfile, ChannelRole, FrameChannelId};
-use a2a_lab_ot2::orbbec::{OrbbecCapture, OrbbecCaptureError};
 
 struct Script {
     devices: Vec<CameraDevice>,
@@ -82,7 +80,7 @@ fn selection_covers_zero_one_missing_and_ambiguous_devices() {
     let ambiguous = select_camera(&many, None).unwrap_err();
     assert!(ambiguous.to_string().contains('a'));
     assert_eq!(select_camera(&many, Some("b")).unwrap(), 0);
-    assert!(CameraSelection::new("orbbec", Some("")).is_err());
+    assert!(CameraSelection::new("generic", Some("")).is_err());
 }
 
 #[test]
@@ -122,33 +120,4 @@ fn fake_backend_reports_profiles_and_every_error_class() {
             class
         );
     }
-}
-
-struct Color(Vec<u8>);
-
-impl OrbbecCapture for Color {
-    fn capture_color(
-        &self,
-        _serial: Option<&str>,
-        _timeout: Duration,
-        _max_bytes: u64,
-    ) -> Result<Vec<u8>, OrbbecCaptureError> {
-        Ok(self.0.clone())
-    }
-}
-
-#[test]
-fn orbbec_color_backend_preserves_jpeg_bytes_without_realsense() {
-    let backend = OrbbecColorBackend::new(Arc::new(Color(vec![0xFF, 0xD8, 0xFF, 0xD9])));
-    assert_eq!(backend.id(), "orbbec");
-    let bytes = backend
-        .capture_color(None, Duration::from_millis(1), 64)
-        .unwrap();
-    assert_eq!(bytes, vec![0xFF, 0xD8, 0xFF, 0xD9]);
-    assert_eq!(
-        backend
-            .capture_color_compat(None, Duration::from_millis(1), 64)
-            .unwrap(),
-        bytes
-    );
 }

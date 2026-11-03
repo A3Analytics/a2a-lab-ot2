@@ -7,7 +7,8 @@ use std::time::Duration;
 use a2a_lab_dev_kit::{A2aLabError, ImageSource, ImageSourceId, ImageTransportConfig};
 
 use crate::camera::{
-    CameraCapture, DEFAULT_EXTERNAL_CAMERA_DESCRIPTION, EXTERNAL_CAMERA_SOURCE_ID, ExternalCamera,
+    CAMERA_SOURCE_ID, CameraCapture, CameraStill, DEFAULT_EXTERNAL_CAMERA_DESCRIPTION,
+    EXTERNAL_CAMERA_SOURCE_ID, ExternalCamera, camera_source,
     external_camera_source_with_description,
 };
 use crate::images::{
@@ -15,29 +16,19 @@ use crate::images::{
     LiveImageCatalog,
 };
 use crate::opentrons::{OPENTRONS_CAMERA_SOURCE_ID, OpentronsCamera, opentrons_camera_source};
-use crate::orbbec::{
-    ORBBEC_CAMERA_SOURCE_ID, ORBBEC_FIRST_FRAME_WAIT, OrbbecCamera, OrbbecCapture,
-    SdkOrbbecCapture, orbbec_camera_source,
-};
 
 /// Default still-capture budget for both cameras.
 pub const DEFAULT_CAPTURE_TIMEOUT_MS: u64 = 10_000;
 
-/// Selected Orbbec device. `None` uses the only connected device at capture time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OrbbecSelection {
-    serial: Option<String>,
-}
-
 /// Timeout, retention, payload limit, and the optional cameras.
 ///
-/// Building this value does not open a camera, load Orbbec SDK, or contact robot-server.
-/// `camera_index` is the extra native camera. `None` leaves that source off.
+/// Building this value does not open a camera or contact robot-server.
+/// `camera_index` is the external camera. `None` leaves that source off.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageServeConfig {
     camera_index: Option<u32>,
     description: String,
-    orbbec: Option<OrbbecSelection>,
+    webcam_index: Option<u32>,
     transport: ImageTransportConfig,
     capture_timeout: Duration,
     retention_per_source: u64,
@@ -67,25 +58,20 @@ impl ImageServeConfig {
         Ok(Self {
             camera_index,
             description,
-            orbbec: None,
+            webcam_index: None,
             transport,
             capture_timeout,
             retention_per_source,
         })
     }
 
-    /// Enables `orbbec-camera` without opening a device.
+    /// Enables source `camera` without opening a device.
     ///
-    /// `None` selects the only connected device when a frame is requested.
-    /// An empty serial is rejected.
-    pub fn with_orbbec(mut self, serial: Option<&str>) -> Result<Self, A2aLabError> {
-        if serial.is_some_and(str::is_empty) {
-            return Err(A2aLabError::invalid("orbbec_serial", "must not be empty"));
-        }
-        self.orbbec = Some(OrbbecSelection {
-            serial: serial.map(str::to_owned),
-        });
-        Ok(self)
+    /// Still capture reuses the latest JPEG from the live video pump.
+    #[must_use]
+    pub fn with_camera_index(mut self, index: u32) -> Self {
+        self.webcam_index = Some(index);
+        self
     }
 
     /// Native camera index when the extra camera is enabled.
@@ -100,18 +86,10 @@ impl ImageServeConfig {
         &self.description
     }
 
-    /// Whether `orbbec-camera` is advertised.
+    /// Whether source `camera` is advertised.
     #[must_use]
-    pub const fn orbbec_enabled(&self) -> bool {
-        self.orbbec.is_some()
-    }
-
-    /// Serial pinned for `orbbec-camera`, when one was configured.
-    #[must_use]
-    pub fn orbbec_serial(&self) -> Option<&str> {
-        self.orbbec
-            .as_ref()
-            .and_then(|selection| selection.serial.as_deref())
+    pub const fn camera_enabled(&self) -> bool {
+        self.webcam_index.is_some()
     }
 
     /// Decoded-byte maximum applied to both cameras and protocol adapters.
@@ -150,15 +128,12 @@ impl ImageServeConfig {
             }
             None => "external-camera off".to_owned(),
         };
-        let orbbec = match &self.orbbec {
-            None => "orbbec-camera off".to_owned(),
-            Some(OrbbecSelection { serial: None }) => "orbbec-camera sole-device".to_owned(),
-            Some(OrbbecSelection {
-                serial: Some(serial),
-            }) => format!("orbbec-camera serial {serial}"),
+        let camera = match self.webcam_index {
+            Some(index) => format!("camera index {index}"),
+            None => "camera off".to_owned(),
         };
         format!(
-            "images       opentrons-camera asset opentrons-ot2; {external}; {orbbec} timeout {}ms retention {} max-bytes {} history {DEFAULT_IMAGE_HISTORY_DB} age {}d",
+            "images       opentrons-camera asset opentrons-ot2; {external}; {camera} timeout {}ms retention {} max-bytes {} history {DEFAULT_IMAGE_HISTORY_DB} age {}d",
             self.capture_timeout.as_millis(),
             self.retention_per_source,
             self.max_image_bytes(),
@@ -169,15 +144,14 @@ impl ImageServeConfig {
 
 /// Live cameras for this process. `external_capture` replaces native capture in tests.
 ///
-/// The on-board camera is always registered. The native camera is registered only
-/// when [`ImageServeConfig::camera_index`] is set. `orbbec-camera` is registered
-/// only when Orbbec color capture is enabled. No camera or SDK library is opened
-/// here. A missing or failing camera surfaces on the current-image call for that source.
+/// The on-board camera is always registered. The external camera is registered only
+/// when [`ImageServeConfig::camera_index`] is set. Source `camera` is registered
+/// only when a webcam index is set. No camera is opened here. Still capture for
+/// `camera` reads the JPEG stored by the video pump.
 pub fn image_catalog(
     opentrons_url: &str,
     config: &ImageServeConfig,
     external_capture: Option<Arc<dyn CameraCapture>>,
-    orbbec_capture: Option<Arc<dyn OrbbecCapture>>,
 ) -> Result<LiveImageCatalog, A2aLabError> {
     let opentrons = OpentronsCamera::new(
         opentrons_url,
@@ -201,21 +175,11 @@ pub fn image_catalog(
             Arc::new(external),
         ));
     }
-    if config.orbbec_enabled() {
-        let (capture, timeout) = match orbbec_capture {
-            Some(capture) => (capture, config.capture_timeout),
-            None => (
-                Arc::new(SdkOrbbecCapture) as Arc<dyn OrbbecCapture>,
-                config.capture_timeout.max(ORBBEC_FIRST_FRAME_WAIT),
-            ),
-        };
-        let orbbec = OrbbecCamera::with_shared_capture(
-            config.orbbec_serial(),
-            timeout,
-            config.max_image_bytes(),
-            capture,
-        )?;
-        sources.push((orbbec_camera_source()?, Arc::new(orbbec)));
+    if config.camera_enabled() {
+        sources.push((
+            camera_source()?,
+            Arc::new(CameraStill::new(config.max_image_bytes())?),
+        ));
     }
     LiveImageCatalog::new(
         sources,
@@ -225,20 +189,19 @@ pub fn image_catalog(
 
 /// Builds the serve catalog and opens history for every configured camera.
 ///
-/// Restoring history does not open a camera or the Orbbec SDK.
+/// Restoring history does not open a camera.
 pub async fn open_image_catalog(
     opentrons_url: &str,
     config: &ImageServeConfig,
     external_capture: Option<Arc<dyn CameraCapture>>,
-    orbbec_capture: Option<Arc<dyn OrbbecCapture>>,
 ) -> Result<LiveImageCatalog, A2aLabError> {
-    let catalog = image_catalog(opentrons_url, config, external_capture, orbbec_capture)?;
+    let catalog = image_catalog(opentrons_url, config, external_capture)?;
     let mut sources = vec![ImageSourceId::new(OPENTRONS_CAMERA_SOURCE_ID)?];
     if config.camera_index().is_some() {
         sources.push(ImageSourceId::new(EXTERNAL_CAMERA_SOURCE_ID)?);
     }
-    if config.orbbec_enabled() {
-        sources.push(ImageSourceId::new(ORBBEC_CAMERA_SOURCE_ID)?);
+    if config.camera_enabled() {
+        sources.push(ImageSourceId::new(CAMERA_SOURCE_ID)?);
     }
     catalog
         .with_persisted_sources(&sources, Path::new(DEFAULT_IMAGE_HISTORY_DB))

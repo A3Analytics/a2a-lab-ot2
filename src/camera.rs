@@ -17,6 +17,9 @@ use crate::time::now;
 /// Stable image-source id for the external camera.
 pub const EXTERNAL_CAMERA_SOURCE_ID: &str = "external-camera";
 
+/// Stable image-source id for the optional second webcam.
+pub const CAMERA_SOURCE_ID: &str = "camera";
+
 /// Platform-neutral description advertised when none is configured.
 pub const DEFAULT_EXTERNAL_CAMERA_DESCRIPTION: &str =
     "Still frame from the configured external camera.";
@@ -112,15 +115,7 @@ impl CameraCapture for NativeCameraCapture {
                 .frame_raw()
                 .map_err(|error| CameraCaptureError::Backend(error.to_string()))?;
             if frame_number == frames {
-                if frame.is_empty() {
-                    return Err(CameraCaptureError::Empty);
-                }
-                let cap =
-                    usize::try_from(self.max_bytes).map_err(|_| CameraCaptureError::Oversize)?;
-                if frame.len() > cap {
-                    return Err(CameraCaptureError::Oversize);
-                }
-                kept = Some(frame.into_owned());
+                kept = Some(owned_mjpeg(&frame, self.max_bytes)?);
             }
         }
         kept.ok_or(CameraCaptureError::Empty)
@@ -141,6 +136,91 @@ fn latest_external_frame() -> Option<Vec<u8>> {
         .lock()
         .ok()
         .and_then(|slot| slot.clone())
+}
+
+static LATEST_CAMERA_JPEG: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+/// Stores the newest JPEG from the `camera` video pump.
+pub fn remember_camera_frame(bytes: Vec<u8>) {
+    if let Ok(mut slot) = LATEST_CAMERA_JPEG.lock() {
+        *slot = Some(bytes);
+    }
+}
+
+/// Drops a remembered `camera` JPEG. Tests use this between cases.
+pub fn clear_camera_frame() {
+    if let Ok(mut slot) = LATEST_CAMERA_JPEG.lock() {
+        *slot = None;
+    }
+}
+
+fn latest_camera_frame() -> Option<Vec<u8>> {
+    LATEST_CAMERA_JPEG.lock().ok().and_then(|slot| slot.clone())
+}
+
+/// Source descriptor for the optional second webcam.
+pub fn camera_source() -> Result<ImageSource, A2aLabError> {
+    Ok(ImageSource {
+        id: ImageSourceId::new(CAMERA_SOURCE_ID)?,
+        name: "Camera".to_owned(),
+        description: "Still frame from the configured camera.".to_owned(),
+        asset_id: None,
+        semantic_id: None,
+    })
+}
+
+/// Still capture for source `camera`.
+///
+/// Reads the JPEG stored by the live video pump. This does not open a device.
+pub struct CameraStill {
+    transport: ImageTransportConfig,
+}
+
+impl CameraStill {
+    /// Rejects an invalid payload limit. No device is opened.
+    pub fn new(max_image_bytes: u64) -> Result<Self, A2aLabError> {
+        Ok(Self {
+            transport: ImageTransportConfig::new(max_image_bytes)?,
+        })
+    }
+
+    fn take_frame(&self) -> Result<CapturedFrame, A2aLabError> {
+        let Some(body) = latest_camera_frame() else {
+            return Err(A2aLabError::unavailable("camera has no frame yet"));
+        };
+        if body.is_empty() {
+            return Err(A2aLabError::invalid(
+                "camera",
+                "camera returned an empty frame",
+            ));
+        }
+        let (width, height) = jpeg_dimensions(&body).map_err(|_| {
+            A2aLabError::invalid("camera", "camera returned a malformed MJPEG frame")
+        })?;
+        self.transport.check_payload(&body).map_err(|_| {
+            A2aLabError::invalid(
+                "camera",
+                "camera returned a frame larger than the configured maximum",
+            )
+        })?;
+        Ok(CapturedFrame::new(
+            now()?,
+            "image/jpeg",
+            width,
+            height,
+            Some("Camera".to_owned()),
+            JsonObject::empty(),
+            body,
+        ))
+    }
+}
+
+impl ImageCapture for CameraStill {
+    fn capture(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<CapturedFrame, A2aLabError>> + Send + '_>> {
+        Box::pin(async move { self.take_frame() })
+    }
 }
 
 /// Source descriptor for the external camera.
@@ -302,15 +382,97 @@ impl NativeCameraCapture {
         let frame = camera
             .frame_raw()
             .map_err(|error| CameraCaptureError::Backend(error.to_string()))?;
-        if frame.is_empty() {
-            return Err(CameraCaptureError::Empty);
-        }
-        let cap = usize::try_from(self.max_bytes).map_err(|_| CameraCaptureError::Oversize)?;
-        if frame.len() > cap {
-            return Err(CameraCaptureError::Oversize);
-        }
-        Ok(frame.into_owned())
+        owned_mjpeg(&frame, self.max_bytes)
     }
+}
+
+/// V4L2 MJPEG buffers are often padded to `width * height`. Keep the JPEG through
+/// its end marker so live playback and disk storage do not carry the padding.
+pub(crate) fn trim_mjpeg_buffer(bytes: &[u8]) -> &[u8] {
+    let Some(end) = jpeg_eoi(bytes) else {
+        return bytes;
+    };
+    &bytes[..end]
+}
+
+fn owned_mjpeg(frame: &[u8], max_bytes: u64) -> Result<Vec<u8>, CameraCaptureError> {
+    let jpeg = trim_mjpeg_buffer(frame);
+    if jpeg.is_empty() {
+        return Err(CameraCaptureError::Empty);
+    }
+    let cap = usize::try_from(max_bytes).map_err(|_| CameraCaptureError::Oversize)?;
+    if jpeg.len() > cap {
+        return Err(CameraCaptureError::Oversize);
+    }
+    Ok(jpeg.to_vec())
+}
+
+fn jpeg_eoi(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut index = 2;
+    while index + 1 < bytes.len() {
+        if bytes[index] != 0xFF {
+            return None;
+        }
+        while index < bytes.len() && bytes[index] == 0xFF {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return None;
+        }
+        let marker = bytes[index];
+        index += 1;
+        if marker == 0xD9 {
+            return Some(index);
+        }
+        if marker == 0x00 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            continue;
+        }
+        if marker == 0xDA {
+            if index + 1 >= bytes.len() {
+                return None;
+            }
+            let len = usize::from(u16::from_be_bytes([bytes[index], bytes[index + 1]]));
+            if len < 2 || index.checked_add(len)? > bytes.len() {
+                return None;
+            }
+            return jpeg_scan_eoi(bytes, index + len);
+        }
+        if index + 1 >= bytes.len() {
+            return None;
+        }
+        let len = usize::from(u16::from_be_bytes([bytes[index], bytes[index + 1]]));
+        if len < 2 || index.checked_add(len)? > bytes.len() {
+            return None;
+        }
+        index += len;
+    }
+    None
+}
+
+fn jpeg_scan_eoi(bytes: &[u8], mut index: usize) -> Option<usize> {
+    while index + 1 < bytes.len() {
+        if bytes[index] != 0xFF {
+            index += 1;
+            continue;
+        }
+        let next = bytes[index + 1];
+        if next == 0x00 || next == 0xFF {
+            index += 1 + usize::from(next == 0x00);
+            continue;
+        }
+        if next == 0xD9 {
+            return Some(index + 2);
+        }
+        if (0xD0..=0xD7).contains(&next) {
+            index += 2;
+            continue;
+        }
+        return None;
+    }
+    None
 }
 
 impl ImageCapture for ExternalCamera {
@@ -318,5 +480,27 @@ impl ImageCapture for ExternalCamera {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<CapturedFrame, A2aLabError>> + Send + '_>> {
         Box::pin(async move { self.take_frame().await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_mjpeg_buffer;
+
+    #[test]
+    fn trims_v4l2_padding_after_the_scan_end() {
+        let mut jpeg = vec![
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x02, 0xFF, 0xDA, 0x00, 0x02, 0x12, 0xFF, 0x00, 0x34,
+            0xFF, 0xD9,
+        ];
+        let end = jpeg.len();
+        jpeg.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(trim_mjpeg_buffer(&jpeg), &jpeg[..end]);
+    }
+
+    #[test]
+    fn keeps_bytes_that_are_not_a_jpeg() {
+        let bytes = [1, 2, 3, 4];
+        assert_eq!(trim_mjpeg_buffer(&bytes), &bytes);
     }
 }

@@ -156,10 +156,7 @@ impl FrameSetHistory {
         }
         let next = (rows.len() > usize::try_from(limit).unwrap_or(usize::MAX))
             .then(|| (offset + i64::from(limit)).to_string());
-        Ok(FramePage {
-            items,
-            next_cursor: next,
-        })
+        Ok(FramePage::new(items, next))
     }
 
     /// One stored set, including payload bytes.
@@ -232,6 +229,10 @@ pub struct FramePage<T> {
 }
 
 impl<T> FramePage<T> {
+    pub(crate) fn new(items: Vec<T>, next_cursor: Option<String>) -> Self {
+        Self { items, next_cursor }
+    }
+
     /// Page items.
     #[must_use]
     pub fn items(&self) -> &[T] {

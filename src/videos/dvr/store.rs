@@ -12,9 +12,14 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, SqlitePool};
 use tokio::task;
 
+use super::chunk::{
+    append_payload, chunk_relpath, chunk_tmp_relpath, finalize_chunk, minute_start_us,
+    read_payload_range, truncate_chunk_files,
+};
 use super::coverage::coverage_from_starts;
 
 const SCHEMA: &str = include_str!("../../../migrations/004_video_dvr.sql");
+const SCHEMA_CHUNKS: &str = include_str!("../../../migrations/005_video_dvr_chunks.sql");
 
 /// Default root directory for indexed video payloads and SQLite index.
 pub const DEFAULT_VIDEO_DVR_ROOT: &str = ".a2a-lab-ot2/video-dvr";
@@ -77,7 +82,7 @@ impl IndexedVideoDvr {
             .connect_with(options)
             .await
             .map_err(db_error)?;
-        for statement in SCHEMA.split(';') {
+        for statement in SCHEMA.split(';').chain(SCHEMA_CHUNKS.split(';')) {
             let statement = statement.trim();
             if statement.is_empty() {
                 continue;
@@ -119,7 +124,7 @@ impl IndexedVideoDvr {
             frame_period_us,
         )
         .await?;
-        self.write_segment(
+        self.write_chunk_frame(
             source_id,
             &track_id,
             captured_at,
@@ -141,10 +146,14 @@ impl IndexedVideoDvr {
 
     /// Global cleanup across every indexed source.
     pub async fn cleanup_at(&self, now: UtcTimestamp) -> Result<(), A2aLabError> {
-        let sources = sqlx::query("SELECT DISTINCT source_id FROM dvr_segments")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(db_error)?;
+        let sources = sqlx::query(
+            "SELECT DISTINCT source_id FROM dvr_segments
+             UNION
+             SELECT DISTINCT source_id FROM dvr_frames",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_error)?;
         for row in sources {
             let source_id: String = row.try_get("source_id").map_err(db_error)?;
             self.cleanup_source_id(&source_id, now).await?;
@@ -177,7 +186,7 @@ impl IndexedVideoDvr {
         Ok(())
     }
 
-    async fn write_segment(
+    async fn write_chunk_frame(
         &self,
         source_id: &VideoSourceId,
         track_id: &DvrTrackId,
@@ -186,6 +195,120 @@ impl IndexedVideoDvr {
         keyframe: bool,
         payload: &[u8],
     ) -> Result<(), A2aLabError> {
+        let minute = minute_start_us(captured_at);
+        self.finalize_chunks_before(source_id, track_id, minute)
+            .await?;
+        let relpath = chunk_relpath(source_id.as_str(), track_id.as_str(), minute);
+        let tmp_relpath = chunk_tmp_relpath(source_id.as_str(), track_id.as_str(), minute);
+        sqlx::query(
+            "INSERT INTO dvr_chunks (source_id, track_id, minute_start_us, chunk_relpath, chunk_ready)
+             VALUES (?1, ?2, ?3, ?4, 0)
+             ON CONFLICT(source_id, track_id, minute_start_us) DO NOTHING",
+        )
+        .bind(source_id.as_str())
+        .bind(track_id.as_str())
+        .bind(minute)
+        .bind(&relpath)
+        .execute(&self.pool)
+        .await
+        .map_err(db_error)?;
+        let tmp_path = self.root.join(&tmp_relpath);
+        let (offset, checksum) = append_payload(&tmp_path, payload).await?;
+        let end =
+            captured_at.saturating_add_micros(i64::try_from(frame_period_us.max(1)).unwrap_or(1));
+        sqlx::query(
+            "INSERT INTO dvr_frames
+                (source_id, track_id, start_us, end_us, keyframe, minute_start_us, chunk_relpath,
+                 payload_offset, payload_length, payload_crc32, payload_ready)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
+             ON CONFLICT(source_id, track_id, start_us) DO UPDATE SET
+                end_us = excluded.end_us,
+                keyframe = excluded.keyframe,
+                minute_start_us = excluded.minute_start_us,
+                chunk_relpath = excluded.chunk_relpath,
+                payload_offset = excluded.payload_offset,
+                payload_length = excluded.payload_length,
+                payload_crc32 = excluded.payload_crc32,
+                payload_ready = 1",
+        )
+        .bind(source_id.as_str())
+        .bind(track_id.as_str())
+        .bind(captured_at.as_micros())
+        .bind(end.as_micros())
+        .bind(i64::from(keyframe))
+        .bind(minute)
+        .bind(&relpath)
+        .bind(i64::try_from(offset).unwrap_or(i64::MAX))
+        .bind(i64::try_from(payload.len()).unwrap_or(i64::MAX))
+        .bind(i64::from(checksum))
+        .execute(&self.pool)
+        .await
+        .map_err(db_error)?;
+        Ok(())
+    }
+
+    async fn finalize_chunks_before(
+        &self,
+        source_id: &VideoSourceId,
+        track_id: &DvrTrackId,
+        minute: i64,
+    ) -> Result<(), A2aLabError> {
+        let rows = sqlx::query(
+            "SELECT minute_start_us, chunk_relpath FROM dvr_chunks
+             WHERE source_id = ?1 AND track_id = ?2 AND chunk_ready = 0 AND minute_start_us < ?3",
+        )
+        .bind(source_id.as_str())
+        .bind(track_id.as_str())
+        .bind(minute)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_error)?;
+        for row in rows {
+            let minute_start: i64 = row.try_get("minute_start_us").map_err(db_error)?;
+            let relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
+            self.finalize_chunk_minute(source_id, track_id, minute_start, &relpath)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn finalize_chunk_minute(
+        &self,
+        source_id: &VideoSourceId,
+        track_id: &DvrTrackId,
+        minute_start: i64,
+        relpath: &str,
+    ) -> Result<(), A2aLabError> {
+        let tmp_relpath = chunk_tmp_relpath(source_id.as_str(), track_id.as_str(), minute_start);
+        let tmp = self.root.join(&tmp_relpath);
+        let final_path = self.root.join(relpath);
+        finalize_chunk(&tmp, &final_path).await?;
+        sqlx::query(
+            "UPDATE dvr_chunks SET chunk_ready = 1, chunk_relpath = ?4
+             WHERE source_id = ?1 AND track_id = ?2 AND minute_start_us = ?3",
+        )
+        .bind(source_id.as_str())
+        .bind(track_id.as_str())
+        .bind(minute_start)
+        .bind(relpath)
+        .execute(&self.pool)
+        .await
+        .map_err(db_error)?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub async fn write_legacy_segment(
+        &self,
+        source_id: &VideoSourceId,
+        track_id: &DvrTrackId,
+        captured_at: UtcTimestamp,
+        frame_period_us: u64,
+        keyframe: bool,
+        payload: &[u8],
+    ) -> Result<(), A2aLabError> {
+        self.ensure_track(source_id, track_id, VideoCodec::Mjpeg, &[], frame_period_us)
+            .await?;
         let end =
             captured_at.saturating_add_micros(i64::try_from(frame_period_us.max(1)).unwrap_or(1));
         let relpath = format!(
@@ -274,6 +397,49 @@ impl IndexedVideoDvr {
         .execute(&self.pool)
         .await
         .map_err(db_error)?;
+        sqlx::query("DELETE FROM dvr_frames WHERE payload_ready = 0")
+            .execute(&self.pool)
+            .await
+            .map_err(db_error)?;
+        let indexed = sqlx::query(
+            "SELECT chunk_relpath, payload_offset, payload_length
+             FROM dvr_frames
+             WHERE payload_ready = 1",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_error)?;
+        let mut truncate_to = Vec::new();
+        let mut limits: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for row in indexed {
+            let relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
+            let offset: i64 = row.try_get("payload_offset").map_err(db_error)?;
+            let length: i64 = row.try_get("payload_length").map_err(db_error)?;
+            let end = u64::try_from(offset.saturating_add(length).max(0)).unwrap_or(0);
+            limits
+                .entry(relpath)
+                .and_modify(|current| *current = (*current).max(end))
+                .or_insert(end);
+        }
+        truncate_to.extend(limits);
+        let root = self.root.clone();
+        task::spawn_blocking(move || truncate_chunk_files(&root, &truncate_to))
+            .await
+            .map_err(join_error)??;
+        sqlx::query(
+            "DELETE FROM dvr_chunks
+             WHERE chunk_ready = 0
+               AND NOT EXISTS (
+                 SELECT 1 FROM dvr_frames
+                 WHERE dvr_frames.source_id = dvr_chunks.source_id
+                   AND dvr_frames.track_id = dvr_chunks.track_id
+                   AND dvr_frames.minute_start_us = dvr_chunks.minute_start_us
+                   AND dvr_frames.payload_ready = 1
+               )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(db_error)?;
         Ok(())
     }
 
@@ -305,12 +471,61 @@ impl IndexedVideoDvr {
             .execute(&self.pool)
             .await
             .map_err(db_error)?;
+        let frame_rows = sqlx::query(
+            "SELECT chunk_relpath FROM dvr_frames
+             WHERE source_id = ?1 AND start_us < ?2",
+        )
+        .bind(source_id)
+        .bind(cutoff.as_micros())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_error)?;
+        sqlx::query("DELETE FROM dvr_frames WHERE source_id = ?1 AND start_us < ?2")
+            .bind(source_id)
+            .bind(cutoff.as_micros())
+            .execute(&self.pool)
+            .await
+            .map_err(db_error)?;
+        for row in frame_rows {
+            let relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
+            self.remove_chunk_if_empty(relpath).await?;
+        }
+        Ok(())
+    }
+
+    async fn remove_chunk_if_empty(&self, relpath: String) -> Result<(), A2aLabError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dvr_frames WHERE chunk_relpath = ?1 AND payload_ready = 1",
+        )
+        .bind(&relpath)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(db_error)?;
+        if count != 0 {
+            return Ok(());
+        }
+        sqlx::query("DELETE FROM dvr_chunks WHERE chunk_relpath = ?1")
+            .bind(&relpath)
+            .execute(&self.pool)
+            .await
+            .map_err(db_error)?;
+        let path = self.root.join(&relpath);
+        let tmp = self.root.join(format!("{relpath}.tmp"));
+        task::spawn_blocking(move || {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(tmp);
+        })
+        .await
+        .map_err(join_error)?;
         Ok(())
     }
 
     async fn require_source(&self, source_id: &VideoSourceId) -> Result<(), A2aLabError> {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM dvr_segments WHERE source_id = ?1 AND payload_ready = 1",
+            "SELECT (
+                (SELECT COUNT(*) FROM dvr_segments WHERE source_id = ?1 AND payload_ready = 1)
+              + (SELECT COUNT(*) FROM dvr_frames WHERE source_id = ?1 AND payload_ready = 1)
+             )",
         )
         .bind(source_id.as_str())
         .fetch_one(&self.pool)
@@ -343,6 +558,9 @@ impl IndexedVideoDvr {
         let rows = sqlx::query(
             "SELECT start_us FROM dvr_segments
              WHERE source_id = ?1 AND payload_ready = 1
+             UNION ALL
+             SELECT start_us FROM dvr_frames
+             WHERE source_id = ?1 AND payload_ready = 1
              ORDER BY start_us",
         )
         .bind(source_id.as_str())
@@ -365,6 +583,24 @@ impl IndexedVideoDvr {
             .map_err(join_error)?
             .map_err(|error| A2aLabError::unavailable(format!("read {display}: {error}")))
     }
+
+    async fn load_chunk_payload(
+        &self,
+        relpath: &str,
+        offset: u64,
+        length: u64,
+        expected_crc32: u32,
+    ) -> Result<Vec<u8>, A2aLabError> {
+        let root = self.root.clone();
+        let final_path = root.join(relpath);
+        let tmp_path = root.join(format!("{relpath}.tmp"));
+        let path = if tmp_path.exists() {
+            tmp_path
+        } else {
+            final_path
+        };
+        read_payload_range(&path, offset, length, expected_crc32).await
+    }
 }
 
 impl DvrMediaStore for IndexedVideoDvr {
@@ -374,14 +610,22 @@ impl DvrMediaStore for IndexedVideoDvr {
     ) -> Result<DvrRetentionBounds, A2aLabError> {
         self.require_source(source_id).await?;
         let oldest: i64 = sqlx::query_scalar(
-            "SELECT MIN(start_us) FROM dvr_segments WHERE source_id = ?1 AND payload_ready = 1",
+            "SELECT MIN(start_us) FROM (
+                SELECT start_us FROM dvr_segments WHERE source_id = ?1 AND payload_ready = 1
+                UNION ALL
+                SELECT start_us FROM dvr_frames WHERE source_id = ?1 AND payload_ready = 1
+             )",
         )
         .bind(source_id.as_str())
         .fetch_one(&self.pool)
         .await
         .map_err(db_error)?;
         let newest: i64 = sqlx::query_scalar(
-            "SELECT MAX(end_us) FROM dvr_segments WHERE source_id = ?1 AND payload_ready = 1",
+            "SELECT MAX(end_us) FROM (
+                SELECT end_us FROM dvr_segments WHERE source_id = ?1 AND payload_ready = 1
+                UNION ALL
+                SELECT end_us FROM dvr_frames WHERE source_id = ?1 AND payload_ready = 1
+             )",
         )
         .bind(source_id.as_str())
         .fetch_one(&self.pool)
@@ -410,9 +654,17 @@ impl DvrMediaStore for IndexedVideoDvr {
         self.require_source(source_id).await?;
         let rows = sqlx::query(
             "SELECT track_id, codec, codec_init, MIN(start_us) AS min_start, MAX(end_us) AS max_end
-             FROM dvr_segments
-             JOIN dvr_tracks USING (source_id, track_id)
-             WHERE source_id = ?1 AND payload_ready = 1
+             FROM (
+                SELECT source_id, track_id, start_us, end_us, codec, codec_init
+                FROM dvr_segments
+                JOIN dvr_tracks USING (source_id, track_id)
+                WHERE source_id = ?1 AND payload_ready = 1
+                UNION ALL
+                SELECT source_id, track_id, start_us, end_us, codec, codec_init
+                FROM dvr_frames
+                JOIN dvr_tracks USING (source_id, track_id)
+                WHERE source_id = ?1 AND payload_ready = 1
+             )
              GROUP BY track_id, codec, codec_init",
         )
         .bind(source_id.as_str())
@@ -440,12 +692,26 @@ impl DvrMediaStore for IndexedVideoDvr {
         };
         let limit = i64::from(page.limit());
         let rows = sqlx::query(
-            "SELECT track_id, start_us, end_us, keyframe, payload_relpath, codec
-             FROM dvr_segments
-             JOIN dvr_tracks USING (source_id, track_id)
-             WHERE source_id = ?1 AND track_id = ?2
-               AND start_us < ?4 AND end_us > ?3
-               AND payload_ready = 1
+            "SELECT track_id, start_us, end_us, keyframe, payload_relpath, chunk_relpath,
+                    payload_offset, payload_length, payload_crc32, codec
+             FROM (
+                SELECT track_id, start_us, end_us, keyframe, payload_relpath,
+                       '' AS chunk_relpath, NULL AS payload_offset, NULL AS payload_length,
+                       NULL AS payload_crc32, codec
+                FROM dvr_segments
+                JOIN dvr_tracks USING (source_id, track_id)
+                WHERE source_id = ?1 AND track_id = ?2
+                  AND start_us < ?4 AND end_us > ?3
+                  AND payload_ready = 1
+                UNION ALL
+                SELECT track_id, start_us, end_us, keyframe, '' AS payload_relpath, chunk_relpath,
+                       payload_offset, payload_length, payload_crc32, codec
+                FROM dvr_frames
+                JOIN dvr_tracks USING (source_id, track_id)
+                WHERE source_id = ?1 AND track_id = ?2
+                  AND start_us < ?4 AND end_us > ?3
+                  AND payload_ready = 1
+             )
              ORDER BY start_us
              LIMIT ?5 OFFSET ?6",
         )
@@ -491,11 +757,24 @@ impl DvrMediaStore for IndexedVideoDvr {
             ));
         }
         let row = sqlx::query(
-            "SELECT track_id, start_us, end_us, keyframe, payload_relpath, codec
-             FROM dvr_segments
-             JOIN dvr_tracks USING (source_id, track_id)
-             WHERE source_id = ?1 AND track_id = ?2 AND payload_ready = 1
-               AND start_us <= ?3
+            "SELECT track_id, start_us, end_us, keyframe, payload_relpath, chunk_relpath,
+                    payload_offset, payload_length, payload_crc32, codec
+             FROM (
+                SELECT track_id, start_us, end_us, keyframe, payload_relpath,
+                       '' AS chunk_relpath, NULL AS payload_offset, NULL AS payload_length,
+                       NULL AS payload_crc32, codec
+                FROM dvr_segments
+                JOIN dvr_tracks USING (source_id, track_id)
+                WHERE source_id = ?1 AND track_id = ?2 AND payload_ready = 1
+                  AND start_us <= ?3
+                UNION ALL
+                SELECT track_id, start_us, end_us, keyframe, '' AS payload_relpath, chunk_relpath,
+                       payload_offset, payload_length, payload_crc32, codec
+                FROM dvr_frames
+                JOIN dvr_tracks USING (source_id, track_id)
+                WHERE source_id = ?1 AND track_id = ?2 AND payload_ready = 1
+                  AND start_us <= ?3
+             )
              ORDER BY ABS(start_us - ?3), start_us
              LIMIT 1",
         )
@@ -539,9 +818,24 @@ async fn segment_from_row(
     let start = crate::time::from_unix_microseconds(row.try_get("start_us").map_err(db_error)?)?;
     let end = crate::time::from_unix_microseconds(row.try_get("end_us").map_err(db_error)?)?;
     let keyframe: i64 = row.try_get("keyframe").map_err(db_error)?;
-    let relpath: String = row.try_get("payload_relpath").map_err(db_error)?;
     let codec = parse_codec(&row.try_get::<String, _>("codec").map_err(db_error)?)?;
-    let bytes = store.load_payload(&relpath).await?;
+    let chunk_relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
+    let bytes = if chunk_relpath.is_empty() {
+        let relpath: String = row.try_get("payload_relpath").map_err(db_error)?;
+        store.load_payload(&relpath).await?
+    } else {
+        let offset: i64 = row.try_get("payload_offset").map_err(db_error)?;
+        let length: i64 = row.try_get("payload_length").map_err(db_error)?;
+        let crc32: i64 = row.try_get("payload_crc32").map_err(db_error)?;
+        store
+            .load_chunk_payload(
+                &chunk_relpath,
+                u64::try_from(offset.max(0)).unwrap_or(0),
+                u64::try_from(length.max(0)).unwrap_or(0),
+                u32::try_from(crc32.max(0)).unwrap_or(0),
+            )
+            .await?
+    };
     let payload = match codec {
         VideoCodec::Mjpeg => DvrMediaPayload::MjpegFrame(bytes),
         VideoCodec::H264 | VideoCodec::H265 => DvrMediaPayload::EncodedSample { codec, bytes },
@@ -581,6 +875,13 @@ fn walk_tmp_files(
         if path.is_dir() {
             walk_tmp_files(&path, remove)?;
         } else if path.extension().is_some_and(|ext| ext == "tmp") {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".chunk.tmp"))
+            {
+                continue;
+            }
             remove(&path)?;
         }
     }

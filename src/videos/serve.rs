@@ -6,31 +6,25 @@ use a2a_lab_dev_kit::A2aLabError;
 
 use crate::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use crate::videos::catalog::{
-    ExternalVideoConfig, LiveVideoCatalog, LiveVideoInjections, OrbbecVideoConfig,
+    ExternalVideoConfig, LiveVideoCatalog, LiveVideoInjections, WebcamVideoConfig,
     start_live_videos,
 };
 use crate::videos::dvr::DEFAULT_DISK_VIDEO_RETENTION_SECS;
 use crate::videos::external::LiveJpegSource;
 
 /// Default live catalog frame rate.
-pub const DEFAULT_VIDEO_FPS: u32 = 4;
+pub const DEFAULT_VIDEO_FPS: u32 = 5;
 /// Default in-memory live window (distinct from disk retention).
 pub const DEFAULT_LIVE_VIDEO_MEMORY_SECS: u64 = 5;
 /// Default in-memory retention passed to CLI (`--video-retention-secs`).
 pub const DEFAULT_VIDEO_RETENTION_SECS: u64 = DEFAULT_LIVE_VIDEO_MEMORY_SECS;
-
-/// Orbbec device selection for live video.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OrbbecVideoSelection {
-    serial: Option<String>,
-}
 
 /// Timeout-free video limits. Building this does not open a camera.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoServeConfig {
     camera_index: Option<u32>,
     description: String,
-    orbbec: Option<OrbbecVideoSelection>,
+    webcam_index: Option<u32>,
     fps: u32,
     live_retention_secs: u64,
     disk_retention_secs: u64,
@@ -97,7 +91,7 @@ impl VideoServeConfig {
         Ok(Self {
             camera_index,
             description,
-            orbbec: None,
+            webcam_index: None,
             fps,
             live_retention_secs,
             disk_retention_secs,
@@ -106,27 +100,23 @@ impl VideoServeConfig {
         })
     }
 
-    /// Enables `orbbec-camera` live video without opening a device.
-    pub fn with_orbbec(mut self, serial: Option<&str>) -> Result<Self, A2aLabError> {
-        if serial.is_some_and(str::is_empty) {
-            return Err(A2aLabError::invalid("orbbec_serial", "must not be empty"));
-        }
-        self.orbbec = Some(OrbbecVideoSelection {
-            serial: serial.map(str::to_owned),
-        });
-        Ok(self)
+    /// Enables source `camera` at `index` without opening a device.
+    #[must_use]
+    pub fn with_camera_index(mut self, index: u32) -> Self {
+        self.webcam_index = Some(index);
+        self
+    }
+
+    /// V4L2 index for source `camera`.
+    #[must_use]
+    pub const fn webcam_index(&self) -> Option<u32> {
+        self.webcam_index
     }
 
     /// Native camera index when the external source is enabled.
     #[must_use]
     pub const fn camera_index(&self) -> Option<u32> {
         self.camera_index
-    }
-
-    /// Whether `orbbec-camera` live video is configured.
-    #[must_use]
-    pub const fn orbbec_enabled(&self) -> bool {
-        self.orbbec.is_some()
     }
 
     #[must_use]
@@ -154,15 +144,9 @@ impl VideoServeConfig {
                 self.fps, self.live_retention_secs, self.disk_retention_secs
             ));
         }
-        if self.orbbec.is_some() {
-            let serial = self
-                .orbbec
-                .as_ref()
-                .and_then(|selection| selection.serial.as_deref())
-                .map(|value| format!(" serial {value}"))
-                .unwrap_or_default();
+        if let Some(index) = self.webcam_index {
             parts.push(format!(
-                "orbbec-camera{serial} fps {} memory {}s disk {}s",
+                "camera index {index} fps {} memory {}s disk {}s",
                 self.fps, self.live_retention_secs, self.disk_retention_secs
             ));
         }
@@ -182,22 +166,20 @@ impl VideoServeConfig {
 pub async fn open_video_catalog(
     config: &VideoServeConfig,
     external_source: Option<Box<dyn LiveJpegSource>>,
-    orbbec_source: Option<Box<dyn LiveJpegSource>>,
+    webcam_source: Option<Box<dyn LiveJpegSource>>,
 ) -> Result<Option<LiveVideoCatalog>, A2aLabError> {
     let external = config.camera_index.map(|index| ExternalVideoConfig {
         index,
         description: &config.description,
     });
-    let orbbec = config.orbbec.as_ref().map(|selection| OrbbecVideoConfig {
-        serial: selection.serial.clone(),
-    });
-    if external.is_none() && orbbec.is_none() {
+    let webcam = config.webcam_index.map(|index| WebcamVideoConfig { index });
+    if external.is_none() && webcam.is_none() {
         return Ok(None);
     }
     Ok(Some(
         start_live_videos(
             external,
-            orbbec,
+            webcam,
             config.fps,
             config.live_retention_secs,
             config.disk_retention_secs,
@@ -205,7 +187,7 @@ pub async fn open_video_catalog(
             config.max_image_bytes,
             LiveVideoInjections {
                 external: external_source,
-                orbbec: orbbec_source,
+                webcam: webcam_source,
             },
         )
         .await?,
