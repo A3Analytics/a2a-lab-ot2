@@ -2,11 +2,16 @@
 
 pub mod agent;
 pub mod camera;
+pub mod cameras;
 pub mod fixture;
+pub mod frame_set_service;
+pub mod frame_sets;
 pub mod images;
 pub mod memory;
 pub mod oidc;
 pub mod opentrons;
+pub mod orbbec;
+mod orbbec_frames;
 pub mod page;
 pub mod sila;
 pub mod time;

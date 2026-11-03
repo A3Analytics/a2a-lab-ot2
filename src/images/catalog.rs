@@ -345,6 +345,16 @@ impl LiveImageCatalog {
             .ok_or_else(|| A2aLabError::not_found("image source", source_id.to_string()))
     }
 
+    /// Stores an already captured frame for `source_id` without opening a device.
+    pub async fn record_frame(
+        &self,
+        source_id: ImageSourceId,
+        frame: CapturedFrame,
+    ) -> Result<Image, A2aLabError> {
+        self.require_source(&source_id)?;
+        self.store(source_id, frame).await
+    }
+
     async fn store(
         &self,
         source_id: ImageSourceId,

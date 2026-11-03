@@ -75,3 +75,31 @@ run = "bash .mise/scripts/ot2-simulator-clean.sh"
 [smoke]
 description = "Live smoke test: OT-2 simulator, A2A, MCP, and Bedrock conversations"
 run = "bash .mise/scripts/smoke.sh"
+
+[agent-image]
+description = "Build and verify the Orbbec-enabled agent image for one architecture"
+run = "bash .mise/scripts/agent-image.sh build"
+
+[agent-image-all]
+description = "Build and verify linux/amd64 and linux/arm64 Orbbec agent images"
+run = "bash .mise/scripts/agent-image.sh build all"
+
+[agent-image-verify]
+description = "Verify a built Orbbec-enabled agent image without a camera"
+run = "bash .mise/scripts/agent-image.sh verify"
+
+[agent-image-verify-all]
+description = "Verify linux/amd64 and linux/arm64 Orbbec agent images without a camera"
+run = "bash .mise/scripts/agent-image.sh verify all"
+
+[agent-run]
+description = "Run the Orbbec-enabled agent image with explicit USB access"
+run = "bash .mise/scripts/agent-run.sh"
+
+[agent-stop]
+description = "Remove the Orbbec-enabled agent container"
+run = "bash .mise/scripts/agent-stop.sh"
+
+[agent-orbbec-live]
+description = "Opt-in live Orbbec JPEG check; skipped unless A2ALAB_ORBBEC_LIVE=1"
+run = "bash .mise/scripts/agent-orbbec-live.sh"

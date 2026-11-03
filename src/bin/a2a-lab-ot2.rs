@@ -10,12 +10,12 @@ use tokio::net::TcpListener;
 use a2a_lab_dev_kit::sila::SilaServerHandle;
 use a2a_lab_dev_kit::{
     A2aClient, A2aLabApi, A2aLabError, A2aLabService, A2aServer, AgentMessageHandler,
-    DEFAULT_MAX_IMAGE_BYTES, DEFAULT_MCP_URL, GetCurrentImageRequest, GetTaskStatusRequest,
-    ImageProvider, ImageSourceId, JsonObject, ListImageSourcesRequest, ListLogSourcesRequest,
-    ListMetricsRequest, ListTasksRequest, LogLevel, LogProvider, LogRecord, McpLab, McpServer,
-    MetricId, MetricProvider, PageRequest, QueryLogsRequest, QueryMetricRequest, RunId, SourceId,
-    StartTaskRequest, TaskId, TaskProvider, TaskRun, TaskState, TimeRange, UtcTimestamp,
-    WEB_UI_PATH, start_run,
+    DEFAULT_MAX_IMAGE_BYTES, DEFAULT_MCP_URL, GetCurrentImageRequest, GetImageRequest,
+    GetTaskStatusRequest, ImageId, ImageProvider, ImageSourceId, JsonObject,
+    ListImageSourcesRequest, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest, LogLevel,
+    LogProvider, LogRecord, McpLab, McpServer, MetricId, MetricProvider, PageRequest,
+    QueryLogsRequest, QueryMetricRequest, RunId, SourceId, StartTaskRequest, TaskId, TaskProvider,
+    TaskRun, TaskState, TimeRange, UtcTimestamp, WEB_UI_PATH, start_run,
 };
 use a2a_lab_ot2::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use a2a_lab_ot2::{
@@ -146,6 +146,40 @@ struct Cli {
         default_value = DEFAULT_EXTERNAL_CAMERA_DESCRIPTION
     )]
     external_camera_description: String,
+    /// Enable `orbbec-camera` color capture through Orbbec SDK.
+    ///
+    /// Omit this to leave the source off. The device is not opened until a current
+    /// image is requested.
+    #[arg(long, env = "A2ALAB_ORBBEC_CAMERA", default_value_t = false)]
+    orbbec_camera: bool,
+    /// Serial number of the Orbbec device used by `orbbec-camera`.
+    ///
+    /// Requires Orbbec color capture. Omit it to use the only connected device.
+    /// An empty value is rejected.
+    #[arg(long, env = "A2ALAB_ORBBEC_SERIAL")]
+    orbbec_serial: Option<String>,
+    /// Camera backend for frame-set and legacy Orbbec color capture.
+    ///
+    /// `orbbec` enables the same source as `--orbbec-camera`. Omit both to leave
+    /// that source off. The SDK is not loaded until a capture is requested.
+    #[arg(long, env = "A2ALAB_CAMERA_BACKEND")]
+    camera_backend: Option<String>,
+    /// Serial used by `--camera-backend`. An empty value is rejected.
+    #[arg(long, env = "A2ALAB_CAMERA_SERIAL")]
+    camera_serial: Option<String>,
+    /// SQLite file for synchronized frame sets.
+    #[arg(
+        long,
+        env = "A2ALAB_FRAME_SET_DB",
+        default_value = ".a2a-lab-ot2/frame-sets.sqlite"
+    )]
+    frame_set_db: PathBuf,
+    /// HTTP port for frame-set metadata, channel bytes, and the browser page.
+    #[arg(long, env = "A2ALAB_FRAME_SET_PORT", default_value_t = 31003)]
+    frame_set_port: u16,
+    /// Frame sets kept for each camera source.
+    #[arg(long, env = "A2ALAB_FRAME_SET_RETENTION", default_value_t = 32)]
+    frame_set_retention: u64,
     /// Decoded image maximum in bytes. The default is 64 MiB.
     #[arg(long, env = "A2ALAB_MAX_IMAGE_BYTES", default_value_t = DEFAULT_MAX_IMAGE_BYTES)]
     max_image_bytes: u64,
@@ -217,13 +251,24 @@ enum Command {
     ListImageSources,
     /// `get_current_image` for one camera, written to a file
     GetCurrentImage {
-        /// `opentrons-camera` or `external-camera`
+        /// `opentrons-camera`, `external-camera`, or `orbbec-camera`
         #[arg(long)]
         source: String,
         /// File that receives the JPEG bytes
         #[arg(long)]
         output: PathBuf,
     },
+    /// `get_image` for one stored frame, written to a file
+    GetImage {
+        /// Stored image id
+        #[arg(long)]
+        id: String,
+        /// File that receives the JPEG bytes
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Print the loaded Orbbec SDK version
+    OrbbecSdkVersion,
     /// `query_logs` (omit sources to merge every advertised source into one stream)
     QueryLogs { source_ids: Vec<String> },
     /// `query_metric` (omit to query every metric)
@@ -279,6 +324,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
     }
+    if let Command::OrbbecSdkVersion = &command {
+        return print_orbbec_sdk_version();
+    }
     if let Command::Fixture {
         a2a_port,
         mcp_port,
@@ -298,6 +346,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::GetCurrentImage { source, output } => {
             get_current_image(&cli, &source, &output).await?;
         }
+        Command::GetImage { id, output } => get_stored_image(&cli, &id, &output).await?,
         Command::QueryLogs { source_ids } => query_logs(&lab, &source_ids).await?,
         Command::QueryMetrics { metric_id } => query_metrics(&lab, metric_id.as_deref()).await?,
         Command::StartTask {
@@ -329,7 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
-        Command::Fixture { .. } | Command::AgentMessage { .. } => {
+        Command::Fixture { .. } | Command::AgentMessage { .. } | Command::OrbbecSdkVersion => {
             unreachable!("handled before the lab client connects");
         }
         Command::Engine {
@@ -400,7 +449,41 @@ fn prepare_images(cli: &Cli) -> Result<ImageServeConfig, Box<dyn std::error::Err
     let videos = video_config(cli)?;
     println!("{}", images.summary());
     println!("{}", videos.summary());
+    if images.orbbec_enabled() {
+        println!(
+            "frame sets   http://{}:{}/ot2/frame-sets/ui",
+            cli.a2alab_listen_host, cli.frame_set_port
+        );
+    } else {
+        println!("frame sets   off");
+    }
     Ok(images)
+}
+
+async fn open_frame_sets(
+    images: &ImageServeConfig,
+    catalog: &LiveImageCatalog,
+    cli: &Cli,
+) -> Result<Option<Arc<a2a_lab_ot2::frame_set_service::FrameSetApi>>, Box<dyn std::error::Error>> {
+    if !images.orbbec_enabled() {
+        return Ok(None);
+    }
+    let retention = usize::try_from(cli.frame_set_retention).unwrap_or(usize::MAX);
+    let origin = format!("http://{}:{}", cli.a2alab_listen_host, cli.frame_set_port);
+    let capture = Arc::new(a2a_lab_ot2::cameras::OrbbecFrameCapture::sdk(
+        images.orbbec_serial(),
+    ));
+    let api = a2a_lab_ot2::frame_set_service::FrameSetApi::open(
+        &cli.frame_set_db,
+        capture,
+        retention.max(1),
+        images.max_image_bytes(),
+        origin,
+        Some(catalog.clone()),
+    )
+    .await
+    .map_err(|error| startup_error("frame sets", error))?;
+    Ok(Some(Arc::new(api)))
 }
 
 async fn prepare_serve_images(
@@ -420,44 +503,21 @@ async fn prepare_serve_images(
         .health()
         .await
         .map_err(|error| startup_error(&opentrons, error))?;
-    let catalog = open_image_catalog(&cli.opentrons_url, &images, None)
+    let catalog = open_image_catalog(&cli.opentrons_url, &images, None, None)
         .await
         .map_err(|error| startup_error("images", error))?;
     let maintenance = catalog.maintain_history();
     Ok((images, catalog, maintenance))
 }
 
-async fn prepare_serve_videos(
-    cli: &Cli,
-) -> Result<Option<LiveVideoCatalog>, Box<dyn std::error::Error>> {
-    let videos_config = video_config(cli)?;
-    open_video_catalog(&videos_config, None)
-        .await
-        .map_err(|error| startup_error("videos", error).into())
-}
-
-fn print_listen_urls(
-    cli: &Cli,
-    a2a_shown: &str,
-    mcp_shown: &str,
-    sila_shown: &str,
-    sila_ca: &str,
-    provider: &str,
-    model: &str,
-) {
-    println!("connected to {}", cli.opentrons_url);
-    println!("A2A          {a2a_shown}");
-    println!("Web UI       {}", web_ui_url(a2a_shown));
-    println!("MCP          {mcp_shown}");
-    println!("SiLA         {sila_shown}");
-    println!("SiLA CA      {sila_ca}");
-    println!("model        {provider} {model}");
-    println!("conversation {}", cli.conversation_db.display());
-}
-
-async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+#[allow(clippy::cognitive_complexity)]
+async fn serve(mut lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (images, catalog, _history_maintenance) = prepare_serve_images(&lab, cli).await?;
     let videos = prepare_serve_videos(cli).await?;
+    let frame_sets = open_frame_sets(&images, &catalog, cli).await?;
+    if let Some(api) = &frame_sets {
+        lab = lab.with_frame_sets(Arc::clone(api));
+    }
     let conversation = format!("conversation store at {}", cli.conversation_db.display());
     let store = ConversationStore::open(&cli.conversation_db, cli.history_limit)
         .await
@@ -471,8 +531,23 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     let (sila, sila_ca) = start_sila(Arc::clone(&service), cli)
         .await
         .map_err(|error| startup_error("sila", error))?;
-    let (mcp_lab, mcp_task, mcp_addr) =
-        start_local_mcp(&service, images.transport(), &cli.a2alab_listen_host).await?;
+    let mcp = McpServer::new(&service);
+    let mcp_listener = TcpListener::bind(format!("{}:31001", cli.a2alab_listen_host))
+        .await
+        .map_err(|error| startup_error("mcp", error))?;
+    let mcp_addr = mcp_listener
+        .local_addr()
+        .map_err(|error| startup_error("mcp", error))?;
+    let mut mcp_task = AbortOnDrop(tokio::spawn(
+        async move { mcp.serve_http(mcp_listener).await },
+    ));
+    let mcp_target = format!("mcp at {DEFAULT_MCP_URL}");
+    let mcp_lab = tokio::select! {
+        finished = mcp_task.join() => return Err(mcp_task_error(&mcp_target, finished).into()),
+        connected = McpLab::connect_with(DEFAULT_MCP_URL, images.transport()) => {
+            connected.map_err(|error| startup_error(&mcp_target, error))?
+        }
+    };
     let provider = ModelProvider::from(cli.model_provider);
     let model = selected_model(provider, cli.model.as_deref(), cli.bedrock_model.as_deref());
     let model_target = format!("{} model {model}", provider.as_str());
@@ -489,27 +564,55 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     let a2a_addr = a2a_listener
         .local_addr()
         .map_err(|error| startup_error("a2a", error))?;
-    let advertised = public_host(cli);
-    a2a = with_advertised_origin(a2a, advertised.as_ref(), a2a_addr.port());
+    let advertised = cli
+        .a2alab_public_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(advertised_host);
+    if let Some(host) = &advertised {
+        a2a = a2a
+            .with_public_url(origin(host, a2a_addr.port()))
+            .with_grpc_host(host.host.clone());
+    }
     a2a = apply_oidc(a2a, cli)?;
-    let (a2a_shown, mcp_shown, sila_shown) =
-        shown_urls(advertised.as_ref(), a2a_addr, mcp_addr, sila.local_addr());
-    print_listen_urls(
-        cli,
-        &a2a_shown,
-        &mcp_shown,
-        &sila_shown,
-        &sila_ca,
-        provider.as_str(),
-        &model,
+    let a2a_shown = advertised.as_ref().map_or_else(
+        || format!("http://{a2a_addr}"),
+        |host| origin(host, a2a_addr.port()),
     );
-    wait_for_shutdown(a2a, a2a_listener, a2a_addr).await?;
+    let mcp_shown = advertised.as_ref().map_or_else(
+        || format!("http://{mcp_addr}/mcp"),
+        |host| format!("{}/mcp", origin(host, mcp_addr.port())),
+    );
+    let sila_shown = advertised.as_ref().map_or_else(
+        || sila.local_addr().to_string(),
+        |host| socket_host(host, sila.local_addr().port()),
+    );
+    println!("connected to {}", cli.opentrons_url);
+    println!("A2A          {a2a_shown}");
+    println!("Web UI       {}", web_ui_url(&a2a_shown));
+    println!("MCP          {mcp_shown}");
+    println!("SiLA         {sila_shown}");
+    println!("SiLA CA      {sila_ca}");
+    println!("model        {} {model}", provider.as_str());
+    println!("conversation {}", cli.conversation_db.display());
+    let frame_listener = spawn_frame_listener(frame_sets, cli, advertised.as_ref()).await?;
+    wait_for_shutdown(a2a, a2a_listener, frame_listener).await?;
     drop(sila);
     drop(mcp_task);
     if let Some(videos) = videos {
         videos.shutdown();
     }
     Ok(())
+}
+
+async fn prepare_serve_videos(
+    cli: &Cli,
+) -> Result<Option<LiveVideoCatalog>, Box<dyn std::error::Error>> {
+    let videos_config = video_config(cli)?;
+    open_video_catalog(&videos_config, None)
+        .await
+        .map_err(|error| startup_error("videos", error).into())
 }
 
 fn share_with_videos(
@@ -522,43 +625,55 @@ fn share_with_videos(
     }
 }
 
-async fn start_local_mcp(
-    service: &Arc<dyn A2aLabApi>,
-    transport: a2a_lab_dev_kit::ImageTransportConfig,
-    listen_host: &str,
-) -> Result<(McpLab, AbortOnDrop, std::net::SocketAddr), Box<dyn std::error::Error>> {
-    let mcp = McpServer::new(service);
-    let mcp_listener = TcpListener::bind(format!("{listen_host}:31001"))
-        .await
-        .map_err(|error| startup_error("mcp", error))?;
-    let mcp_addr = mcp_listener
-        .local_addr()
-        .map_err(|error| startup_error("mcp", error))?;
-    let mut mcp_task = AbortOnDrop(tokio::spawn(
-        async move { mcp.serve_http(mcp_listener).await },
-    ));
-    let mcp_target = format!("mcp at {DEFAULT_MCP_URL}");
-    let mcp_lab = tokio::select! {
-        finished = mcp_task.join() => return Err(mcp_task_error(&mcp_target, finished).into()),
-        connected = McpLab::connect_with(DEFAULT_MCP_URL, transport) => {
-            connected.map_err(|error| startup_error(&mcp_target, error))?
-        }
+async fn spawn_frame_listener(
+    frame_sets: Option<Arc<a2a_lab_ot2::frame_set_service::FrameSetApi>>,
+    cli: &Cli,
+    advertised: Option<&AdvertisedHost>,
+) -> Result<
+    Option<tokio::task::JoinHandle<Result<(), a2a_lab_ot2::frame_sets::FrameSetError>>>,
+    A2aLabError,
+> {
+    let Some(api) = frame_sets else {
+        return Ok(None);
     };
-    Ok((mcp_lab, mcp_task, mcp_addr))
+    let listener = TcpListener::bind(format!("{}:{}", cli.a2alab_listen_host, cli.frame_set_port))
+        .await
+        .map_err(|error| startup_error("frame sets", error))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|error| startup_error("frame sets", error))?;
+    let shown = advertised.map_or_else(
+        || format!("http://{addr}/ot2/frame-sets/ui"),
+        |host| format!("{}/ot2/frame-sets/ui", origin(host, addr.port())),
+    );
+    println!("frame sets   {shown}");
+    Ok(Some(tokio::spawn(async move {
+        a2a_lab_ot2::frame_set_service::serve(api, listener).await
+    })))
 }
 
 async fn wait_for_shutdown(
     a2a: A2aServer,
     a2a_listener: TcpListener,
-    a2a_addr: std::net::SocketAddr,
+    frame_listener: Option<
+        tokio::task::JoinHandle<Result<(), a2a_lab_ot2::frame_sets::FrameSetError>>,
+    >,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let a2a_target = format!("a2a at http://{a2a_addr}");
+    let a2a_target = format!("a2a at http://{}", a2a_listener.local_addr()?);
     tokio::select! {
         result = a2a.listen(a2a_listener) => {
             result.map_err(|error| startup_error(&a2a_target, error))?;
         }
         result = tokio::signal::ctrl_c() => {
             result.map_err(|error| startup_error("shutdown signal", error))?;
+        }
+        result = async {
+            match frame_listener {
+                Some(task) => task.await,
+                None => std::future::pending().await,
+            }
+        } => {
+            result.map_err(|error| startup_error("frame sets", error))??;
         }
     }
     Ok(())
@@ -664,48 +779,6 @@ struct AdvertisedHost {
     host: String,
 }
 
-fn public_host(cli: &Cli) -> Option<AdvertisedHost> {
-    cli.a2alab_public_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(advertised_host)
-}
-
-fn with_advertised_origin(
-    a2a: A2aServer,
-    host: Option<&AdvertisedHost>,
-    a2a_port: u16,
-) -> A2aServer {
-    let Some(host) = host else {
-        return a2a;
-    };
-    a2a.with_public_url(origin(host, a2a_port))
-        .with_grpc_host(host.host.clone())
-}
-
-fn shown_urls(
-    advertised: Option<&AdvertisedHost>,
-    a2a_addr: std::net::SocketAddr,
-    mcp_addr: std::net::SocketAddr,
-    sila_addr: std::net::SocketAddr,
-) -> (String, String, String) {
-    (
-        advertised.map_or_else(
-            || format!("http://{a2a_addr}"),
-            |host| origin(host, a2a_addr.port()),
-        ),
-        advertised.map_or_else(
-            || format!("http://{mcp_addr}/mcp"),
-            |host| format!("{}/mcp", origin(host, mcp_addr.port())),
-        ),
-        advertised.map_or_else(
-            || sila_addr.to_string(),
-            |host| socket_host(host, sila_addr.port()),
-        ),
-    )
-}
-
 fn advertised_host(value: &str) -> AdvertisedHost {
     let (scheme, rest) = value
         .trim()
@@ -762,16 +835,6 @@ fn mcp_task_error(
     }
 }
 
-fn image_config(cli: &Cli) -> Result<ImageServeConfig, a2a_lab_dev_kit::A2aLabError> {
-    ImageServeConfig::new(
-        cli.external_camera_index,
-        Some(cli.external_camera_description.as_str()),
-        cli.max_image_bytes,
-        cli.capture_timeout_ms,
-        cli.image_retention,
-    )
-}
-
 fn video_config(cli: &Cli) -> Result<VideoServeConfig, a2a_lab_dev_kit::A2aLabError> {
     VideoServeConfig::new(
         cli.external_camera_index,
@@ -782,12 +845,75 @@ fn video_config(cli: &Cli) -> Result<VideoServeConfig, a2a_lab_dev_kit::A2aLabEr
     )
 }
 
+fn image_config(cli: &Cli) -> Result<ImageServeConfig, a2a_lab_dev_kit::A2aLabError> {
+    let config = ImageServeConfig::new(
+        cli.external_camera_index,
+        Some(cli.external_camera_description.as_str()),
+        cli.max_image_bytes,
+        cli.capture_timeout_ms,
+        cli.image_retention,
+    )?;
+    let backend = cli
+        .camera_backend
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let orbbec = match backend {
+        Some("orbbec") => true,
+        Some(other) => {
+            return Err(a2a_lab_dev_kit::A2aLabError::invalid(
+                "camera_backend",
+                format!("unsupported camera backend `{other}`"),
+            ));
+        }
+        None => cli.orbbec_camera,
+    };
+    let serial = match (cli.camera_serial.as_deref(), cli.orbbec_serial.as_deref()) {
+        (Some(left), Some(right)) if left != right => {
+            return Err(a2a_lab_dev_kit::A2aLabError::invalid(
+                "camera_serial",
+                "does not match orbbec-serial",
+            ));
+        }
+        (Some(serial), _) | (None, Some(serial)) => Some(serial),
+        (None, None) => None,
+    };
+    if !orbbec && cli.orbbec_serial.is_some() {
+        return Err(a2a_lab_dev_kit::A2aLabError::invalid(
+            "orbbec_serial",
+            "requires Orbbec color capture",
+        ));
+    }
+    if serial.is_some() && !orbbec {
+        return Err(a2a_lab_dev_kit::A2aLabError::invalid(
+            "camera_serial",
+            "requires a camera backend",
+        ));
+    }
+    if orbbec {
+        config.with_orbbec(serial)
+    } else {
+        Ok(config)
+    }
+}
+
 fn camera_catalog(cli: &Cli) -> Result<a2a_lab_ot2::LiveImageCatalog, Box<dyn std::error::Error>> {
     Ok(image_catalog(
         &cli.opentrons_url,
         &image_config(cli)?,
         None,
+        None,
     )?)
+}
+
+fn print_orbbec_sdk_version() -> Result<(), Box<dyn std::error::Error>> {
+    match a2a_lab_ot2::orbbec::loaded_sdk_version() {
+        Ok(version) => {
+            println!("{version}");
+            Ok(())
+        }
+        Err(error) => Err(format!("orbbec-camera: {error}").into()),
+    }
 }
 
 async fn list_image_sources(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -811,7 +937,7 @@ async fn get_current_image(
     source: &str,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None).await?;
+    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None, None).await?;
     let image = catalog
         .get_current_image(GetCurrentImageRequest::new(ImageSourceId::new(source)?))
         .await?;
@@ -829,6 +955,33 @@ async fn get_current_image(
     println!("width\t{}", descriptor.width());
     println!("height\t{}", descriptor.height());
     println!("captured_at\t{}", descriptor.captured_at());
+    println!("bytes\t{}", image.data().len());
+    println!("output\t{}", output.display());
+    Ok(())
+}
+
+async fn get_stored_image(
+    cli: &Cli,
+    id: &str,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None, None).await?;
+    let image = catalog
+        .get_image(GetImageRequest::new(ImageId::new(id)?))
+        .await?;
+    if let Some(parent) = output.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(output, image.data())?;
+    let descriptor = image.descriptor();
+    println!("a2a-lab get_image");
+    println!("id\t{}", descriptor.id());
+    println!("source\t{}", descriptor.source_id());
+    println!("media_type\t{}", descriptor.media_type());
+    println!("width\t{}", descriptor.width());
+    println!("height\t{}", descriptor.height());
     println!("bytes\t{}", image.data().len());
     println!("output\t{}", output.display());
     Ok(())

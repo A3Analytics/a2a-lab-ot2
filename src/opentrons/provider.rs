@@ -13,6 +13,7 @@ use a2a_lab_dev_kit::{
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
+use crate::frame_set_service::{self, FrameSetApi};
 use crate::page::slice_page;
 use crate::time::{now, parse_timestamp};
 
@@ -35,6 +36,7 @@ pub struct OpentronsLab {
     client: OpentronsClient,
     local: Arc<Mutex<BTreeMap<String, TaskRun>>>,
     readonly: bool,
+    frame_sets: Option<Arc<FrameSetApi>>,
 }
 
 impl OpentronsLab {
@@ -44,7 +46,15 @@ impl OpentronsLab {
             client: OpentronsClient::new(base_url)?,
             local: Arc::new(Mutex::new(BTreeMap::new())),
             readonly: false,
+            frame_sets: None,
         })
+    }
+
+    /// Advertises `ot2.frame-sets.*` tasks. Omit this and those tasks stay hidden.
+    #[must_use]
+    pub fn with_frame_sets(mut self, api: Arc<FrameSetApi>) -> Self {
+        self.frame_sets = Some(api);
+        self
     }
 
     /// Advertises and starts only GET-backed tasks.
@@ -75,12 +85,23 @@ impl TaskProvider for OpentronsLab {
         &self,
         request: ListTasksRequest,
     ) -> Result<Page<TaskDefinition>, A2aLabError> {
-        slice_page(&task_definitions(self.readonly), &request.page)
+        let mut items = task_definitions(self.readonly);
+        if self.frame_sets.is_some() {
+            items.extend(frame_set_service::task_definitions());
+            items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        }
+        slice_page(&items, &request.page)
     }
 
     async fn start(&self, request: StartTaskRequest) -> Result<TaskRun, A2aLabError> {
         if self.readonly && !allowed_in_readonly(request.task_id.as_str()) {
             return Err(A2aLabError::not_found("task", request.task_id.to_string()));
+        }
+        if frame_set_service::is_frame_set_task(request.task_id.as_str()) {
+            return match &self.frame_sets {
+                Some(api) => frame_set_task(self, api, request).await,
+                None => Err(A2aLabError::not_found("task", request.task_id.to_string())),
+            };
         }
         match request.task_id.as_str() {
             PAUSE_TASK => control(self, request, "pause", "pause").await,
@@ -170,7 +191,58 @@ fn task_definitions(readonly: bool) -> Vec<TaskDefinition> {
 }
 
 fn allowed_in_readonly(task_id: &str) -> bool {
-    inventory::task_entry(task_id).is_some_and(inventory::is_read)
+    frame_set_service::is_frame_set_task(task_id)
+        || inventory::task_entry(task_id).is_some_and(inventory::is_read)
+}
+
+async fn frame_set_task(
+    lab: &OpentronsLab,
+    api: &FrameSetApi,
+    request: StartTaskRequest,
+) -> Result<TaskRun, A2aLabError> {
+    let operation = request
+        .task_id
+        .as_str()
+        .trim_start_matches("ot2.frame-sets.");
+    let input = Value::Object(request.input.as_map().clone());
+    let run_id = format!("frame-{}", jiff::Timestamp::now().as_microsecond());
+    let run = match api.execute(operation, &input).await {
+        Ok(value) => completed_run(
+            &run_id,
+            request.task_id,
+            request.input,
+            None,
+            Some(JsonObject::try_from_value(value)?),
+        )?,
+        Err(error) => failed_run(
+            &run_id,
+            request.task_id,
+            request.input,
+            error.class(),
+            error.to_string(),
+        )?,
+    };
+    Ok(lab.store(run).await)
+}
+
+fn failed_run(
+    id: &str,
+    task_id: TaskId,
+    input: JsonObject,
+    class: &str,
+    message: String,
+) -> Result<TaskRun, A2aLabError> {
+    Ok(TaskRun {
+        id: RunId::new(id)?,
+        task_id,
+        state: TaskState::Failed,
+        input,
+        message: Some(message),
+        result: None,
+        progress: None,
+        error_kind: Some(class.to_owned()),
+        error_identifier: None,
+    })
 }
 
 fn entry_task(entry: &Entry) -> TaskDefinition {

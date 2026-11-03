@@ -31,7 +31,13 @@ aws-sdk-bedrockruntime = { version = "1", default-features = false, features = [
     "default-https-client",
 ] }
 clap = { version = "4.5.53", features = ["derive", "env"] }
+futures-util = "0.3.31"
+image = { version = "0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+] }
 jiff = { version = "0.2.37", features = ["serde"] }
+libloading = "0.8"
 nokhwa = { version = "0.10.11", default-features = false, features = [
     "input-native",
 ] }

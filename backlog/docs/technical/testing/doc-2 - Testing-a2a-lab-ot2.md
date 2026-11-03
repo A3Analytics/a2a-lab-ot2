@@ -104,29 +104,68 @@ Deterministic compliance covers only the selected A2A-LAB profile behavior expos
 
 Those systems need their own checks. They do not inherit a compliance result or badge from the deterministic fixture.
 
+## TASK-42 foundation reconciliation (2026-11-03)
+
+This section records how the main application checkout was merged with the
+`orbbec-frame-sets` reference worktree before TASK-42 source edits landed.
+
+| Path | Role |
+| ---- | ---- |
+| `/Users/dylangustaveson/code/a2a-lab-ot2` | Main checkout on `main` at `98c0cc7` before TASK-42; carries external live video, `src/opentrons/stream.rs`, and robot-server stream regression tests. |
+| `/Users/dylangustaveson/code/a2a-lab-ot2-deploy` | Linked worktree on `orbbec-frame-sets` at `a0f032a` plus local edits; carries Orbbec capture, portable synchronized frame sets, agent-image scripts, and frame-set service wiring. |
+
+### Overlapping areas
+
+| Area | Main (`98c0cc7`) | Deploy (`a0f032a` + local) | Retained behavior |
+| ---- | ---------------- | -------------------------- | ----------------- |
+| Live video (`src/videos/`, CLI `--video-*`) | External Nokhwa MJPEG catalog, dev-kit `MemoryVideos` wiring, `tests/external_video.rs` | Older or absent in branch tip; local tree reintroduces video flags without stream tests | **Main:** external live video path, 5 s live memory and 3-day disk retention defaults, no `POST /camera/picture` polling for video |
+| OT-2 stream contract (`src/opentrons/stream.rs`, `tests/opentrons_camera_stream.rs`) | Documents and tests pinned v10.0.0 `GET /camera/stream` as non-ingestible metadata | Branch removes stream module and stream tests | **Main:** stream fixtures, rejection helper, and hardware-free stream tests |
+| Still images (`src/images/`, `src/camera.rs`) | Opentrons + external V4L2 sources, 30-day still retention | Adds `orbbec-camera`, frame-set history, matching still/live reuse hooks | **Both:** main two-source image catalog **plus** deploy Orbbec still path and frame-set SQLite (`migrations/003_frame_sets.sql`) |
+| Serve binary (`src/bin/a2a-lab-ot2.rs`, `src/fixture.rs`, `src/lib.rs`) | Video serve hooks | Frame-set service, Orbbec CLI, agent-image tasks | **Both:** merged wiring — video catalog from main, frame-set service and Orbbec options from deploy |
+| Docs (`doc-2`, `doc-3`, `doc-1`, `README`) | Video and stream notes | Orbbec, frame-set, and agent-image test rows | **Both:** combined tables and boundaries without dropping stream or external-video statements |
+| Dependencies (`Cargo.toml`) | Unchanged dev-kit pin | Adds `image`, `libloading`, `futures-util` for Orbbec/frame-set | **Deploy additions** on top of main pin; no dev-kit repository edits |
+| Agent packaging (`.mise/scripts/agent-*`, `agent/`) | Absent | Deploy-only operator scripts and Dockerfile | **Deploy:** copied scripts and agent image definitions for hardware-free `agent-image-verify` tests |
+
+Non-overlapping deploy-only modules merged file-by-file (not directory replace):
+`src/cameras/`, `src/frame_sets/`, `src/frame_set_service.rs`, `src/orbbec.rs`,
+`src/orbbec_frames.rs`, and frame-set / Orbbec regression tests.
+
+Explicit non-goals for TASK-42: full DVR disk archive (`src/videos/archive.rs`,
+`persist.rs`, `scale.rs` on deploy), TASK-43–TASK-47 session/serve work, and
+any change under `a2a-lab-dev-kit-rs`.
+
 ## What the unit test suite covers
 
 Tests bind local listeners and a mock robot-server. They do not start the Docker simulator and they do not call Bedrock, OpenAI, or Anthropic.
 
-| File                        | Behavior under test                                                                                                                                                                                             |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/inventory.rs`        | Every pinned OpenAPI operation is classified, inventory ids are unique, and read tasks are GET-backed.                                                                                                          |
-| `tests/provider.rs`         | Task, log, and metric catalogs; schemas; pause, resume, stop, and delete; recovery and stateless commands; rejected input; logs and gauges; pagination; primitive HTTP tasks; readonly advertisement and start. |
-| `tests/a2a.rs`              | A2A run control, readonly over A2A, `agent-message` context, MCP tool listing, OpenID Connect acceptance and rejection, packaged `/ui/` routes and assets, public shell under OIDC, and a headless fixture.     |
-| `tests/agent.rs`            | Model selection, conversation history, tool calls, and one-context turn ordering.                                                                                                                               |
-| `tests/sila.rs`             | Default SiLA identity, operator PEM replacement, rejection of a partial PEM set, and a TLS bind.                                                                                                                |
-| `tests/image_catalog.rs`    | Two injectable cameras, pagination, search bounds, retention, and an isolated capture failure.                                                                                                                  |
-| `tests/opentrons_camera.rs` | Mock `POST /camera/picture`, JPEG bytes and dimensions, and disabled, malformed, timeout, and unreachable failures.                                                                                             |
-| `tests/v4l2_camera.rs`      | Injected V4L2 grabs, `/dev/video4` as the default, and no video device opened by the suite.                                                                                                                     |
-| `tests/image_serve.rs`      | Serve limits, both source ids, readonly image reads, exact A2A skills, exact MCP tools, and restored camera history across A2A and MCP.                                                                         |
-| `tests/image_history.rs`    | Restart restoration for both cameras, per-source retention, seven-day expiry, corrupt and oversized history, failed capture, and no database creation when only sources are listed.                             |
-| `tests/image_parity.rs`     | The same camera calls compared across A2A and MCP.                                                                                                                                                              |
-| `tests/image_demo.rs`       | `list-image-sources` and a saved current JPEG without a camera or the simulator.                                                                                                                                |
-| `tests/support/mod.rs`      | The mock robot-server used by the suite.                                                                                                                                                                        |
+| File                          | Behavior under test                                                                                                                                                                                             |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/inventory.rs`          | Every pinned OpenAPI operation is classified, inventory ids are unique, and read tasks are GET-backed.                                                                                                          |
+| `tests/provider.rs`           | Task, log, and metric catalogs; schemas; pause, resume, stop, and delete; recovery and stateless commands; rejected input; logs and gauges; pagination; primitive HTTP tasks; readonly advertisement and start. |
+| `tests/a2a.rs`                | A2A run control, readonly over A2A, `agent-message` context, MCP tool listing, OpenID Connect acceptance and rejection, packaged `/ui/` routes and assets, public shell under OIDC, and a headless fixture.     |
+| `tests/agent.rs`              | Model selection, conversation history, tool calls, and one-context turn ordering.                                                                                                                               |
+| `tests/sila.rs`               | Default SiLA identity, operator PEM replacement, rejection of a partial PEM set, and a TLS bind.                                                                                                                |
+| `tests/image_catalog.rs`      | Two injectable cameras, pagination, search bounds, retention, and an isolated capture failure.                                                                                                                  |
+| `tests/opentrons_camera.rs`   | Mock `POST /camera/picture`, JPEG bytes and dimensions, and disabled, malformed, timeout, and unreachable failures.                                                                                             |
+| `tests/opentrons_camera_stream.rs` | Pinned v10.0.0 `GET /camera/stream` metadata, settings rejection, and proof that OT-2 has no ingestible native stream.                                                                                     |
+| `tests/external_camera.rs`    | Injected V4L2 grabs, `/dev/video4` as the default, and no video device opened by the suite.                                                                                                                     |
+| `tests/external_video.rs`     | External live video catalog defaults, invalid CLI limits, injected MJPEG follow, and shared A2A/MCP video skills.                                                                                               |
+| `tests/image_serve.rs`        | Serve limits, both source ids, readonly image reads, exact A2A skills, exact MCP tools, and restored camera history across A2A and MCP.                                                                         |
+| `tests/image_history.rs`      | Restart restoration for both cameras, per-source retention, seven-day expiry, corrupt and oversized history, failed capture, and no database creation when only sources are listed.                             |
+| `tests/image_parity.rs`       | The same camera calls compared across A2A and MCP.                                                                                                                                                              |
+| `tests/orbbec_camera.rs`      | Disabled and enabled Orbbec discovery, serial selection, JPEG history, and capture failures without an Orbbec device.                                                                                           |
+| `tests/frame_set_contract.rs` | Portable frame-set validation, synchronization, and the import boundary of `src/frame_sets`.                                                                                                                    |
+| `tests/frame_set_history.rs`  | Restart, retention, search, and corrupt frame-set history.                                                                                                                                                      |
+| `tests/frame_set_service.rs`  | A2A task results, media URLs, one-capture color reuse, and two fake backends. No RealSense SDK.                                                                                                                 |
+| `tests/camera_backend.rs`     | Camera selection and the Orbbec color adapter.                                                                                                                                                                  |
+| `tests/image_contract.rs`     | Shared image-source contract for `opentrons-camera`, `external-camera`, and `orbbec-camera`, including A2A and MCP parity.                                                                                      |
+| `tests/agent_image.rs`        | Agent image script checks for architecture, checksum, USB arguments, and writable state. No Docker and no camera.                                                                                               |
+| `tests/image_demo.rs`         | `list-image-sources` and a saved current JPEG without a camera or the simulator.                                                                                                                                |
+| `tests/support/mod.rs`        | The mock robot-server used by the suite.                                                                                                                                                                        |
 
 Provider tests require every non-skip inventory id to appear in `list_tasks`, `list_log_sources`, or `list_metrics`. That is the catalog contract. [doc-1](<../ot2-http/doc-1 - OT-2-robot-server-HTTP-mapping.md>) defines how each route is classified.
 
-Image tests cover `list_image_sources`, `list_images`, `search_images`, `get_image`, and `get_current_image` for `opentrons-camera` and, when a camera index is configured, `external-camera`. They mock `POST /camera/picture` and inject the native grab. History tests use a temporary SQLite file and check restart, the 7-day age, retention, and failed writes. `mise run quality` does not open a video device, start Docker, or use model credentials. `mise run images` lists the OT-2 camera. `A2ALAB_EXTERNAL_CAMERA_INDEX=4 mise run images` adds the extra camera.
+Image tests cover `list_image_sources`, `list_images`, `search_images`, `get_image`, and `get_current_image` for `opentrons-camera`, `external-camera`, and `orbbec-camera` when configured. They mock `POST /camera/picture` and inject native grabs. History tests use a temporary SQLite file and check restart, the 7-day age, retention, and failed writes. Live video tests inject MJPEG through `LiveJpegSource`; they never call `POST /camera/picture` for frames. Stream tests assert pinned robot-server v10.0.0 advertises URL templates only. `mise run quality` does not open a video device, start Docker, load Orbbec SDK, or use model credentials. Frame-set tests use in-memory and SQLite fakes. One fake reports Orbbec-shaped channels and another reports RealSense-shaped channels. Neither loads `librealsense`. `mise run agent-image-verify-all` checks the amd64 and arm64 agent images with Docker and no camera. `A2ALAB_ORBBEC_LIVE=1 mise run agent-orbbec-live` is the only check that captures from a connected Orbbec device. The agent image is `a2a-lab-ot2-agent`; `a2a-lab-ot2-sim` remains the robot-server simulator. `mise run images` lists the OT-2 camera. `A2ALAB_EXTERNAL_CAMERA_INDEX=4 mise run images` adds the extra camera.
 
 Expected outcomes differ by environment:
 
