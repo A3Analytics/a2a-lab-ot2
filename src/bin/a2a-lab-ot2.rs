@@ -20,10 +20,11 @@ use a2a_lab_dev_kit::{
 use a2a_lab_ot2::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use a2a_lab_ot2::{
     ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_IMAGE_RETENTION_PER_SOURCE,
-    DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, FixtureConfig, FixtureServer, FixtureVariant,
-    ImageHistoryMaintenance, ImageServeConfig, LabAgent, LiveImageCatalog, ModelProvider,
-    OidcConfig, OpentronsLab, SilaConfig, image_catalog, open_image_catalog, prepare_sila,
-    selected_model, sila_server, with_oidc,
+    DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS,
+    FixtureConfig, FixtureServer, FixtureVariant, ImageHistoryMaintenance, ImageServeConfig,
+    LabAgent, LiveImageCatalog, LiveVideoCatalog, ModelProvider, OidcConfig, OpentronsLab,
+    SilaConfig, VideoServeConfig, image_catalog, open_image_catalog, open_video_catalog,
+    prepare_sila, selected_model, sila_server, with_oidc,
 };
 use clap::{Parser, Subcommand};
 
@@ -154,6 +155,16 @@ struct Cli {
     /// Recent frames kept for each camera source.
     #[arg(long, env = "A2ALAB_IMAGE_RETENTION", default_value_t = DEFAULT_IMAGE_RETENTION_PER_SOURCE)]
     image_retention: u64,
+    /// Live video frames per second from the external camera. Zero is rejected.
+    #[arg(long, env = "A2ALAB_VIDEO_FPS", default_value_t = DEFAULT_VIDEO_FPS)]
+    video_fps: u32,
+    /// Seconds of live video retained for the external camera. Zero is rejected.
+    #[arg(
+        long,
+        env = "A2ALAB_VIDEO_RETENTION_SECS",
+        default_value_t = DEFAULT_VIDEO_RETENTION_SECS
+    )]
+    video_retention_secs: u64,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -386,7 +397,9 @@ fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
 
 fn prepare_images(cli: &Cli) -> Result<ImageServeConfig, Box<dyn std::error::Error>> {
     let images = image_config(cli)?;
+    let videos = video_config(cli)?;
     println!("{}", images.summary());
+    println!("{}", videos.summary());
     Ok(images)
 }
 
@@ -414,21 +427,108 @@ async fn prepare_serve_images(
     Ok((images, catalog, maintenance))
 }
 
+async fn prepare_serve_videos(
+    cli: &Cli,
+) -> Result<Option<LiveVideoCatalog>, Box<dyn std::error::Error>> {
+    let videos_config = video_config(cli)?;
+    open_video_catalog(&videos_config, None)
+        .await
+        .map_err(|error| startup_error("videos", error).into())
+}
+
+fn print_listen_urls(
+    cli: &Cli,
+    a2a_shown: &str,
+    mcp_shown: &str,
+    sila_shown: &str,
+    sila_ca: &str,
+    provider: &str,
+    model: &str,
+) {
+    println!("connected to {}", cli.opentrons_url);
+    println!("A2A          {a2a_shown}");
+    println!("Web UI       {}", web_ui_url(a2a_shown));
+    println!("MCP          {mcp_shown}");
+    println!("SiLA         {sila_shown}");
+    println!("SiLA CA      {sila_ca}");
+    println!("model        {provider} {model}");
+    println!("conversation {}", cli.conversation_db.display());
+}
+
 async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (images, catalog, _history_maintenance) = prepare_serve_images(&lab, cli).await?;
+    let videos = prepare_serve_videos(cli).await?;
     let conversation = format!("conversation store at {}", cli.conversation_db.display());
     let store = ConversationStore::open(&cli.conversation_db, cli.history_limit)
         .await
         .map_err(|error| startup_error(&conversation, error))?;
-    let service = A2aLabService::new(lab.clone(), lab.clone(), lab)
-        .with_images(catalog)
-        .with_image_transport(images.transport())
-        .share();
+    let service = share_with_videos(
+        A2aLabService::new(lab.clone(), lab.clone(), lab)
+            .with_images(catalog)
+            .with_image_transport(images.transport()),
+        videos.as_ref(),
+    );
     let (sila, sila_ca) = start_sila(Arc::clone(&service), cli)
         .await
         .map_err(|error| startup_error("sila", error))?;
-    let mcp = McpServer::new(&service);
-    let mcp_listener = TcpListener::bind(format!("{}:31001", cli.a2alab_listen_host))
+    let (mcp_lab, mcp_task, mcp_addr) =
+        start_local_mcp(&service, images.transport(), &cli.a2alab_listen_host).await?;
+    let provider = ModelProvider::from(cli.model_provider);
+    let model = selected_model(provider, cli.model.as_deref(), cli.bedrock_model.as_deref());
+    let model_target = format!("{} model {model}", provider.as_str());
+    let agent = LabAgent::from_provider(provider, &model, DEFAULT_MCP_URL, store)
+        .await
+        .map_err(|error| startup_error(&model_target, error))?;
+    let _mcp_lab = mcp_lab;
+    let mut a2a = A2aServer::new(&service)
+        .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>)
+        .with_web_ui();
+    let a2a_listener = TcpListener::bind(format!("{}:31000", cli.a2alab_listen_host))
+        .await
+        .map_err(|error| startup_error("a2a", error))?;
+    let a2a_addr = a2a_listener
+        .local_addr()
+        .map_err(|error| startup_error("a2a", error))?;
+    let advertised = public_host(cli);
+    a2a = with_advertised_origin(a2a, advertised.as_ref(), a2a_addr.port());
+    a2a = apply_oidc(a2a, cli)?;
+    let (a2a_shown, mcp_shown, sila_shown) =
+        shown_urls(advertised.as_ref(), a2a_addr, mcp_addr, sila.local_addr());
+    print_listen_urls(
+        cli,
+        &a2a_shown,
+        &mcp_shown,
+        &sila_shown,
+        &sila_ca,
+        provider.as_str(),
+        &model,
+    );
+    wait_for_shutdown(a2a, a2a_listener, a2a_addr).await?;
+    drop(sila);
+    drop(mcp_task);
+    if let Some(videos) = videos {
+        videos.shutdown();
+    }
+    Ok(())
+}
+
+fn share_with_videos(
+    service: A2aLabService<OpentronsLab, OpentronsLab, OpentronsLab, LiveImageCatalog>,
+    videos: Option<&LiveVideoCatalog>,
+) -> Arc<dyn A2aLabApi> {
+    match videos {
+        Some(videos) => service.with_videos(videos.provider()).share(),
+        None => service.share(),
+    }
+}
+
+async fn start_local_mcp(
+    service: &Arc<dyn A2aLabApi>,
+    transport: a2a_lab_dev_kit::ImageTransportConfig,
+    listen_host: &str,
+) -> Result<(McpLab, AbortOnDrop, std::net::SocketAddr), Box<dyn std::error::Error>> {
+    let mcp = McpServer::new(service);
+    let mcp_listener = TcpListener::bind(format!("{listen_host}:31001"))
         .await
         .map_err(|error| startup_error("mcp", error))?;
     let mcp_addr = mcp_listener
@@ -440,58 +540,18 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
     let mcp_target = format!("mcp at {DEFAULT_MCP_URL}");
     let mcp_lab = tokio::select! {
         finished = mcp_task.join() => return Err(mcp_task_error(&mcp_target, finished).into()),
-        connected = McpLab::connect_with(DEFAULT_MCP_URL, images.transport()) => {
+        connected = McpLab::connect_with(DEFAULT_MCP_URL, transport) => {
             connected.map_err(|error| startup_error(&mcp_target, error))?
         }
     };
-    let provider = ModelProvider::from(cli.model_provider);
-    let model = selected_model(provider, cli.model.as_deref(), cli.bedrock_model.as_deref());
-    let model_target = format!("{} model {model}", provider.as_str());
-    let agent = LabAgent::from_provider(provider, &model, DEFAULT_MCP_URL, store)
-        .await
-        .map_err(|error| startup_error(&model_target, error))?;
-    let mcp_lab: Arc<dyn A2aLabApi> = Arc::new(mcp_lab);
-    let mut a2a = A2aServer::new(&mcp_lab)
-        .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>)
-        .with_web_ui();
-    let a2a_listener = TcpListener::bind(format!("{}:31000", cli.a2alab_listen_host))
-        .await
-        .map_err(|error| startup_error("a2a", error))?;
-    let a2a_addr = a2a_listener
-        .local_addr()
-        .map_err(|error| startup_error("a2a", error))?;
-    let advertised = cli
-        .a2alab_public_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(advertised_host);
-    if let Some(host) = &advertised {
-        a2a = a2a
-            .with_public_url(origin(host, a2a_addr.port()))
-            .with_grpc_host(host.host.clone());
-    }
-    a2a = apply_oidc(a2a, cli)?;
-    let a2a_shown = advertised.as_ref().map_or_else(
-        || format!("http://{a2a_addr}"),
-        |host| origin(host, a2a_addr.port()),
-    );
-    let mcp_shown = advertised.as_ref().map_or_else(
-        || format!("http://{mcp_addr}/mcp"),
-        |host| format!("{}/mcp", origin(host, mcp_addr.port())),
-    );
-    let sila_shown = advertised.as_ref().map_or_else(
-        || sila.local_addr().to_string(),
-        |host| socket_host(host, sila.local_addr().port()),
-    );
-    println!("connected to {}", cli.opentrons_url);
-    println!("A2A          {a2a_shown}");
-    println!("Web UI       {}", web_ui_url(&a2a_shown));
-    println!("MCP          {mcp_shown}");
-    println!("SiLA         {sila_shown}");
-    println!("SiLA CA      {sila_ca}");
-    println!("model        {} {model}", provider.as_str());
-    println!("conversation {}", cli.conversation_db.display());
+    Ok((mcp_lab, mcp_task, mcp_addr))
+}
+
+async fn wait_for_shutdown(
+    a2a: A2aServer,
+    a2a_listener: TcpListener,
+    a2a_addr: std::net::SocketAddr,
+) -> Result<(), Box<dyn std::error::Error>> {
     let a2a_target = format!("a2a at http://{a2a_addr}");
     tokio::select! {
         result = a2a.listen(a2a_listener) => {
@@ -501,8 +561,6 @@ async fn serve(lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::E
             result.map_err(|error| startup_error("shutdown signal", error))?;
         }
     }
-    drop(sila);
-    drop(mcp_task);
     Ok(())
 }
 
@@ -606,6 +664,48 @@ struct AdvertisedHost {
     host: String,
 }
 
+fn public_host(cli: &Cli) -> Option<AdvertisedHost> {
+    cli.a2alab_public_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(advertised_host)
+}
+
+fn with_advertised_origin(
+    a2a: A2aServer,
+    host: Option<&AdvertisedHost>,
+    a2a_port: u16,
+) -> A2aServer {
+    let Some(host) = host else {
+        return a2a;
+    };
+    a2a.with_public_url(origin(host, a2a_port))
+        .with_grpc_host(host.host.clone())
+}
+
+fn shown_urls(
+    advertised: Option<&AdvertisedHost>,
+    a2a_addr: std::net::SocketAddr,
+    mcp_addr: std::net::SocketAddr,
+    sila_addr: std::net::SocketAddr,
+) -> (String, String, String) {
+    (
+        advertised.map_or_else(
+            || format!("http://{a2a_addr}"),
+            |host| origin(host, a2a_addr.port()),
+        ),
+        advertised.map_or_else(
+            || format!("http://{mcp_addr}/mcp"),
+            |host| format!("{}/mcp", origin(host, mcp_addr.port())),
+        ),
+        advertised.map_or_else(
+            || sila_addr.to_string(),
+            |host| socket_host(host, sila_addr.port()),
+        ),
+    )
+}
+
 fn advertised_host(value: &str) -> AdvertisedHost {
     let (scheme, rest) = value
         .trim()
@@ -669,6 +769,16 @@ fn image_config(cli: &Cli) -> Result<ImageServeConfig, a2a_lab_dev_kit::A2aLabEr
         cli.max_image_bytes,
         cli.capture_timeout_ms,
         cli.image_retention,
+    )
+}
+
+fn video_config(cli: &Cli) -> Result<VideoServeConfig, a2a_lab_dev_kit::A2aLabError> {
+    VideoServeConfig::new(
+        cli.external_camera_index,
+        Some(cli.external_camera_description.as_str()),
+        cli.video_fps,
+        cli.video_retention_secs,
+        cli.max_image_bytes,
     )
 }
 

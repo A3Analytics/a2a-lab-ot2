@@ -10,7 +10,10 @@ use crate::camera::{
     CameraCapture, DEFAULT_EXTERNAL_CAMERA_DESCRIPTION, EXTERNAL_CAMERA_SOURCE_ID, ExternalCamera,
     external_camera_source_with_description,
 };
-use crate::images::{DEFAULT_IMAGE_HISTORY_DB, ImageCapture, ImageCatalogConfig, LiveImageCatalog};
+use crate::images::{
+    DEFAULT_IMAGE_HISTORY_DB, IMAGE_HISTORY_MAX_AGE, ImageCapture, ImageCatalogConfig,
+    LiveImageCatalog,
+};
 use crate::opentrons::{OPENTRONS_CAMERA_SOURCE_ID, OpentronsCamera, opentrons_camera_source};
 
 /// Default still-capture budget for both cameras.
@@ -108,10 +111,11 @@ impl ImageServeConfig {
             None => "external-camera off".to_owned(),
         };
         format!(
-            "images       opentrons-camera asset opentrons-ot2; {external} timeout {}ms retention {} max-bytes {} history {DEFAULT_IMAGE_HISTORY_DB} age 7d",
+            "images       opentrons-camera asset opentrons-ot2; {external} timeout {}ms retention {} max-bytes {} history {DEFAULT_IMAGE_HISTORY_DB} age {}d",
             self.capture_timeout.as_millis(),
             self.retention_per_source,
-            self.max_image_bytes()
+            self.max_image_bytes(),
+            IMAGE_HISTORY_MAX_AGE.as_secs() / 86_400
         )
     }
 }

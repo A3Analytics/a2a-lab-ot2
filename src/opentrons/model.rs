@@ -18,6 +18,14 @@ pub struct Health {
     pub robot_model: Option<String>,
 }
 
+/// `GET /camera/stream` metadata. These fields are URL templates, not frames.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LiveStreamData {
+    pub enabled: bool,
+    pub hls: String,
+    pub rtmp: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Run {

@@ -6,7 +6,7 @@ use a2a_lab_dev_kit::A2aLabError;
 use reqwest::{Method, StatusCode, Url};
 use serde_json::{Value, json};
 
-use super::model::{Command, Envelope, Health, Run};
+use super::model::{Command, Envelope, Health, LiveStreamData, Run};
 
 const VERSION_HEADER: &str = "Opentrons-Version";
 const VERSION: &str = "*";
@@ -68,6 +68,15 @@ impl OpentronsClient {
             return Err(picture_status(status, &text));
         }
         Ok((content_type, body.to_vec()))
+    }
+
+    /// `GET /camera/stream`.
+    ///
+    /// Returns live-stream *metadata* (enable flag plus relative HLS and RTMP
+    /// URL templates). The body is JSON, not video. OT-2 does not run the Flex
+    /// live-stream service those templates describe.
+    pub async fn camera_stream(&self) -> Result<LiveStreamData, A2aLabError> {
+        self.send_json(Method::GET, "camera/stream", None).await
     }
 
     /// Multipart POST used by protocol, data-file, and Wi-Fi key uploads.

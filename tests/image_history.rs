@@ -338,12 +338,12 @@ async fn retention_is_applied_independently_to_each_source() {
 }
 
 #[tokio::test]
-async fn frames_older_than_seven_days_expire_on_startup_and_maintenance() {
+async fn frames_older_than_thirty_days_expire_on_startup_and_maintenance() {
     let dir = scratch("expiry");
     let db = dir.join("images.sqlite");
     let source_id = ImageSourceId::new(EXTERNAL_CAMERA_SOURCE_ID).unwrap();
     let now = a2a_lab_ot2::time::now().unwrap();
-    let old = a2a_lab_ot2::time::shift_seconds(now, -(8 * 24 * 60 * 60)).unwrap();
+    let old = a2a_lab_ot2::time::shift_seconds(now, -(31 * 24 * 60 * 60)).unwrap();
     let fresh = a2a_lab_ot2::time::shift_seconds(now, -60).unwrap();
     let capture = Script::new(vec![Ok(frame(old, "old", 1)), Ok(frame(fresh, "fresh", 2))]);
     let catalog = persisted(
@@ -383,7 +383,7 @@ async fn frames_older_than_seven_days_expire_on_startup_and_maintenance() {
         ids(&restored, &source_id).await,
         vec![fresh_image.descriptor().id().as_str()]
     );
-    let later = a2a_lab_ot2::time::shift_seconds(now, 8 * 24 * 60 * 60).unwrap();
+    let later = a2a_lab_ot2::time::shift_seconds(now, 31 * 24 * 60 * 60).unwrap();
     restored.expire_history_at(later).await.unwrap();
     assert!(ids(&restored, &source_id).await.is_empty());
     let missing = restored
@@ -530,7 +530,7 @@ fn listing_sources_and_a_failed_start_do_not_create_the_history_database() {
         .output()
         .unwrap();
     let stdout = String::from_utf8(started.stdout).unwrap();
-    assert!(stdout.contains("history .a2a-lab-ot2/images.sqlite age 7d"));
+    assert!(stdout.contains("history .a2a-lab-ot2/images.sqlite age 30d"));
     assert!(!started.status.success());
     assert!(!dir.join(".a2a-lab-ot2/images.sqlite").exists());
     std::fs::remove_dir_all(dir).ok();

@@ -24,14 +24,21 @@ The OT-2 robot-server is an a2a-lab. These operations are how a caller lists, ru
 | `search_images`      | Metadata matching a source, time range, and/or caption text              |
 | `get_image`          | One stored frame, inline                                                 |
 | `get_current_image`  | A newly captured frame from one source, inline                           |
+| `list_video_sources` | `external-camera` live MJPEG when a host camera index is set             |
+| `get_video_frame_at` | A retained live JPEG from that source                                    |
+| `get_video_clip`     | A finite retained clip                                                   |
+| `get_video_timeline` | Retained coverage for one source                                         |
+| `follow_video`       | Live follow in the packaged Videos UI                                    |
 
 `opentrons-camera` is the OT-2 on-board camera, asset `opentrons-ot2`. Current frames come from pinned robot-server `v10.0.0` `POST /camera/picture`. This agent does not call `GET /camera/stream`, does not enable the camera, and does not use the Flex live-stream service. OT-2 live streaming is unsupported. The operator enables the camera on the robot.
 
 `external-camera` is off unless you set `--external-camera-index` or `A2ALAB_EXTERNAL_CAMERA_INDEX` to a zero-based native camera index. Capture reads that camera directly and never goes through robot-server. Omitting the setting serves only `opentrons-camera`. Its description defaults to "Still frame from the configured external camera." Set `--external-camera-description` or `A2ALAB_EXTERNAL_CAMERA_DESCRIPTION` to replace that text. An empty description is rejected.
 
+When that index is set, serve also registers `external-camera` as a live video source. The packaged Videos UI can follow it in the single player (`--video-fps`, default 4; `--video-retention-secs`, default 120). The OT-2 onboard camera remains stills-only: `GET /camera/stream` is JSON metadata for the Flex live-stream service, which OT-2 does not run.
+
 A requested `opentrons-camera` or `external-camera` frame is stored in `.a2a-lab-ot2/images.sqlite`. The service user must be able to create that directory and write the database. `list_images` and `search_images` read this file and do not capture. Loading it does not open either camera.
 
-The file keeps at most `--image-retention` frames per source, and none older than 7 days.
+The file keeps stills for 30 days (and at most `--image-retention` frames per source).
 
 `agent-message` is an A2A skill beside those seven. A model takes plain text and calls the lab operations through MCP. MCP and SiLA serve the A2A-LAB operations.
 
@@ -86,11 +93,12 @@ mise run images
 mise run a2a-lab-ot2 -- agent-message "which tasks can I run?"
 ```
 
-`mise run images` lists `opentrons-camera`. The pinned simulator advertises that source and does not emulate a usable on-board camera, so `get-current-image` for it fails there. A real OT-2 returns a JPEG when the camera is enabled. Set `A2ALAB_EXTERNAL_CAMERA_INDEX` to also list and capture `external-camera`.
+`mise run images` lists `opentrons-camera`. The pinned simulator advertises that source and does not emulate a usable on-board camera, so `get-current-image` for it fails there. A real OT-2 returns a JPEG when the camera is enabled. Set `A2ALAB_EXTERNAL_CAMERA_INDEX` to also list and capture `external-camera`. Serve then follows that same host camera as live MJPEG in the Videos UI. On the A2A lab host, the EMEET SmartCam Nova 4K is V4L2 index 4.
 
 ```bash
 mise run images -- opentrons-camera frame.jpg
-A2ALAB_EXTERNAL_CAMERA_INDEX=0 mise run images -- external-camera frame.jpg
+A2ALAB_EXTERNAL_CAMERA_INDEX=4 mise run images -- external-camera frame.jpg
+A2ALAB_EXTERNAL_CAMERA_INDEX=4 mise run start
 ```
 
 `mise run start` serves A2A, MCP, SiLA, and the packaged web UI after robot-server is healthy. Startup prints the UI on the same origin as A2A, at `/ui/`. To print logs from the robot:
@@ -122,7 +130,7 @@ Get-CimInstance Win32_PnPEntity | Where-Object PNPClass -In Camera, Image | Sele
 ```
 
 ```bash
-mise run a2a-lab-ot2 -- --external-camera-index 0 get-current-image --source external-camera --output frame.jpg
+mise run a2a-lab-ot2 -- --external-camera-index 4 get-current-image --source external-camera --output frame.jpg
 ```
 
 ## Real OT-2

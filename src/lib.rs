@@ -10,6 +10,7 @@ pub mod opentrons;
 pub mod page;
 pub mod sila;
 pub mod time;
+pub mod videos;
 
 pub use agent::{
     DEFAULT_ANTHROPIC_MODEL, DEFAULT_BEDROCK_MODEL, DEFAULT_OPENAI_MODEL, LabAgent, ModelProvider,
@@ -28,4 +29,8 @@ pub use oidc::{OidcConfig, with_oidc};
 pub use opentrons::{OpentronsClient, OpentronsLab};
 pub use sila::{
     DEFAULT_SILA_PORT, DEFAULT_SILA_UUID, PreparedSila, SilaConfig, prepare_sila, sila_server,
+};
+pub use videos::{
+    DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, LiveJpegSource, LiveVideoCatalog,
+    VideoServeConfig, open_video_catalog,
 };

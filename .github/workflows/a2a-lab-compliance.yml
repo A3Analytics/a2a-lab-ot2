@@ -171,7 +171,7 @@ jobs:
 
           provenance = {
               "implementation_commit": os.environ["TESTED_COMMIT"],
-              "devkit_dependency_revision": "a86ddd74f391c287925be87c4ad8b50675d9e122",
+              "devkit_dependency_revision": "64ea97d3edcac8f51ba802dbed7fc4a595aec763",
               "tck_action_revision": "1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd",
               "tck_suite_revision": "1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd",
               "profile_version": "1.1.0",

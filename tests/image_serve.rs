@@ -181,7 +181,7 @@ fn config_rejects_zero_and_overflow() {
     assert!(off.summary().contains("external-camera off"));
     assert!(
         off.summary()
-            .contains("history .a2a-lab-ot2/images.sqlite age 7d")
+            .contains("history .a2a-lab-ot2/images.sqlite age 30d")
     );
     let config = ImageServeConfig::new(Some(4), None, 1024, 1_000, 4).unwrap();
     assert_eq!(config.camera_index(), Some(4));
@@ -484,6 +484,11 @@ async fn both_sources_match_across_a2a_and_mcp() {
             "search-images",
             "get-image",
             "get-current-image",
+            "list-video-sources",
+            "get-video-frame-at",
+            "get-video-clip",
+            "get-video-timeline",
+            "follow-video",
             "agent-message",
         ]
     );
@@ -629,14 +634,19 @@ async fn payload_limit_matches_and_readonly_keeps_image_reads() {
 
 fn expected_tools() -> Vec<String> {
     [
+        "follow_video",
         "get_current_image",
         "get_image",
         "get_task_status",
+        "get_video_clip",
+        "get_video_frame_at",
+        "get_video_timeline",
         "list_image_sources",
         "list_images",
         "list_log_sources",
         "list_metrics",
         "list_tasks",
+        "list_video_sources",
         "query_logs",
         "query_metric",
         "search_images",

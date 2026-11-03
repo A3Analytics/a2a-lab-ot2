@@ -41,7 +41,7 @@ Run the default profile from the repository root:
 mise run compliance
 ```
 
-The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies standalone `A3Analytics/a2a-lab-tck` release `v0.1.0` at immutable suite revision `1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd`. `A2ALAB_TCK_ROOT` is an explicit local-source override; it does not change the default. The application separately pins the public devkit library at release `v0.2.0`, commit `a86ddd74f391c287925be87c4ad8b50675d9e122`; it does not depend on the TCK crate.
+The task builds and starts the deterministic OT-2 fixture, runs profile `1.1.0` over its A2A and MCP endpoints, writes `target/compliance/a2a-lab-ot2.json`, and stops the fixture. By default, it fetches and verifies standalone `A3Analytics/a2a-lab-tck` release `v0.1.0` at immutable suite revision `1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd`. `A2ALAB_TCK_ROOT` is an explicit local-source override; it does not change the default. The application separately pins the public devkit library at commit `64ea97d3edcac8f51ba802dbed7fc4a595aec763`; it does not depend on the TCK crate.
 
 Choose a suite or disable the LLM check with these commands:
 
@@ -143,7 +143,7 @@ Normal `serve` enables the dev-kit browser on the A2A listener. `GET /ui`, `GET 
 
 The shell and packaged assets stay public when OpenID Connect is configured. Protected A2A protocol routes still reject a missing token and a token without the required scope. A valid access token is accepted through the HTTP bearer alternative on the agent card. The browser does not run an OpenID Connect login flow. An operator pastes the access token into the bearer field, and the page keeps it only in page memory.
 
-The Tasks page does not cancel runs and does not call `get_current_image`. The Images page calls it when the operator captures from one selected source, then refreshes the stored-frame list. It previews only decoded payloads of at most 262144 bytes. Frames from both cameras come from `.a2a-lab-ot2/images.sqlite`. They survive a restart until they are older than 7 days or beyond the per-source `--image-retention`. Listing and searching do not capture, and opening the database does not open a camera. The service user needs write access to the database directory. Back up the SQLite file together with its `-wal` and `-shm` companions.
+The Tasks page does not cancel runs and does not call `get_current_image`. The Images page calls it when the operator captures from one selected source, then refreshes the stored-frame list. It previews only decoded payloads of at most 262144 bytes. Frames from both cameras come from `.a2a-lab-ot2/images.sqlite`. They survive a restart until they are older than 30 days or beyond the per-source `--image-retention`. Listing and searching do not capture, and opening the database does not open a camera. The service user needs write access to the database directory. Back up the SQLite file together with its `-wal` and `-shm` companions.
 
 `tests/a2a.rs` covers those routes, the public shell, the protocol gate, and the fixture. `fixture` does not call `with_web_ui`, so `/ui/` is absent there. `mise run compliance` talks to that headless fixture.
 

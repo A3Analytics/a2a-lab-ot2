@@ -18,7 +18,7 @@ use crate::time::shift_seconds;
 const SCHEMA: &str = include_str!("../../migrations/002_external_camera_images.sql");
 
 /// Requested camera frames older than this are deleted.
-pub const IMAGE_HISTORY_MAX_AGE: Duration = Duration::from_hours(7 * 24);
+pub const IMAGE_HISTORY_MAX_AGE: Duration = Duration::from_hours(30 * 24);
 
 /// Default SQLite file for requested camera frames.
 pub const DEFAULT_IMAGE_HISTORY_DB: &str = ".a2a-lab-ot2/images.sqlite";
@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exactly_seven_days_remains_and_one_more_second_expires() {
+    async fn exactly_max_age_remains_and_one_more_second_expires() {
         let dir = scratch("age-boundary");
         let source = ImageSourceId::new("external-camera").unwrap();
         let history = ImageHistory::open(dir.join("images.sqlite").as_path(), &[source])

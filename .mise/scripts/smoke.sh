@@ -89,6 +89,11 @@ expected = [
     "search-images",
     "get-image",
     "get-current-image",
+    "list-video-sources",
+    "get-video-frame-at",
+    "get-video-clip",
+    "get-video-timeline",
+    "follow-video",
     "agent-message",
 ]
 if ids != expected:

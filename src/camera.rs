@@ -49,7 +49,7 @@ impl ExternalCameraFormat {
         fps: EXTERNAL_CAMERA_FPS,
     };
 
-    fn nokhwa(self) -> CameraFormat {
+    pub(crate) fn nokhwa(self) -> CameraFormat {
         CameraFormat::new_from(self.width, self.height, FrameFormat::MJPEG, self.fps)
     }
 }
@@ -82,7 +82,7 @@ pub trait CameraCapture: Send + Sync {
 /// Nokhwa automatic native-backend capture.
 #[derive(Debug, Clone, Copy)]
 pub struct NativeCameraCapture {
-    max_bytes: u64,
+    pub(crate) max_bytes: u64,
 }
 
 impl CameraCapture for NativeCameraCapture {
@@ -125,6 +125,22 @@ impl CameraCapture for NativeCameraCapture {
         }
         kept.ok_or(CameraCaptureError::Empty)
     }
+}
+
+static LATEST_EXTERNAL_JPEG: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+/// Stores the newest live JPEG so still capture can reuse the video session.
+pub(crate) fn remember_external_frame(bytes: Vec<u8>) {
+    if let Ok(mut slot) = LATEST_EXTERNAL_JPEG.lock() {
+        *slot = Some(bytes);
+    }
+}
+
+fn latest_external_frame() -> Option<Vec<u8>> {
+    LATEST_EXTERNAL_JPEG
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
 }
 
 /// Source descriptor for the external camera.
@@ -234,6 +250,9 @@ impl ExternalCamera {
     }
 
     async fn read_frame(&self) -> Result<Vec<u8>, A2aLabError> {
+        if let Some(bytes) = latest_external_frame() {
+            return Ok(bytes);
+        }
         let capture = Arc::clone(&self.capture);
         let index = self.index;
         let task = tokio::task::spawn_blocking(move || {
@@ -275,6 +294,22 @@ impl ExternalCamera {
             "camera",
             format!("external camera index {}: {reason}", self.index),
         )
+    }
+}
+
+impl NativeCameraCapture {
+    pub(crate) fn read_open(self, camera: &mut Camera) -> Result<Vec<u8>, CameraCaptureError> {
+        let frame = camera
+            .frame_raw()
+            .map_err(|error| CameraCaptureError::Backend(error.to_string()))?;
+        if frame.is_empty() {
+            return Err(CameraCaptureError::Empty);
+        }
+        let cap = usize::try_from(self.max_bytes).map_err(|_| CameraCaptureError::Oversize)?;
+        if frame.len() > cap {
+            return Err(CameraCaptureError::Oversize);
+        }
+        Ok(frame.into_owned())
     }
 }
 

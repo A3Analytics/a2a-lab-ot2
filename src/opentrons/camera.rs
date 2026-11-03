@@ -23,7 +23,8 @@ pub const OPENTRONS_CAMERA_ASSET_ID: &str = "opentrons-ot2";
 /// Source descriptor for the on-board camera.
 ///
 /// Capture uses pinned robot-server `POST /camera/picture`. The agent does not
-/// enable the camera, change its settings, or read `GET /camera/stream`.
+/// enable the camera or change its settings. `GET /camera/stream` is JSON
+/// metadata for the Flex live-stream service, which OT-2 does not run.
 pub fn opentrons_camera_source() -> Result<ImageSource, A2aLabError> {
     Ok(ImageSource {
         id: ImageSourceId::new(OPENTRONS_CAMERA_SOURCE_ID)?,

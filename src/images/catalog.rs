@@ -28,7 +28,10 @@ impl Drop for ImageHistoryMaintenance {
 }
 
 /// Default number of recent frames retained for each source.
-pub const DEFAULT_IMAGE_RETENTION_PER_SOURCE: u64 = 32;
+///
+/// Age cleanup is 30 days. This count is high enough that a month of stills
+/// is not dropped by the per-source cap.
+pub const DEFAULT_IMAGE_RETENTION_PER_SOURCE: u64 = 100_000;
 
 /// One newly captured frame before the catalog assigns an image ID.
 ///
@@ -235,7 +238,7 @@ impl LiveImageCatalog {
 
     /// Loads `source_id` from `path` and writes later captures of that source there.
     ///
-    /// Frames older than seven days are deleted during the load. This does not capture a frame.
+    /// Frames older than thirty days are deleted during the load. This does not capture a frame.
     pub async fn with_persisted_source(
         self,
         source_id: &ImageSourceId,
@@ -247,7 +250,7 @@ impl LiveImageCatalog {
 
     /// Loads `source_ids` from `path` and writes later captures of those sources there.
     ///
-    /// Frames older than seven days are deleted during the load. This does not capture a frame.
+    /// Frames older than thirty days are deleted during the load. This does not capture a frame.
     pub async fn with_persisted_sources(
         mut self,
         source_ids: &[ImageSourceId],
@@ -286,7 +289,7 @@ impl LiveImageCatalog {
         Ok(self)
     }
 
-    /// Deletes persisted frames older than seven days or beyond the retention count.
+    /// Deletes persisted frames older than thirty days or beyond the retention count.
     pub async fn expire_history_at(&self, now: UtcTimestamp) -> Result<(), A2aLabError> {
         let Some(history) = &self.history else {
             return Ok(());
@@ -532,7 +535,7 @@ async fn cleanup(catalog: &LiveImageCatalog) -> Result<(), A2aLabError> {
 }
 
 fn default_retention() -> usize {
-    usize::try_from(DEFAULT_IMAGE_RETENTION_PER_SOURCE).unwrap_or(32)
+    usize::try_from(DEFAULT_IMAGE_RETENTION_PER_SOURCE).unwrap_or(100_000)
 }
 
 fn evict(images: &mut Vec<Image>, source_id: &ImageSourceId, keep: &ImageId, retention: usize) {

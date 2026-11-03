@@ -68,7 +68,7 @@ A command-line value replaces the environment variable of the same option. The e
 | `--v4l2-description`      | `A2ALAB_V4L2_DESCRIPTION`      | `Still frame from the host Linux V4L2 camera.` | Description advertised for `external-camera` when that source is enabled. A command-line value replaces the environment value. An empty value is rejected.                                                                                                      |
 | `--max-image-bytes`       | `A2ALAB_MAX_IMAGE_BYTES`       | `67108864`                                     | Decoded image maximum. The default is 64 MiB. Zero and overflow-prone values are rejected before listeners start. The same limit is used by the lab service and the A2A MCP connection.                                                                         |
 | `--capture-timeout-ms`    | `A2ALAB_CAPTURE_TIMEOUT_MS`    | `10000`                                        | Milliseconds allowed for one capture on either camera. Zero is rejected.                                                                                                                                                                                        |
-| `--image-retention`       | `A2ALAB_IMAGE_RETENTION`       | `32`                                           | Newest frames kept for each source in `.a2a-lab-ot2/images.sqlite`. Zero and overflow-prone values are rejected. Evicted ids return not found.                                                                                                                  |
+| `--image-retention`       | `A2ALAB_IMAGE_RETENTION`       | `100000`                                       | Newest frames kept for each source in `.a2a-lab-ot2/images.sqlite`. Zero and overflow-prone values are rejected. Age cleanup also drops frames older than 30 days. Evicted ids return not found.                                                                |
 
 Relative paths are resolved from the process working directory.
 
@@ -102,7 +102,7 @@ The model is loaded only while serving. Startup prints `model <provider> <id>`. 
 
 `get-current-image --source <id> --output <path>` captures one frame, writes the JPEG bytes to `<path>`, and prints `id`, `source`, `media_type`, `width`, `height`, `captured_at`, `bytes`, and `output`. The terminal does not contain the image bytes. `mise run images` lists the sources. `mise run images -- <source> <path>` saves one frame.
 
-`opentrons-camera` uses pinned `v10.0.0` `POST /camera/picture`. The agent does not call `GET /camera/stream` and does not enable the camera. OT-2 live streaming is unsupported. `external-camera` reads the configured native camera and never calls robot-server. Image payloads on A2A and MCP are inline base64. Requested frames from either source are written to `.a2a-lab-ot2/images.sqlite` and loaded again on the next `serve` or `get-current-image`. `list-image-sources` does not create that file and does not open a camera. Listing and searching images do not capture. The database keeps the newest `--image-retention` frames per source that are no older than 7 days. Startup and an hourly cleanup remove expired rows. A failed capture or a failed database write leaves the previous history unchanged. `--readonly` still serves these image reads.
+`opentrons-camera` uses pinned `v10.0.0` `POST /camera/picture`. The agent does not call `GET /camera/stream` and does not enable the camera. OT-2 live streaming is unsupported. `external-camera` reads the configured native camera and never calls robot-server. Image payloads on A2A and MCP are inline base64. Requested frames from either source are written to `.a2a-lab-ot2/images.sqlite` and loaded again on the next `serve` or `get-current-image`. `list-image-sources` does not create that file and does not open a camera. Listing and searching images do not capture. The database keeps the newest `--image-retention` frames per source that are no older than 30 days. Startup and an hourly cleanup remove expired rows. A failed capture or a failed database write leaves the previous history unchanged. `--readonly` still serves these image reads.
 
 The process user needs permission to create the history directory and write the database. Back up `images.sqlite`, `images.sqlite-wal`, and `images.sqlite-shm` together. Copying only the main file while serve is running can drop the newest committed frames.
 
@@ -137,7 +137,7 @@ error_identifier <id>
 `serve` is the default command. A healthy start prints:
 
 ```text
-images       opentrons-camera asset opentrons-ot2; external-camera off timeout 10000ms retention 32 max-bytes 67108864 history .a2a-lab-ot2/images.sqlite age 7d
+images       opentrons-camera asset opentrons-ot2; external-camera off timeout 10000ms retention 100000 max-bytes 67108864 history .a2a-lab-ot2/images.sqlite age 30d
 OIDC         off
 connected to <opentrons-url>
 A2A          http://127.0.0.1:31000
@@ -149,7 +149,7 @@ model        <provider> <model>
 conversation <sqlite-path>
 ```
 
-When an issuer is set, the first line is `OIDC <issuer> (A2A only)`. The image line ends in `history <path> age 7d`. Ctrl-C stops A2A, MCP, SiLA, and the hourly history cleanup.
+When an issuer is set, the first line is `OIDC <issuer> (A2A only)`. The image line ends in `history <path> age 30d`. Ctrl-C stops A2A, MCP, SiLA, and the hourly history cleanup.
 
 ## Listeners
 

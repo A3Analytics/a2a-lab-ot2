@@ -16,9 +16,9 @@ use a2a_lab_dev_kit::{
     A2aLabService, A2aServer, AgentMessageHandler, GetCurrentImageRequest, GetImageRequest,
     GetTaskStatusRequest, Image, ImageDescriptor, ImageId, ImageProvider, ImageSource,
     ImageSourceId, JsonObject, ListImageSourcesRequest, ListImagesRequest, ListMetricsRequest,
-    McpLab, McpServer, MetricDescriptor, MetricId, MetricPoint, MetricProvider, Page,
-    QueryMetricRequest, RunId, SearchImagesRequest, SourceId, TaskId, TaskSnapshot, TimeRange,
-    UtcTimestamp,
+    McpLab, McpServer, MetricDescriptor, MetricId, MetricPoint, MetricProvider, PackagedMediaAsset,
+    Page, QueryMetricRequest, RunId, SearchImagesRequest, SourceId, TaskId, TaskSnapshot,
+    TimeRange, UtcTimestamp, VideoClipId, VideoClipStream,
 };
 use axum::Router;
 use axum::extract::{Path, Request};
@@ -479,6 +479,20 @@ impl A2aLabApi for McpEmptyLogSources {
     ) -> A2aLabFuture<'_, Result<TaskSnapshot, A2aLabError>> {
         self.inner.cancel(request)
     }
+
+    fn open_video_clip(
+        &self,
+        id: &VideoClipId,
+    ) -> A2aLabFuture<'_, Result<VideoClipStream, A2aLabError>> {
+        self.inner.open_video_clip(id)
+    }
+
+    fn export_finite_video_clip(
+        &self,
+        id: &VideoClipId,
+    ) -> A2aLabFuture<'_, Result<PackagedMediaAsset, A2aLabError>> {
+        self.inner.export_finite_video_clip(id)
+    }
 }
 
 struct McpMetricMismatch {
@@ -511,6 +525,20 @@ impl A2aLabApi for McpMetricMismatch {
         request: GetTaskStatusRequest,
     ) -> A2aLabFuture<'_, Result<TaskSnapshot, A2aLabError>> {
         self.inner.cancel(request)
+    }
+
+    fn open_video_clip(
+        &self,
+        id: &VideoClipId,
+    ) -> A2aLabFuture<'_, Result<VideoClipStream, A2aLabError>> {
+        self.inner.open_video_clip(id)
+    }
+
+    fn export_finite_video_clip(
+        &self,
+        id: &VideoClipId,
+    ) -> A2aLabFuture<'_, Result<PackagedMediaAsset, A2aLabError>> {
+        self.inner.export_finite_video_clip(id)
     }
 }
 

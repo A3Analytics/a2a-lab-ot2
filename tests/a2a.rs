@@ -218,6 +218,11 @@ async fn a2a_agent_message_continues_context_beside_lab_commands() {
             "search-images",
             "get-image",
             "get-current-image",
+            "list-video-sources",
+            "get-video-frame-at",
+            "get-video-clip",
+            "get-video-timeline",
+            "follow-video",
             "agent-message",
         ]
     );
@@ -311,14 +316,19 @@ async fn mcp_lists_tools_and_readonly_hides_writes() {
 
 fn mcp_tool_names_sorted() -> Vec<String> {
     [
+        "follow_video",
         "get_current_image",
         "get_image",
         "get_task_status",
+        "get_video_clip",
+        "get_video_frame_at",
+        "get_video_timeline",
         "list_image_sources",
         "list_images",
         "list_log_sources",
         "list_metrics",
         "list_tasks",
+        "list_video_sources",
         "query_logs",
         "query_metric",
         "search_images",
