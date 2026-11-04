@@ -9,10 +9,9 @@ use a2a_lab_dev_kit::{
     GetVideoTimelineRequest, HLS_PLAYLIST_RELATIVE_PATH, Image, ImageDescriptor, ImageId,
     ImageSourceId, JsonObject, ListVideoSourcesRequest, MAX_PAGE_LIMIT, MemoryVideos,
     PackagedHlsSession, PackagedMediaAsset, Page, PageRequest, ReadDvrMediaWindowRequest,
-    ResolvedMediaAsset,
-    TimeRange, UtcTimestamp, VideoClip, VideoClipId, VideoClipStream, VideoCodec, VideoFollow,
-    VideoFollowId, VideoFrame, VideoLiveStream, VideoProvider, VideoSource, VideoSourceId,
-    VideoTimeline,
+    ResolvedMediaAsset, TimeRange, UtcTimestamp, VideoClip, VideoClipId, VideoClipStream,
+    VideoCodec, VideoFollow, VideoFollowId, VideoFrame, VideoLiveStream, VideoProvider,
+    VideoSource, VideoSourceId, VideoTimeline,
 };
 use tokio::sync::Mutex;
 
@@ -122,7 +121,26 @@ impl VideoDvrCatalog {
         *next += 1;
         let id = VideoFollowId::new(format!("h264-follow-{next}"))?;
         drop(next);
-        let follow = VideoFollow::new_encoded(id, request.source_id().clone(), VideoCodec::H264)?;
+        let mut follow =
+            VideoFollow::new_encoded(id, request.source_id().clone(), VideoCodec::H264)?;
+        let packager = DvrMediaPackager::default();
+        let anchor = match request.anchor_at() {
+            Some(anchor) => Ok(anchor),
+            None => DvrMediaPackager::live_edge_anchor(&self.dvr, request.source_id()).await,
+        };
+        if let Ok(anchor) = anchor
+            && let Ok(session) = packager
+                .package_live_hls_at(
+                    &self.dvr,
+                    follow.path(),
+                    request.source_id(),
+                    &DvrTrackId::new("h264")?,
+                    anchor,
+                )
+                .await
+        {
+            follow = follow.with_playback_8x(session.playback_8x_metadata());
+        }
         self.follows.lock().await.push(StoredFollow {
             follow: follow.clone(),
             source_id: request.source_id().clone(),
@@ -306,10 +324,10 @@ impl VideoProvider for VideoDvrCatalog {
         let mut next = self.next_clip.lock().await;
         *next += 1;
         let id = VideoClipId::new(format!("clip-{next}"))?;
-        let clip = if encoded {
+        let mut clip = if encoded {
             VideoClip::new(
                 id,
-                source_id,
+                source_id.clone(),
                 request.range(),
                 effective_range,
                 VideoCodec::H264,
@@ -318,12 +336,27 @@ impl VideoProvider for VideoDvrCatalog {
         } else {
             VideoClip::new_mjpeg(id, source_id, request.range(), effective_range)?
         };
+        let hls = if encoded {
+            let session = DvrMediaPackager::default()
+                .package_hls_range(
+                    &self.dvr,
+                    clip.path(),
+                    clip.source_id(),
+                    &track_id,
+                    effective_range,
+                )
+                .await?;
+            clip = clip.with_playback_8x(session.playback_8x_metadata());
+            Some(session)
+        } else {
+            None
+        };
         let expires_at = Instant::now() + self.clip_ttl;
         self.clips.lock().await.push(StoredClip {
             clip: clip.clone(),
             track_id,
             expires_at,
-            hls: None,
+            hls,
         });
         Ok(clip)
     }
@@ -515,7 +548,10 @@ impl VideoProvider for VideoDvrCatalog {
                 )));
             }
             stored.expires_at = Instant::now() + self.clip_ttl;
-            stored.hls.clone().filter(|session| clip_session_has(session, path))
+            stored
+                .hls
+                .clone()
+                .filter(|session| clip_session_has(session, path))
         };
         if let Some(session) = cached.as_ref() {
             let asset = packager.load_hls_asset(&self.dvr, session, path).await?;
