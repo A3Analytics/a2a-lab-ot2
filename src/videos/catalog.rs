@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use a2a_lab_dev_kit::{A2aLabError, MJPEG_MEDIA_TYPE, MemoryVideos, VideoSource, VideoSourceId};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::camera::{
     CAMERA_SOURCE_ID, EXTERNAL_CAMERA_HEIGHT, EXTERNAL_CAMERA_SOURCE_ID, EXTERNAL_CAMERA_WIDTH,
@@ -262,6 +262,15 @@ fn pump(
     let mut encoder: Option<H264Encoder> = None;
     let mut encode_stamps = VecDeque::new();
     let mut codec_init = Vec::new();
+    let (disk_tx, mut disk_rx) = mpsc::channel(64);
+    let disk_catalog = catalog.clone();
+    runtime.spawn(async move {
+        while let Some(job) = disk_rx.recv().await {
+            if let Err(error) = write_disk(&disk_catalog, job).await {
+                eprintln!("video DVR: {error}");
+            }
+        }
+    });
     while !*stop.borrow() {
         let started = Instant::now();
         let next = match kind {
@@ -364,21 +373,28 @@ fn pump(
                     if codec_init.is_empty() || unit.sample.is_empty() {
                         false
                     } else if runtime
-                        .block_on(publish_h264(
+                        .block_on(publish_live(
                             catalog,
                             source_id,
-                            jpeg,
+                            &jpeg,
                             captured_at,
                             retain_us,
-                            frame_period_us,
-                            unit.keyframe,
-                            &codec_init,
-                            &unit.sample,
                         ))
                         .is_err()
                     {
                         return;
                     } else {
+                        queue_disk(
+                            &disk_tx,
+                            DiskJob::h264(
+                                source_id.clone(),
+                                captured_at,
+                                frame_period_us,
+                                unit.keyframe,
+                                codec_init.clone(),
+                                unit.sample,
+                            ),
+                        );
                         true
                     }
                 }
@@ -390,19 +406,26 @@ fn pump(
                     false
                 }
             }
-        } else if runtime
-            .block_on(publish(
-                catalog,
-                source_id,
-                jpeg,
-                retain_us,
-                frame_period_us,
-                false,
-            ))
-            .is_err()
-        {
-            return;
         } else {
+            let Ok(captured_at) = crate::time::now() else {
+                continue;
+            };
+            if runtime
+                .block_on(publish_live(
+                    catalog,
+                    source_id,
+                    &jpeg,
+                    captured_at,
+                    retain_us,
+                ))
+                .is_err()
+            {
+                return;
+            }
+            queue_disk(
+                &disk_tx,
+                DiskJob::mjpeg(source_id.clone(), captured_at, frame_period_us, jpeg),
+            );
             true
         };
         if !published {
@@ -445,46 +468,109 @@ async fn insert_source(
     .await
 }
 
-async fn publish(
-    catalog: &VideoDvrCatalog,
-    source_id: &VideoSourceId,
-    jpeg: Vec<u8>,
-    live_retain_us: i64,
-    frame_period_us: u64,
-    skip_dvr_append: bool,
-) -> Result<(), A2aLabError> {
-    let stamp = crate::time::now()?;
-    catalog
-        .live()
-        .insert_frame(source_id.clone(), stamp, jpeg.clone())
-        .await?;
-    catalog
-        .live()
-        .forget_before(source_id, stamp.saturating_add_micros(-live_retain_us))
-        .await?;
-    if !skip_dvr_append {
-        catalog
-            .dvr()
-            .append_mjpeg_frame(source_id, stamp, frame_period_us, &jpeg)
-            .await?;
-    }
-    catalog.dvr().cleanup_source(source_id, stamp).await
+enum DiskJob {
+    Mjpeg {
+        source_id: VideoSourceId,
+        captured_at: a2a_lab_dev_kit::UtcTimestamp,
+        frame_period_us: u64,
+        jpeg: Vec<u8>,
+    },
+    H264 {
+        source_id: VideoSourceId,
+        captured_at: a2a_lab_dev_kit::UtcTimestamp,
+        frame_period_us: u64,
+        keyframe: bool,
+        codec_init: Vec<u8>,
+        sample: Vec<u8>,
+    },
 }
 
-async fn publish_h264(
+impl DiskJob {
+    fn mjpeg(
+        source_id: VideoSourceId,
+        captured_at: a2a_lab_dev_kit::UtcTimestamp,
+        frame_period_us: u64,
+        jpeg: Vec<u8>,
+    ) -> Self {
+        Self::Mjpeg {
+            source_id,
+            captured_at,
+            frame_period_us,
+            jpeg,
+        }
+    }
+
+    fn h264(
+        source_id: VideoSourceId,
+        captured_at: a2a_lab_dev_kit::UtcTimestamp,
+        frame_period_us: u64,
+        keyframe: bool,
+        codec_init: Vec<u8>,
+        sample: Vec<u8>,
+    ) -> Self {
+        Self::H264 {
+            source_id,
+            captured_at,
+            frame_period_us,
+            keyframe,
+            codec_init,
+            sample,
+        }
+    }
+}
+
+fn queue_disk(tx: &mpsc::Sender<DiskJob>, job: DiskJob) {
+    if tx.try_send(job).is_err() {
+        eprintln!("video DVR: disk writer is behind; skipped a frame");
+    }
+}
+
+async fn write_disk(catalog: &VideoDvrCatalog, job: DiskJob) -> Result<(), A2aLabError> {
+    match job {
+        DiskJob::Mjpeg {
+            source_id,
+            captured_at,
+            frame_period_us,
+            jpeg,
+        } => {
+            catalog
+                .dvr()
+                .append_mjpeg_frame(&source_id, captured_at, frame_period_us, &jpeg)
+                .await
+        }
+        DiskJob::H264 {
+            source_id,
+            captured_at,
+            frame_period_us,
+            keyframe,
+            codec_init,
+            sample,
+        } => {
+            catalog
+                .dvr()
+                .append_h264_sample(
+                    &source_id,
+                    captured_at,
+                    frame_period_us,
+                    keyframe,
+                    &codec_init,
+                    &sample,
+                )
+                .await
+        }
+    }
+}
+
+async fn publish_live(
     catalog: &VideoDvrCatalog,
     source_id: &VideoSourceId,
-    jpeg: Vec<u8>,
+    jpeg: &[u8],
     captured_at: a2a_lab_dev_kit::UtcTimestamp,
     live_retain_us: i64,
-    frame_period_us: u64,
-    keyframe: bool,
-    codec_init: &[u8],
-    sample: &[u8],
 ) -> Result<(), A2aLabError> {
     catalog
         .live()
-        .insert_frame(source_id.clone(), captured_at, jpeg)
+        .insert_frame(source_id.clone(), captured_at, jpeg.to_vec())
         .await?;
     catalog
         .live()
@@ -492,19 +578,7 @@ async fn publish_h264(
             source_id,
             captured_at.saturating_add_micros(-live_retain_us),
         )
-        .await?;
-    catalog
-        .dvr()
-        .append_h264_sample(
-            source_id,
-            captured_at,
-            frame_period_us,
-            keyframe,
-            codec_init,
-            sample,
-        )
-        .await?;
-    catalog.dvr().cleanup_source(source_id, captured_at).await
+        .await
 }
 
 fn mark_down(

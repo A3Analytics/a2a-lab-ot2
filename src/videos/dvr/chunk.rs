@@ -78,9 +78,6 @@ pub async fn append_payload(tmp: &Path, payload: &[u8]) -> Result<(u64, u32), A2
         file.write_all(&payload).map_err(|error| {
             A2aLabError::unavailable(format!("write {}: {error}", tmp.display()))
         })?;
-        file.sync_all().map_err(|error| {
-            A2aLabError::unavailable(format!("sync {}: {error}", tmp.display()))
-        })?;
         Ok((offset, checksum))
     })
     .await
@@ -168,18 +165,19 @@ pub fn truncate_chunk_files(root: &Path, truncate_to: &[(String, u64)]) -> Resul
 }
 
 fn truncate_file(path: &Path, len: u64) -> Result<(), A2aLabError> {
-    let mut bytes = std::fs::read(path)
-        .map_err(|error| A2aLabError::unavailable(format!("read {}: {error}", path.display())))?;
-    let len = usize::try_from(len).unwrap_or(bytes.len());
-    bytes.truncate(len);
-    std::fs::write(path, bytes)
-        .map_err(|error| A2aLabError::unavailable(format!("write {}: {error}", path.display())))?;
     let file = std::fs::OpenOptions::new()
-        .read(true)
+        .write(true)
         .open(path)
         .map_err(|error| A2aLabError::unavailable(format!("open {}: {error}", path.display())))?;
-    file.sync_all()
-        .map_err(|error| A2aLabError::unavailable(format!("sync {}: {error}", path.display())))
+    let current = file
+        .metadata()
+        .map_err(|error| A2aLabError::unavailable(format!("stat {}: {error}", path.display())))?
+        .len();
+    if current <= len {
+        return Ok(());
+    }
+    file.set_len(len)
+        .map_err(|error| A2aLabError::unavailable(format!("truncate {}: {error}", path.display())))
 }
 
 fn walk_chunk_files(
