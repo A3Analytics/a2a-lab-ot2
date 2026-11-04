@@ -138,7 +138,7 @@ any change under `a2a-lab-dev-kit-rs`.
 
 Each enabled native camera keeps one long-lived MJPEG session for live video.
 The external path uses Nokhwa after a thirty-frame settle period at exact
-3840x2160 MJPEG. Source `camera` (`--camera-index`) opens the closest 1280x720
+1920x1080 MJPEG and stores it as H.264. Source `camera` (`--camera-index`) opens the closest 1280x720
 MJPEG mode and stores each JPEG so still capture reuses that frame and does
 not open a second device. Service shutdown or catalog cancellation stops the
 pump threads and drops the native sessions so device handles are released.

@@ -25,9 +25,9 @@ pub const DEFAULT_EXTERNAL_CAMERA_DESCRIPTION: &str =
     "Still frame from the configured external camera.";
 
 /// Required encoded format for external-camera capture.
-pub const EXTERNAL_CAMERA_WIDTH: u32 = 3840;
+pub const EXTERNAL_CAMERA_WIDTH: u32 = 1920;
 /// Required encoded format for external-camera capture.
-pub const EXTERNAL_CAMERA_HEIGHT: u32 = 2160;
+pub const EXTERNAL_CAMERA_HEIGHT: u32 = 1080;
 /// Required frame rate for external-camera capture.
 pub const EXTERNAL_CAMERA_FPS: u32 = 30;
 /// Number of frames read for each current-image request.
@@ -45,7 +45,7 @@ pub struct ExternalCameraFormat {
 }
 
 impl ExternalCameraFormat {
-    /// Exact MJPEG 3840x2160 at 30 fps.
+    /// Exact MJPEG 1920x1080 at 30 fps.
     pub const REQUIRED: Self = Self {
         width: EXTERNAL_CAMERA_WIDTH,
         height: EXTERNAL_CAMERA_HEIGHT,
@@ -353,7 +353,7 @@ impl ExternalCamera {
     fn capture_error(&self, error: CameraCaptureError) -> A2aLabError {
         match error {
             CameraCaptureError::ExactFormatUnavailable(detail) => self.unavailable(&format!(
-                "exact MJPEG 3840x2160 at 30 fps is unavailable ({detail})"
+                "exact MJPEG {EXTERNAL_CAMERA_WIDTH}x{EXTERNAL_CAMERA_HEIGHT} at {EXTERNAL_CAMERA_FPS} fps is unavailable ({detail})"
             )),
             CameraCaptureError::Backend(detail) => {
                 self.unavailable(&format!("native backend capture failed ({detail})"))

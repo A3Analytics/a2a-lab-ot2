@@ -10,12 +10,14 @@ pub(crate) fn intervals_from_starts(
         return Ok(Vec::new());
     }
     let period = i64::try_from(period_us.max(1)).unwrap_or(1);
+    // One extra frame period absorbs capture jitter. A longer hole stays a gap.
+    let split_after = period.saturating_mul(2);
     let mut segments = Vec::new();
     let mut start = starts[0];
     let mut last = starts[0];
     for stamp in starts.iter().skip(1) {
         let gap = stamp.as_micros().saturating_sub(last.as_micros());
-        if gap > period {
+        if gap > split_after {
             segments.push(TimeRange::new(start, last.saturating_add_micros(period))?);
             start = *stamp;
         }

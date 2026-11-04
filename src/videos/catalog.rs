@@ -1,5 +1,6 @@
 //! Memory video catalog plus cancellable capture pumps per camera.
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use crate::camera::{
 use crate::images::jpeg_dimensions;
 use crate::videos::dvr::{IndexedVideoDvr, VideoDvrCatalog, VideoDvrMaintenance};
 use crate::videos::external::{LiveJpegSource, NativeLiveJpeg, frame_budget};
+use crate::videos::h264::H264Encoder;
 
 const CAMERA_VIDEO_WIDTH: u32 = 1280;
 const CAMERA_VIDEO_HEIGHT: u32 = 720;
@@ -256,6 +258,10 @@ fn pump(
     let budget = frame_budget(fps);
     let mut native_external: Option<NativeLiveJpeg> = None;
     let mut native_webcam: Option<NativeLiveJpeg> = None;
+    let encode_native = matches!(kind, PumpKind::External { .. }) && injected.is_none();
+    let mut encoder: Option<H264Encoder> = None;
+    let mut encode_stamps = VecDeque::new();
+    let mut codec_init = Vec::new();
     while !*stop.borrow() {
         let started = Instant::now();
         let next = match kind {
@@ -327,7 +333,64 @@ fn pump(
         if matches!(kind, PumpKind::Webcam { .. }) {
             remember_camera_frame(jpeg.clone());
         }
-        if runtime
+        let published = if encode_native {
+            if encoder.is_none() {
+                match H264Encoder::spawn() {
+                    Ok(opened) => encoder = Some(opened),
+                    Err(error) => {
+                        eprintln!("external camera h264: {error}");
+                        native_external = None;
+                        let _ =
+                            runtime.block_on(catalog.live().set_live_available(source_id, false));
+                        if wait(&mut stop, std::time::Duration::from_secs(2)) {
+                            return;
+                        }
+                        continue;
+                    }
+                }
+            }
+            let Ok(stamp) = crate::time::now() else {
+                continue;
+            };
+            encode_stamps.push_back(stamp);
+            let pushed = encoder.as_mut().map(|encoder| encoder.push(&jpeg));
+            match pushed {
+                Some(Ok(None)) | None => false,
+                Some(Ok(Some(unit))) => {
+                    let captured_at = encode_stamps.pop_front().unwrap_or(stamp);
+                    if !unit.parameter_sets.is_empty() {
+                        codec_init.clone_from(&unit.parameter_sets);
+                    }
+                    if codec_init.is_empty() || unit.sample.is_empty() {
+                        false
+                    } else if runtime
+                        .block_on(publish_h264(
+                            catalog,
+                            source_id,
+                            jpeg,
+                            captured_at,
+                            retain_us,
+                            frame_period_us,
+                            unit.keyframe,
+                            &codec_init,
+                            &unit.sample,
+                        ))
+                        .is_err()
+                    {
+                        return;
+                    } else {
+                        true
+                    }
+                }
+                Some(Err(error)) => {
+                    eprintln!("external camera h264: {error}");
+                    encoder = None;
+                    encode_stamps.clear();
+                    codec_init.clear();
+                    false
+                }
+            }
+        } else if runtime
             .block_on(publish(
                 catalog,
                 source_id,
@@ -339,6 +402,16 @@ fn pump(
             .is_err()
         {
             return;
+        } else {
+            true
+        };
+        if !published {
+            if let Some(rest) = budget.checked_sub(started.elapsed())
+                && wait(&mut stop, rest)
+            {
+                return;
+            }
+            continue;
         }
         let _ = runtime.block_on(catalog.live().set_live_available(source_id, true));
         if let Some(rest) = budget.checked_sub(started.elapsed())
@@ -396,6 +469,42 @@ async fn publish(
             .await?;
     }
     catalog.dvr().cleanup_source(source_id, stamp).await
+}
+
+async fn publish_h264(
+    catalog: &VideoDvrCatalog,
+    source_id: &VideoSourceId,
+    jpeg: Vec<u8>,
+    captured_at: a2a_lab_dev_kit::UtcTimestamp,
+    live_retain_us: i64,
+    frame_period_us: u64,
+    keyframe: bool,
+    codec_init: &[u8],
+    sample: &[u8],
+) -> Result<(), A2aLabError> {
+    catalog
+        .live()
+        .insert_frame(source_id.clone(), captured_at, jpeg)
+        .await?;
+    catalog
+        .live()
+        .forget_before(
+            source_id,
+            captured_at.saturating_add_micros(-live_retain_us),
+        )
+        .await?;
+    catalog
+        .dvr()
+        .append_h264_sample(
+            source_id,
+            captured_at,
+            frame_period_us,
+            keyframe,
+            codec_init,
+            sample,
+        )
+        .await?;
+    catalog.dvr().cleanup_source(source_id, captured_at).await
 }
 
 fn mark_down(

@@ -6,11 +6,13 @@ use std::time::{Duration, Instant};
 use a2a_lab_dev_kit::{
     A2aLabError, DvrFrameAtRequest, DvrMediaPackager, DvrMediaPayload, DvrMediaStore,
     FollowVideoRequest, GetVideoClipRequest, GetVideoFrameAtRequest, GetVideoFrameAtResult,
-    GetVideoTimelineRequest, Image, ImageDescriptor, ImageId, ImageSourceId, JsonObject,
-    ListVideoSourcesRequest, MAX_PAGE_LIMIT, MemoryVideos, PackagedMediaAsset, Page, PageRequest,
-    ReadDvrMediaWindowRequest, ResolvedMediaAsset, TimeRange, UtcTimestamp, VideoClip, VideoClipId,
-    VideoClipStream, VideoFollow, VideoFollowId, VideoFrame, VideoLiveStream, VideoProvider,
-    VideoSource, VideoSourceId, VideoTimeline,
+    GetVideoTimelineRequest, HLS_PLAYLIST_RELATIVE_PATH, Image, ImageDescriptor, ImageId,
+    ImageSourceId, JsonObject, ListVideoSourcesRequest, MAX_PAGE_LIMIT, MemoryVideos,
+    PackagedHlsSession, PackagedMediaAsset, Page, PageRequest, ReadDvrMediaWindowRequest,
+    ResolvedMediaAsset,
+    TimeRange, UtcTimestamp, VideoClip, VideoClipId, VideoClipStream, VideoCodec, VideoFollow,
+    VideoFollowId, VideoFrame, VideoLiveStream, VideoProvider, VideoSource, VideoSourceId,
+    VideoTimeline,
 };
 use tokio::sync::Mutex;
 
@@ -24,6 +26,15 @@ struct StoredClip {
     clip: VideoClip,
     track_id: DvrTrackId,
     expires_at: Instant,
+    hls: Option<PackagedHlsSession>,
+}
+
+#[derive(Clone)]
+struct StoredFollow {
+    follow: VideoFollow,
+    source_id: VideoSourceId,
+    anchor: Option<UtcTimestamp>,
+    expires_at: Instant,
 }
 
 /// Combined live window and disk-backed DVR catalog.
@@ -33,6 +44,8 @@ pub struct VideoDvrCatalog {
     dvr: IndexedVideoDvr,
     clips: Arc<Mutex<Vec<StoredClip>>>,
     next_clip: Arc<Mutex<u64>>,
+    follows: Arc<Mutex<Vec<StoredFollow>>>,
+    next_follow: Arc<Mutex<u64>>,
     clip_ttl: Duration,
 }
 
@@ -47,6 +60,8 @@ impl VideoDvrCatalog {
             dvr,
             clips: Arc::new(Mutex::new(Vec::new())),
             next_clip: Arc::new(Mutex::new(0)),
+            follows: Arc::new(Mutex::new(Vec::new())),
+            next_follow: Arc::new(Mutex::new(0)),
             clip_ttl,
         })
     }
@@ -85,6 +100,79 @@ impl VideoDvrCatalog {
             }
         });
         VideoDvrMaintenance { task }
+    }
+
+    async fn h264_ready(&self, source_id: &VideoSourceId) -> bool {
+        let Ok(true) = self.live.live_available(source_id).await else {
+            return false;
+        };
+        let Ok(tracks) = self.dvr.list_tracks(source_id).await else {
+            return false;
+        };
+        tracks
+            .iter()
+            .any(|track| track.id().as_str() == "h264" && track.codec() == VideoCodec::H264)
+    }
+
+    async fn follow_encoded(
+        &self,
+        request: FollowVideoRequest,
+    ) -> Result<VideoFollow, A2aLabError> {
+        let mut next = self.next_follow.lock().await;
+        *next += 1;
+        let id = VideoFollowId::new(format!("h264-follow-{next}"))?;
+        drop(next);
+        let follow = VideoFollow::new_encoded(id, request.source_id().clone(), VideoCodec::H264)?;
+        self.follows.lock().await.push(StoredFollow {
+            follow: follow.clone(),
+            source_id: request.source_id().clone(),
+            anchor: request.anchor_at(),
+            expires_at: Instant::now() + self.clip_ttl,
+        });
+        Ok(follow)
+    }
+
+    async fn encoded_follow(&self, id: &VideoFollowId) -> Option<StoredFollow> {
+        self.follows
+            .lock()
+            .await
+            .iter()
+            .find(|follow| follow.follow.id() == id)
+            .cloned()
+    }
+
+    async fn load_encoded_asset(
+        &self,
+        id: &VideoFollowId,
+        relative_path: Option<&str>,
+    ) -> Result<ResolvedMediaAsset, A2aLabError> {
+        let stored = self
+            .encoded_follow(id)
+            .await
+            .ok_or_else(|| A2aLabError::not_found("video follow", id.to_string()))?;
+        if stored.expires_at <= Instant::now() {
+            return Err(A2aLabError::clip_expired(format!(
+                "live session `{id}` has expired"
+            )));
+        }
+        let track_id = DvrTrackId::new("h264")?;
+        let packager = DvrMediaPackager::default();
+        let anchor = match stored.anchor {
+            Some(anchor) => anchor,
+            None => DvrMediaPackager::live_edge_anchor(&self.dvr, &stored.source_id).await?,
+        };
+        let session = packager
+            .package_live_hls_at(
+                &self.dvr,
+                stored.follow.path(),
+                &stored.source_id,
+                &track_id,
+                anchor,
+            )
+            .await?;
+        let path = relative_path.unwrap_or(HLS_PLAYLIST_RELATIVE_PATH);
+        let asset = packager.load_hls_asset(&self.dvr, &session, path).await?;
+        Ok(ResolvedMediaAsset::Bytes(asset))
     }
 
     async fn purge_expired_clips(&self) {
@@ -199,7 +287,16 @@ impl VideoProvider for VideoDvrCatalog {
     async fn get_video_clip(&self, request: GetVideoClipRequest) -> Result<VideoClip, A2aLabError> {
         request.check()?;
         let source_id = request.source_id().clone();
-        let track_id = MemoryVideos::mjpeg_track_id(&source_id)?;
+        let h264 = DvrTrackId::new("h264")?;
+        let (track_id, encoded) = if self
+            .effective_range(&source_id, &h264, request.range())
+            .await
+            .is_ok()
+        {
+            (h264, true)
+        } else {
+            (MemoryVideos::mjpeg_track_id(&source_id)?, false)
+        };
         let Ok(effective_range) = self
             .effective_range(&source_id, &track_id, request.range())
             .await
@@ -209,12 +306,24 @@ impl VideoProvider for VideoDvrCatalog {
         let mut next = self.next_clip.lock().await;
         *next += 1;
         let id = VideoClipId::new(format!("clip-{next}"))?;
-        let clip = VideoClip::new_mjpeg(id, source_id, request.range(), effective_range)?;
+        let clip = if encoded {
+            VideoClip::new(
+                id,
+                source_id,
+                request.range(),
+                effective_range,
+                VideoCodec::H264,
+                "application/vnd.apple.mpegurl",
+            )?
+        } else {
+            VideoClip::new_mjpeg(id, source_id, request.range(), effective_range)?
+        };
         let expires_at = Instant::now() + self.clip_ttl;
         self.clips.lock().await.push(StoredClip {
             clip: clip.clone(),
             track_id,
             expires_at,
+            hls: None,
         });
         Ok(clip)
     }
@@ -284,6 +393,16 @@ impl VideoProvider for VideoDvrCatalog {
         }
         self.purge_expired_clips().await;
         let packager = DvrMediaPackager::default();
+        if stored.clip.codec() == VideoCodec::H264 {
+            return packager
+                .export_finite_mp4(
+                    &self.dvr,
+                    stored.clip.source_id(),
+                    &stored.track_id,
+                    stored.clip.effective_range(),
+                )
+                .await;
+        }
         packager
             .export_finite_mjpeg(
                 &self.dvr,
@@ -333,6 +452,9 @@ impl VideoProvider for VideoDvrCatalog {
     }
 
     async fn follow_video(&self, request: FollowVideoRequest) -> Result<VideoFollow, A2aLabError> {
+        if self.h264_ready(request.source_id()).await {
+            return self.follow_encoded(request).await;
+        }
         self.live.follow_video(request).await
     }
 
@@ -345,6 +467,17 @@ impl VideoProvider for VideoDvrCatalog {
         id: &VideoFollowId,
         anchor: UtcTimestamp,
     ) -> Result<VideoFollow, A2aLabError> {
+        let mut follows = self.follows.lock().await;
+        if let Some(stored) = follows.iter_mut().find(|follow| follow.follow.id() == id) {
+            if stored.expires_at <= Instant::now() {
+                return Err(A2aLabError::clip_expired(format!(
+                    "live session `{id}` has expired"
+                )));
+            }
+            stored.anchor = Some(anchor);
+            return Ok(stored.follow.clone());
+        }
+        drop(follows);
         self.live.rebase_video_follow(id, anchor).await
     }
 
@@ -353,10 +486,89 @@ impl VideoProvider for VideoDvrCatalog {
         id: &VideoFollowId,
         relative_path: Option<&str>,
     ) -> Result<ResolvedMediaAsset, A2aLabError> {
+        if self.encoded_follow(id).await.is_some() {
+            return self.load_encoded_asset(id, relative_path).await;
+        }
         self.live
             .resolve_live_playback_asset(id, relative_path)
             .await
     }
+
+    async fn resolve_clip_playback_asset(
+        &self,
+        id: &VideoClipId,
+        relative_path: Option<&str>,
+    ) -> Result<ResolvedMediaAsset, A2aLabError> {
+        let path = relative_path.unwrap_or(HLS_PLAYLIST_RELATIVE_PATH);
+        let packager = DvrMediaPackager::default();
+        let cached = {
+            let mut clips = self.clips.lock().await;
+            let Some(stored) = clips.iter_mut().find(|clip| clip.clip.id() == id) else {
+                return Err(A2aLabError::not_found("video clip", id.to_string()));
+            };
+            if stored.clip.codec() != VideoCodec::H264 {
+                return Err(A2aLabError::not_found("video clip", id.to_string()));
+            }
+            if stored.expires_at <= Instant::now() {
+                return Err(A2aLabError::clip_expired(format!(
+                    "video clip `{id}` has expired"
+                )));
+            }
+            stored.expires_at = Instant::now() + self.clip_ttl;
+            stored.hls.clone().filter(|session| clip_session_has(session, path))
+        };
+        if let Some(session) = cached.as_ref() {
+            let asset = packager.load_hls_asset(&self.dvr, session, path).await?;
+            return Ok(ResolvedMediaAsset::Bytes(asset));
+        }
+        let (root, source_id, track_id, range) = {
+            let clips = self.clips.lock().await;
+            let Some(stored) = clips.iter().find(|clip| clip.clip.id() == id) else {
+                return Err(A2aLabError::not_found("video clip", id.to_string()));
+            };
+            (
+                stored.clip.path().to_owned(),
+                stored.clip.source_id().clone(),
+                stored.track_id.clone(),
+                stored.clip.effective_range(),
+            )
+        };
+        let session = packager
+            .package_hls_range(&self.dvr, &root, &source_id, &track_id, range)
+            .await?;
+        let asset = packager.load_hls_asset(&self.dvr, &session, path).await?;
+        if let Some(stored) = self
+            .clips
+            .lock()
+            .await
+            .iter_mut()
+            .find(|clip| clip.clip.id() == id)
+        {
+            stored.hls = Some(session);
+            stored.expires_at = Instant::now() + self.clip_ttl;
+        }
+        Ok(ResolvedMediaAsset::Bytes(asset))
+    }
+}
+
+fn clip_session_has(session: &PackagedHlsSession, path: &str) -> bool {
+    if path == session.init_relative_path() || path == session.playlist_relative_path() {
+        return true;
+    }
+    if session
+        .segments()
+        .iter()
+        .any(|segment| segment.relative_path() == path)
+    {
+        return true;
+    }
+    session.trick_8x().is_some_and(|trick| {
+        path == trick.playlist_relative_path()
+            || trick
+                .segments()
+                .iter()
+                .any(|segment| segment.relative_path() == path)
+    })
 }
 
 #[cfg(test)]

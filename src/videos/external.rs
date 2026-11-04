@@ -31,7 +31,10 @@ impl NativeLiveJpeg {
             RequestedFormat::with_formats(RequestedFormatType::Exact(exact), &[FrameFormat::MJPEG]);
         let mut camera = Camera::new(CameraIndex::Index(index), request).map_err(|error| {
             A2aLabError::unavailable(format!(
-                "external camera index {index}: exact MJPEG 3840x2160 at 30 fps is unavailable ({error})"
+                "external camera index {index}: exact MJPEG {}x{} at {} fps is unavailable ({error})",
+                crate::camera::EXTERNAL_CAMERA_WIDTH,
+                crate::camera::EXTERNAL_CAMERA_HEIGHT,
+                crate::camera::EXTERNAL_CAMERA_FPS
             ))
         })?;
         if camera.camera_format() != exact {
@@ -109,7 +112,10 @@ impl NativeLiveJpeg {
 fn live_error(error: CameraCaptureError) -> A2aLabError {
     match error {
         CameraCaptureError::ExactFormatUnavailable(detail) => A2aLabError::unavailable(format!(
-            "external camera: exact MJPEG 3840x2160 at 30 fps is unavailable ({detail})"
+            "external camera: exact MJPEG {}x{} at {} fps is unavailable ({detail})",
+            crate::camera::EXTERNAL_CAMERA_WIDTH,
+            crate::camera::EXTERNAL_CAMERA_HEIGHT,
+            crate::camera::EXTERNAL_CAMERA_FPS
         )),
         CameraCaptureError::Backend(detail) => A2aLabError::unavailable(format!(
             "external camera: native backend capture failed ({detail})"

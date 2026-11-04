@@ -135,6 +135,46 @@ impl IndexedVideoDvr {
         .await
     }
 
+    /// Indexes one H.264 access unit on the `h264` track.
+    pub async fn append_h264_sample(
+        &self,
+        source_id: &VideoSourceId,
+        captured_at: UtcTimestamp,
+        frame_period_us: u64,
+        keyframe: bool,
+        codec_init: &[u8],
+        sample: &[u8],
+    ) -> Result<(), A2aLabError> {
+        let track_id = DvrTrackId::new("h264")?;
+        self.ensure_track(
+            source_id,
+            &track_id,
+            VideoCodec::H264,
+            codec_init,
+            frame_period_us,
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE dvr_tracks SET codec_init = ?3
+             WHERE source_id = ?1 AND track_id = ?2 AND codec_init != ?3",
+        )
+        .bind(source_id.as_str())
+        .bind(track_id.as_str())
+        .bind(codec_init)
+        .execute(&self.pool)
+        .await
+        .map_err(db_error)?;
+        self.write_chunk_frame(
+            source_id,
+            &track_id,
+            captured_at,
+            frame_period_us,
+            keyframe,
+            sample,
+        )
+        .await
+    }
+
     /// Removes expired rows, payloads, temp files, and incomplete writes for `source_id` only.
     pub async fn cleanup_source(
         &self,
@@ -736,6 +776,62 @@ impl DvrMediaStore for IndexedVideoDvr {
         Ok(Page::new(items, next_cursor))
     }
 
+    async fn read_media_spans(
+        &self,
+        request: ReadDvrMediaWindowRequest,
+    ) -> Result<Page<DvrMediaSegment>, A2aLabError> {
+        self.require_source(request.source_id()).await?;
+        let window = request.window();
+        let page = request.page();
+        page.check()?;
+        let offset = match page.cursor() {
+            None => 0_i64,
+            Some(cursor) => cursor
+                .parse::<i64>()
+                .map_err(|_| A2aLabError::invalid("cursor", "is not a valid page cursor"))?,
+        };
+        let limit = i64::from(page.limit());
+        let rows = sqlx::query(
+            "SELECT track_id, start_us, end_us, keyframe, codec
+             FROM (
+                SELECT track_id, start_us, end_us, keyframe, codec
+                FROM dvr_segments
+                JOIN dvr_tracks USING (source_id, track_id)
+                WHERE source_id = ?1 AND track_id = ?2
+                  AND start_us < ?4 AND end_us > ?3
+                  AND payload_ready = 1
+                UNION ALL
+                SELECT track_id, start_us, end_us, keyframe, codec
+                FROM dvr_frames
+                JOIN dvr_tracks USING (source_id, track_id)
+                WHERE source_id = ?1 AND track_id = ?2
+                  AND start_us < ?4 AND end_us > ?3
+                  AND payload_ready = 1
+             )
+             ORDER BY start_us
+             LIMIT ?5 OFFSET ?6",
+        )
+        .bind(request.source_id().as_str())
+        .bind(request.track_id().as_str())
+        .bind(window.start().as_micros())
+        .bind(window.end().as_micros())
+        .bind(limit + 1)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_error)?;
+        let mut items = Vec::new();
+        for row in rows
+            .iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+        {
+            items.push(span_from_row(row)?);
+        }
+        let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
+        let next_cursor = (rows.len() > limit_usize).then(|| (offset + limit).to_string());
+        Ok(Page::new(items, next_cursor))
+    }
+
     async fn frame_at(&self, request: DvrFrameAtRequest) -> Result<DvrFrameAtResult, A2aLabError> {
         self.require_source(request.source_id()).await?;
         let coverage = self.media_coverage(request.source_id()).await?;
@@ -808,6 +904,27 @@ fn track_from_row(
     let end = crate::time::from_unix_microseconds(row.try_get("max_end").map_err(db_error)?)?;
     let _ = source_id;
     DvrMediaTrack::new(track_id, codec, init, TimeRange::new(start, end)?)
+}
+
+fn span_from_row(row: &SqliteRow) -> Result<DvrMediaSegment, A2aLabError> {
+    let track_id = DvrTrackId::new(row.try_get::<String, _>("track_id").map_err(db_error)?)?;
+    let start = crate::time::from_unix_microseconds(row.try_get("start_us").map_err(db_error)?)?;
+    let end = crate::time::from_unix_microseconds(row.try_get("end_us").map_err(db_error)?)?;
+    let keyframe: i64 = row.try_get("keyframe").map_err(db_error)?;
+    let codec = parse_codec(&row.try_get::<String, _>("codec").map_err(db_error)?)?;
+    let payload = match codec {
+        VideoCodec::Mjpeg => DvrMediaPayload::MjpegFrame(Vec::new()),
+        VideoCodec::H264 | VideoCodec::H265 => DvrMediaPayload::EncodedSample {
+            codec,
+            bytes: Vec::new(),
+        },
+    };
+    DvrMediaSegment::new(
+        track_id,
+        TimeRange::new(start, end)?,
+        keyframe != 0,
+        payload,
+    )
 }
 
 async fn segment_from_row(

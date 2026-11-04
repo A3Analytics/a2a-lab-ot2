@@ -3,6 +3,7 @@
 mod catalog;
 pub mod dvr;
 mod external;
+mod h264;
 mod serve;
 
 pub use catalog::{

@@ -170,7 +170,7 @@ async fn backend_and_format_failures_are_actionable_and_store_nothing() {
     assert!(
         format
             .to_string()
-            .contains("exact MJPEG 3840x2160 at 30 fps")
+            .contains("exact MJPEG 1920x1080 at 30 fps")
     );
 
     let backend = capture_error(CameraCaptureError::Backend("permission denied".to_owned())).await;
