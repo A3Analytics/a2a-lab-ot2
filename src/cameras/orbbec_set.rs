@@ -14,6 +14,7 @@ use crate::orbbec::{ORBBEC_CAMERA_SOURCE_ID, ORBBEC_FIRST_FRAME_WAIT, OrbbecCapt
 use crate::orbbec_frames::{self, DeviceView, Plane, PlaneFormat};
 
 use super::png::{encode_gray, y16_native};
+use super::session::StreamingDevice;
 
 const SYNC_TOLERANCE_US: u64 = 100_000;
 
@@ -47,6 +48,69 @@ impl OrbbecDevice for SdkOrbbecDevice {
         max_bytes: u64,
     ) -> Result<DeviceView, OrbbecCaptureError> {
         orbbec_frames::capture(serial, timeout, max_bytes)
+    }
+}
+
+/// Persistent Orbbec SDK pipeline behind the generic streaming contract.
+pub struct OrbbecStream {
+    serial: Option<String>,
+    pipeline: Mutex<Option<orbbec_frames::LivePipeline>>,
+}
+
+impl OrbbecStream {
+    /// Loads the SDK on the first describe or capture.
+    #[must_use]
+    pub fn sdk(serial: Option<&str>) -> Self {
+        Self {
+            serial: serial.map(str::to_owned),
+            pipeline: Mutex::new(None),
+        }
+    }
+
+    fn label(&self) -> String {
+        self.serial
+            .clone()
+            .unwrap_or_else(|| ORBBEC_CAMERA_SOURCE_ID.to_owned())
+    }
+
+    fn with_pipeline<T>(
+        &self,
+        operate: impl FnOnce(&orbbec_frames::LivePipeline) -> Result<T, OrbbecCaptureError>,
+    ) -> Result<T, FrameSetError> {
+        let mut slot = self
+            .pipeline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_none() {
+            *slot = Some(
+                orbbec_frames::LivePipeline::open(self.serial.as_deref())
+                    .map_err(|error| map_orbbec(self.label(), error))?,
+            );
+        }
+        operate(slot.as_ref().expect("pipeline")).map_err(|error| map_orbbec(self.label(), error))
+    }
+}
+
+impl StreamingDevice for OrbbecStream {
+    fn describe(&self) -> Result<FrameSetSource, FrameSetError> {
+        let view = self.with_pipeline(orbbec_frames::LivePipeline::describe)?;
+        source_from(&view)
+    }
+
+    fn next(&self, request: &CaptureRequest) -> Result<CapturedFrameSet, FrameSetError> {
+        let timeout = Duration::from_millis(request.timeout_ms()).max(ORBBEC_FIRST_FRAME_WAIT);
+        let max_bytes = request.max_channel_bytes();
+        let view = self.with_pipeline(|pipeline| pipeline.capture(timeout, max_bytes))?;
+        let source = source_from(&view)?;
+        let channels = channels_from(&view, request)?;
+        CapturedFrameSet::new(
+            &source,
+            host_now(),
+            channels,
+            request.channel_ids(),
+            Map::new(),
+            max_bytes,
+        )
     }
 }
 
@@ -169,7 +233,7 @@ fn profile(plane: &Plane) -> Result<ChannelProfile, FrameSetError> {
         if plane.fps.is_finite() && plane.fps > 0.0 {
             plane.fps
         } else {
-            30.0
+            f64::from(super::TARGET_FPS)
         },
     )
 }

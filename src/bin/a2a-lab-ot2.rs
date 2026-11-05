@@ -21,11 +21,11 @@ use a2a_lab_ot2::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use a2a_lab_ot2::{
     ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_DISK_VIDEO_RETENTION_SECS,
     DEFAULT_IMAGE_RETENTION_PER_SOURCE, DEFAULT_SILA_PORT, DEFAULT_SILA_UUID,
-    DEFAULT_VIDEO_DVR_ROOT, DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, FixtureConfig,
-    FixtureServer, FixtureVariant, ImageHistoryMaintenance, ImageServeConfig, LabAgent,
-    LiveImageCatalog, LiveVideoCatalog, ModelProvider, OidcConfig, OpentronsLab, SilaConfig,
-    VideoServeConfig, image_catalog, open_image_catalog, open_video_catalog, prepare_sila,
-    selected_model, sila_server, with_oidc,
+    DEFAULT_SYNC_CHUNK_ROOT, DEFAULT_SYNC_DB, DEFAULT_VIDEO_DVR_ROOT, DEFAULT_VIDEO_FPS,
+    DEFAULT_VIDEO_RETENTION_SECS, FixtureConfig, FixtureServer, FixtureVariant,
+    ImageHistoryMaintenance, ImageServeConfig, LabAgent, LiveImageCatalog, LiveVideoCatalog,
+    ModelProvider, OidcConfig, OpentronsLab, SilaConfig, VideoServeConfig, image_catalog,
+    open_image_catalog, open_video_catalog, prepare_sila, selected_model, sila_server, with_oidc,
 };
 use clap::{Parser, Subcommand};
 
@@ -216,6 +216,20 @@ struct Cli {
     /// Directory for indexed live-video payloads and the SQLite index.
     #[arg(long, env = "A2ALAB_VIDEO_DVR_ROOT", default_value = DEFAULT_VIDEO_DVR_ROOT)]
     video_dvr_root: PathBuf,
+    /// SQLite file for continuous synchronized capture history.
+    #[arg(
+        long,
+        env = "A2ALAB_SYNC_DB",
+        default_value = DEFAULT_SYNC_DB
+    )]
+    sync_db: PathBuf,
+    /// Directory for synchronized capture payloads.
+    #[arg(
+        long,
+        env = "A2ALAB_SYNC_CHUNK_ROOT",
+        default_value = DEFAULT_SYNC_CHUNK_ROOT
+    )]
+    sync_chunk_root: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -481,15 +495,19 @@ async fn open_frame_sets(
     images: &ImageServeConfig,
     catalog: &LiveImageCatalog,
     cli: &Cli,
+    session: Option<&Arc<a2a_lab_ot2::SharedSession>>,
 ) -> Result<Option<Arc<a2a_lab_ot2::frame_set_service::FrameSetApi>>, Box<dyn std::error::Error>> {
     if !images.orbbec_enabled() {
         return Ok(None);
     }
     let retention = usize::try_from(cli.frame_set_retention).unwrap_or(usize::MAX);
     let origin = format!("http://{}:{}", cli.a2alab_listen_host, cli.frame_set_port);
-    let capture = Arc::new(a2a_lab_ot2::cameras::OrbbecFrameCapture::sdk(
-        images.orbbec_serial(),
-    ));
+    let capture: Arc<dyn a2a_lab_ot2::frame_sets::FrameSetCapture> = match session {
+        Some(session) => Arc::clone(session) as Arc<dyn a2a_lab_ot2::frame_sets::FrameSetCapture>,
+        None => Arc::new(a2a_lab_ot2::cameras::OrbbecFrameCapture::sdk(
+            images.orbbec_serial(),
+        )),
+    };
     let api = a2a_lab_ot2::frame_set_service::FrameSetApi::open(
         &cli.frame_set_db,
         capture,
@@ -511,6 +529,7 @@ async fn prepare_serve_images(
         ImageServeConfig,
         LiveImageCatalog,
         Option<ImageHistoryMaintenance>,
+        Option<a2a_lab_ot2::SessionPump>,
     ),
     Box<dyn std::error::Error>,
 > {
@@ -520,18 +539,39 @@ async fn prepare_serve_images(
         .health()
         .await
         .map_err(|error| startup_error(&opentrons, error))?;
-    let catalog = open_image_catalog(&cli.opentrons_url, &images, None, None)
+    let pump = if images.orbbec_enabled() {
+        let session = a2a_lab_ot2::SharedSession::new(Arc::new(a2a_lab_ot2::OrbbecStream::sdk(
+            images.orbbec_serial(),
+        )));
+        Some(a2a_lab_ot2::SessionPump::start(
+            session,
+            images.max_image_bytes(),
+        ))
+    } else {
+        None
+    };
+    let orbbec_capture = pump
+        .as_ref()
+        .map(|pump| Arc::clone(&pump.session) as Arc<dyn a2a_lab_ot2::orbbec::OrbbecCapture>);
+    let catalog = open_image_catalog(&cli.opentrons_url, &images, None, orbbec_capture)
         .await
         .map_err(|error| startup_error("images", error))?;
     let maintenance = catalog.maintain_history();
-    Ok((images, catalog, maintenance))
+    Ok((images, catalog, maintenance, pump))
 }
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 async fn serve(mut lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let (images, catalog, _history_maintenance) = prepare_serve_images(&lab, cli).await?;
+    let (images, catalog, _history_maintenance, capture_pump) =
+        prepare_serve_images(&lab, cli).await?;
     let videos = prepare_serve_videos(cli).await?;
-    let frame_sets = open_frame_sets(&images, &catalog, cli).await?;
+    let frame_sets = open_frame_sets(
+        &images,
+        &catalog,
+        cli,
+        capture_pump.as_ref().map(|pump| &pump.session),
+    )
+    .await?;
     if let Some(api) = &frame_sets {
         lab = lab.with_frame_sets(Arc::clone(api));
     }
@@ -615,6 +655,7 @@ async fn serve(mut lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::erro
     println!("conversation {}", cli.conversation_db.display());
     let frame_listener = spawn_frame_listener(frame_sets, cli, advertised.as_ref()).await?;
     wait_for_shutdown(a2a, a2a_listener, frame_listener).await?;
+    drop(capture_pump);
     drop(sila);
     drop(mcp_task);
     if let Some(videos) = videos {
@@ -922,6 +963,13 @@ fn image_config(cli: &Cli) -> Result<ImageServeConfig, a2a_lab_dev_kit::A2aLabEr
         ));
     }
     if orbbec {
+        a2a_lab_ot2::frame_sets::validate_sync_paths(
+            &cli.sync_db,
+            &cli.frame_set_db,
+            &cli.sync_chunk_root,
+            &cli.video_dvr_root,
+        )
+        .map_err(|error| a2a_lab_dev_kit::A2aLabError::invalid("sync", error.to_string()))?;
         config.with_orbbec(serial)
     } else {
         Ok(config)

@@ -822,6 +822,24 @@ impl FrameSet {
         &self.channels
     }
 
+    /// Color JPEG bytes when this set includes a color channel.
+    #[must_use]
+    pub fn color_jpeg(&self) -> Option<&[u8]> {
+        color_jpeg(&self.channels)
+    }
+
+    /// True when depth and both infrared planes are present.
+    #[must_use]
+    pub fn has_stereo(&self) -> bool {
+        has_stereo(&self.channels)
+    }
+
+    /// Device timestamp of the first channel, or zero when empty.
+    #[must_use]
+    pub fn timestamp_us(&self) -> u64 {
+        timestamp_us(&self.channels)
+    }
+
     /// Generic diagnostics.
     #[must_use]
     pub const fn attributes(&self) -> &Map<String, Value> {
@@ -902,6 +920,34 @@ impl FrameSet {
         check_sync(&self.channels, source.sync_tolerance_us())?;
         Ok(())
     }
+}
+
+fn color_jpeg(channels: &[FrameChannel]) -> Option<&[u8]> {
+    channels
+        .iter()
+        .find(|channel| channel.role().is_color())
+        .map(FrameChannel::data)
+}
+
+fn has_stereo(channels: &[FrameChannel]) -> bool {
+    let mut depth = false;
+    let mut left = false;
+    let mut right = false;
+    for channel in channels {
+        match channel.role().as_str() {
+            "depth" => depth = true,
+            "infrared-left" => left = true,
+            "infrared-right" => right = true,
+            _ => {}
+        }
+    }
+    depth && left && right
+}
+
+fn timestamp_us(channels: &[FrameChannel]) -> u64 {
+    channels
+        .first()
+        .map_or(0, FrameChannel::device_timestamp_us)
 }
 
 fn expected_ids<'a>(
@@ -1085,6 +1131,36 @@ impl CapturedFrameSet {
             self.attributes,
             max_channel_bytes,
         )
+    }
+
+    /// Host capture time.
+    #[must_use]
+    pub fn captured_at(&self) -> &str {
+        &self.captured_at
+    }
+
+    /// Channels in request order.
+    #[must_use]
+    pub fn channels(&self) -> &[FrameChannel] {
+        &self.channels
+    }
+
+    /// Color JPEG bytes when this set includes a color channel.
+    #[must_use]
+    pub fn color_jpeg(&self) -> Option<&[u8]> {
+        color_jpeg(&self.channels)
+    }
+
+    /// True when depth and both infrared planes are present.
+    #[must_use]
+    pub fn has_stereo(&self) -> bool {
+        has_stereo(&self.channels)
+    }
+
+    /// Device timestamp of the first channel, or zero when empty.
+    #[must_use]
+    pub fn timestamp_us(&self) -> u64 {
+        timestamp_us(&self.channels)
     }
 }
 

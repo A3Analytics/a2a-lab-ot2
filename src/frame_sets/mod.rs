@@ -10,6 +10,7 @@ mod id;
 mod model;
 mod payload;
 mod store;
+mod sync;
 
 pub use catalog::FrameSetCatalog;
 pub use error::FrameSetError;
@@ -21,3 +22,7 @@ pub use model::{
     FrameSet, FrameSetMetadata, FrameSetSource, Intrinsics, frame_channel,
 };
 pub use store::{FrameSetCapture, FrameSetStore, MemoryFrameSetStore, publish_capture};
+pub use sync::{
+    DEFAULT_SYNC_CHUNK_ROOT, DEFAULT_SYNC_DB, FREE_RESERVE, PAYLOAD_QUOTA, SyncChannel,
+    SyncRecorder, SyncSet, SyncStore, validate_sync_paths,
+};

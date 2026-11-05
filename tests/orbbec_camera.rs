@@ -141,6 +141,25 @@ fn catalog(
 }
 
 #[test]
+fn conflicting_orbbec_storage_paths_are_rejected_before_serve() {
+    let same = bin()
+        .args([
+            "--orbbec-camera",
+            "--sync-db",
+            "history.sqlite",
+            "--frame-set-db",
+            "history.sqlite",
+            "list-image-sources",
+        ])
+        .env("A2ALAB_OPENTRONS_URL", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    assert!(!same.status.success());
+    let err = String::from_utf8_lossy(&same.stderr);
+    assert!(err.contains("must not be the same file"), "{err}");
+}
+
+#[test]
 fn disabled_configuration_rejects_a_serial_and_does_not_enable_the_source() {
     let error = bin()
         .args(["--orbbec-serial", "ABC", "list-image-sources"])

@@ -21,8 +21,12 @@ pub use agent::{
     DEFAULT_ANTHROPIC_MODEL, DEFAULT_BEDROCK_MODEL, DEFAULT_OPENAI_MODEL, LabAgent, ModelProvider,
     selected_model,
 };
+pub use cameras::{OrbbecStream, SessionPump, SharedSession, StreamingDevice};
 pub use fixture::{
     FixtureConfig, FixtureReadiness, FixtureServer, FixtureVariant, fixture_declaration,
+};
+pub use frame_sets::{
+    DEFAULT_SYNC_CHUNK_ROOT, DEFAULT_SYNC_DB, SyncRecorder, SyncStore, validate_sync_paths,
 };
 pub use images::{
     CapturedFrame, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_IMAGE_HISTORY_DB,

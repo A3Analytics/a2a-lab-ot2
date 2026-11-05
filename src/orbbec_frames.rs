@@ -7,6 +7,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 use std::time::Duration;
 
+use crate::cameras::TARGET_FPS;
 use crate::orbbec::{ORBBEC_SDK_VERSION, OrbbecCaptureError, select_device};
 
 const SENSOR_IR: i32 = 1;
@@ -99,8 +100,7 @@ pub(crate) struct DeviceView {
 
 /// Reads advertised profiles and closes the device without waiting for frames.
 pub(crate) fn describe(serial: Option<&str>) -> Result<DeviceView, OrbbecCaptureError> {
-    let api = Api::load()?;
-    let mut session = Session::new(&api);
+    let mut session = Session::new(Api::load()?);
     session.open(serial)?;
     session.view(false, Duration::ZERO, 0)
 }
@@ -111,10 +111,42 @@ pub(crate) fn capture(
     timeout: Duration,
     max_bytes: u64,
 ) -> Result<DeviceView, OrbbecCaptureError> {
-    let api = Api::load()?;
-    let mut session = Session::new(&api);
+    let mut session = Session::new(Api::load()?);
     session.open(serial)?;
     session.view(true, timeout, max_bytes)
+}
+
+/// One open SDK pipeline reused across describe and capture.
+pub(crate) struct LivePipeline {
+    session: std::sync::Mutex<Session>,
+}
+
+impl LivePipeline {
+    pub(crate) fn open(serial: Option<&str>) -> Result<Self, OrbbecCaptureError> {
+        let mut session = Session::new(Api::load()?);
+        session.open(serial)?;
+        Ok(Self {
+            session: std::sync::Mutex::new(session),
+        })
+    }
+
+    pub(crate) fn describe(&self) -> Result<DeviceView, OrbbecCaptureError> {
+        self.lock().view(false, Duration::ZERO, 0)
+    }
+
+    pub(crate) fn capture(
+        &self,
+        timeout: Duration,
+        max_bytes: u64,
+    ) -> Result<DeviceView, OrbbecCaptureError> {
+        self.lock().view(true, timeout, max_bytes)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Session> {
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 struct StreamSpec {
@@ -299,6 +331,7 @@ struct Api {
     delete_info: Option<DeleteInfo>,
 }
 
+#[derive(Clone, Copy)]
 struct Matched {
     frame_type: i32,
     channel_id: &'static str,
@@ -310,8 +343,8 @@ struct Matched {
     fps: f64,
 }
 
-struct Session<'a> {
-    api: &'a Api,
+struct Session {
+    api: Api,
     context: *mut c_void,
     list: *mut c_void,
     device: *mut c_void,
@@ -320,10 +353,13 @@ struct Session<'a> {
     config: *mut c_void,
     frameset: *mut c_void,
     frames: Vec<*mut c_void>,
+    matched: Vec<Matched>,
     started: bool,
     serial: String,
     model: String,
 }
+
+unsafe impl Send for Session {}
 
 impl Api {
     fn load() -> Result<Self, OrbbecCaptureError> {
@@ -441,8 +477,8 @@ impl Api {
     }
 }
 
-impl<'a> Session<'a> {
-    fn new(api: &'a Api) -> Self {
+impl Session {
+    fn new(api: Api) -> Self {
         Self {
             api,
             context: ptr::null_mut(),
@@ -453,6 +489,7 @@ impl<'a> Session<'a> {
             config: ptr::null_mut(),
             frameset: ptr::null_mut(),
             frames: Vec::new(),
+            matched: Vec::new(),
             started: false,
             serial: String::new(),
             model: "orbbec".to_owned(),
@@ -475,9 +512,14 @@ impl<'a> Session<'a> {
         timeout: Duration,
         max_bytes: u64,
     ) -> Result<DeviceView, OrbbecCaptureError> {
-        let matched = self.match_streams()?;
+        if self.matched.is_empty() {
+            self.matched = self.match_streams()?;
+        }
+        let matched = self.matched.clone();
         let planes = if read_frames {
-            self.start(&matched)?;
+            if !self.started {
+                self.start(&matched)?;
+            }
             self.read_planes(&matched, timeout, max_bytes)?
         } else {
             matched.iter().map(profile_plane).collect()
@@ -685,16 +727,19 @@ impl<'a> Session<'a> {
         spec: &StreamSpec,
     ) -> Result<Option<(*mut c_void, i32)>, OrbbecCaptureError> {
         for format in spec.formats {
-            let mut error = ptr::null_mut();
-            let profile = unsafe { (self.api.match_video)(list, 0, 0, *format, 0, &raw mut error) };
-            if let Some(message) = self.api.consume_error(error) {
-                if spec.required {
-                    return Err(OrbbecCaptureError::NoColorProfile(message));
+            for fps in [i32::try_from(TARGET_FPS).unwrap_or(5), 0] {
+                let mut error = ptr::null_mut();
+                let profile =
+                    unsafe { (self.api.match_video)(list, 0, 0, *format, fps, &raw mut error) };
+                if let Some(message) = self.api.consume_error(error) {
+                    if spec.required && fps == 0 {
+                        return Err(OrbbecCaptureError::NoColorProfile(message));
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if !profile.is_null() {
-                return Ok(Some((profile, *format)));
+                if !profile.is_null() {
+                    return Ok(Some((profile, *format)));
+                }
             }
         }
         if spec.required {
@@ -710,7 +755,15 @@ impl<'a> Session<'a> {
         let width = self.u32_profile(self.api.profile_width, profile);
         let height = self.u32_profile(self.api.profile_height, profile);
         let fps = f64::from(self.u32_profile(self.api.profile_fps, profile));
-        (width, height, if fps > 0.0 { fps } else { 30.0 })
+        (
+            width,
+            height,
+            if fps > 0.0 {
+                fps
+            } else {
+                f64::from(TARGET_FPS)
+            },
+        )
     }
 
     fn u32_profile(&self, function: ProfileU32, profile: *const c_void) -> u32 {
@@ -959,7 +1012,7 @@ impl<'a> Session<'a> {
     }
 }
 
-impl Drop for Session<'_> {
+impl Drop for Session {
     fn drop(&mut self) {
         let frames = std::mem::take(&mut self.frames);
         let frameset = self.frameset;
@@ -987,7 +1040,7 @@ impl Drop for Session<'_> {
     }
 }
 
-impl Session<'_> {
+impl Session {
     fn release_frame(&self, frame: *mut c_void) {
         if frame.is_null() {
             return;

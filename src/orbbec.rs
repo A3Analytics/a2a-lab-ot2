@@ -130,6 +130,24 @@ pub trait OrbbecCapture: Send + Sync {
     ) -> Result<Vec<u8>, OrbbecCaptureError>;
 }
 
+impl OrbbecCapture for crate::cameras::SharedSession {
+    fn capture_color(
+        &self,
+        _serial: Option<&str>,
+        timeout: Duration,
+        _max_bytes: u64,
+    ) -> Result<Vec<u8>, OrbbecCaptureError> {
+        self.color_jpeg(timeout).map_err(|error| match error {
+            crate::frame_sets::FrameSetError::Timeout { .. } => OrbbecCaptureError::Timeout,
+            crate::frame_sets::FrameSetError::Oversize => OrbbecCaptureError::Oversize,
+            crate::frame_sets::FrameSetError::Malformed(detail) => {
+                OrbbecCaptureError::Malformed(detail)
+            }
+            other => OrbbecCaptureError::Sdk(other.to_string()),
+        })
+    }
+}
+
 /// Open Orbbec color pipeline that stays running for live video.
 pub(crate) struct NativeOrbbecJpeg {
     session: sdk::Session,
