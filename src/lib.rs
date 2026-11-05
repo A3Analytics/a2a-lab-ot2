@@ -10,6 +10,8 @@ pub mod images;
 pub mod memory;
 pub mod oidc;
 pub mod opentrons;
+pub mod orbbec;
+mod orbbec_frames;
 pub mod page;
 pub mod sila;
 pub mod time;

@@ -16,6 +16,10 @@ use crate::images::{
     LiveImageCatalog,
 };
 use crate::opentrons::{OPENTRONS_CAMERA_SOURCE_ID, OpentronsCamera, opentrons_camera_source};
+use crate::orbbec::{
+    ORBBEC_CAMERA_SOURCE_ID, ORBBEC_FIRST_FRAME_WAIT, OrbbecCamera, OrbbecCapture,
+    SdkOrbbecCapture, orbbec_camera_source,
+};
 
 /// Default still-capture budget for both cameras.
 pub const DEFAULT_CAPTURE_TIMEOUT_MS: u64 = 10_000;
@@ -29,9 +33,16 @@ pub struct ImageServeConfig {
     camera_index: Option<u32>,
     description: String,
     webcam_index: Option<u32>,
+    orbbec: Option<OrbbecSelection>,
     transport: ImageTransportConfig,
     capture_timeout: Duration,
     retention_per_source: u64,
+}
+
+/// Selected Orbbec device. `None` uses the only connected device at capture time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrbbecSelection {
+    serial: Option<String>,
 }
 
 impl ImageServeConfig {
@@ -59,10 +70,25 @@ impl ImageServeConfig {
             camera_index,
             description,
             webcam_index: None,
+            orbbec: None,
             transport,
             capture_timeout,
             retention_per_source,
         })
+    }
+
+    /// Enables `orbbec-camera` without opening a device.
+    ///
+    /// `None` selects the only connected device when a frame is requested.
+    /// An empty serial is rejected.
+    pub fn with_orbbec(mut self, serial: Option<&str>) -> Result<Self, A2aLabError> {
+        if serial.is_some_and(str::is_empty) {
+            return Err(A2aLabError::invalid("orbbec_serial", "must not be empty"));
+        }
+        self.orbbec = Some(OrbbecSelection {
+            serial: serial.map(str::to_owned),
+        });
+        Ok(self)
     }
 
     /// Enables source `camera` without opening a device.
@@ -90,6 +116,20 @@ impl ImageServeConfig {
     #[must_use]
     pub const fn camera_enabled(&self) -> bool {
         self.webcam_index.is_some()
+    }
+
+    /// Whether `orbbec-camera` is advertised.
+    #[must_use]
+    pub const fn orbbec_enabled(&self) -> bool {
+        self.orbbec.is_some()
+    }
+
+    /// Serial pinned for `orbbec-camera`, when one was configured.
+    #[must_use]
+    pub fn orbbec_serial(&self) -> Option<&str> {
+        self.orbbec
+            .as_ref()
+            .and_then(|selection| selection.serial.as_deref())
     }
 
     /// Decoded-byte maximum applied to both cameras and protocol adapters.
@@ -132,8 +172,15 @@ impl ImageServeConfig {
             Some(index) => format!("camera index {index}"),
             None => "camera off".to_owned(),
         };
+        let orbbec = match &self.orbbec {
+            None => "orbbec-camera off".to_owned(),
+            Some(OrbbecSelection { serial: None }) => "orbbec-camera sole-device".to_owned(),
+            Some(OrbbecSelection {
+                serial: Some(serial),
+            }) => format!("orbbec-camera serial {serial}"),
+        };
         format!(
-            "images       opentrons-camera asset opentrons-ot2; {external}; {camera} timeout {}ms retention {} max-bytes {} history {DEFAULT_IMAGE_HISTORY_DB} age {}d",
+            "images       opentrons-camera asset opentrons-ot2; {external}; {camera}; {orbbec} timeout {}ms retention {} max-bytes {} history {DEFAULT_IMAGE_HISTORY_DB} age {}d",
             self.capture_timeout.as_millis(),
             self.retention_per_source,
             self.max_image_bytes(),
@@ -181,6 +228,19 @@ pub fn image_catalog(
             Arc::new(CameraStill::new(config.max_image_bytes())?),
         ));
     }
+    if config.orbbec_enabled() {
+        let (capture, timeout) = (
+            Arc::new(SdkOrbbecCapture) as Arc<dyn OrbbecCapture>,
+            config.capture_timeout.max(ORBBEC_FIRST_FRAME_WAIT),
+        );
+        let orbbec = OrbbecCamera::with_shared_capture(
+            config.orbbec_serial(),
+            timeout,
+            config.max_image_bytes(),
+            capture,
+        )?;
+        sources.push((orbbec_camera_source()?, Arc::new(orbbec)));
+    }
     LiveImageCatalog::new(
         sources,
         ImageCatalogConfig::new(config.retention_per_source, config.max_image_bytes())?,
@@ -202,6 +262,9 @@ pub async fn open_image_catalog(
     }
     if config.camera_enabled() {
         sources.push(ImageSourceId::new(CAMERA_SOURCE_ID)?);
+    }
+    if config.orbbec_enabled() {
+        sources.push(ImageSourceId::new(ORBBEC_CAMERA_SOURCE_ID)?);
     }
     catalog
         .with_persisted_sources(&sources, Path::new(DEFAULT_IMAGE_HISTORY_DB))
