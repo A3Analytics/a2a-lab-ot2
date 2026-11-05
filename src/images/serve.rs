@@ -199,6 +199,7 @@ pub fn image_catalog(
     opentrons_url: &str,
     config: &ImageServeConfig,
     external_capture: Option<Arc<dyn CameraCapture>>,
+    orbbec_capture: Option<Arc<dyn OrbbecCapture>>,
 ) -> Result<LiveImageCatalog, A2aLabError> {
     let opentrons = OpentronsCamera::new(
         opentrons_url,
@@ -229,10 +230,13 @@ pub fn image_catalog(
         ));
     }
     if config.orbbec_enabled() {
-        let (capture, timeout) = (
-            Arc::new(SdkOrbbecCapture) as Arc<dyn OrbbecCapture>,
-            config.capture_timeout.max(ORBBEC_FIRST_FRAME_WAIT),
-        );
+        let (capture, timeout) = match orbbec_capture {
+            Some(capture) => (capture, config.capture_timeout),
+            None => (
+                Arc::new(SdkOrbbecCapture) as Arc<dyn OrbbecCapture>,
+                config.capture_timeout.max(ORBBEC_FIRST_FRAME_WAIT),
+            ),
+        };
         let orbbec = OrbbecCamera::with_shared_capture(
             config.orbbec_serial(),
             timeout,
@@ -254,8 +258,9 @@ pub async fn open_image_catalog(
     opentrons_url: &str,
     config: &ImageServeConfig,
     external_capture: Option<Arc<dyn CameraCapture>>,
+    orbbec_capture: Option<Arc<dyn OrbbecCapture>>,
 ) -> Result<LiveImageCatalog, A2aLabError> {
-    let catalog = image_catalog(opentrons_url, config, external_capture)?;
+    let catalog = image_catalog(opentrons_url, config, external_capture, orbbec_capture)?;
     let mut sources = vec![ImageSourceId::new(OPENTRONS_CAMERA_SOURCE_ID)?];
     if config.camera_index().is_some() {
         sources.push(ImageSourceId::new(EXTERNAL_CAMERA_SOURCE_ID)?);

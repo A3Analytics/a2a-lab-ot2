@@ -141,7 +141,7 @@ async fn serve_stack_lists_the_same_sources_on_a2a_and_mcp() {
         .await
         .unwrap()
         .expect("videos on");
-    let images = image_catalog(&url, &image_config, None).unwrap();
+    let images = image_catalog(&url, &image_config, None, None).unwrap();
     let lab = OpentronsLab::new(&url).unwrap();
     let service = A2aLabService::new(lab.clone(), lab.clone(), lab)
         .with_images(images)

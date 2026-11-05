@@ -362,6 +362,7 @@ async fn camera_without_a_frame_does_not_break_external_still_path() {
         "http://127.0.0.1:9",
         &config,
         Some(Arc::new(external_capture.clone())),
+        None,
     )
     .unwrap();
     let camera_error = images

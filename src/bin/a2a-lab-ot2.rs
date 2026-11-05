@@ -520,7 +520,7 @@ async fn prepare_serve_images(
         .health()
         .await
         .map_err(|error| startup_error(&opentrons, error))?;
-    let catalog = open_image_catalog(&cli.opentrons_url, &images, None)
+    let catalog = open_image_catalog(&cli.opentrons_url, &images, None, None)
         .await
         .map_err(|error| startup_error("images", error))?;
     let maintenance = catalog.maintain_history();
@@ -943,6 +943,7 @@ fn camera_catalog(cli: &Cli) -> Result<a2a_lab_ot2::LiveImageCatalog, Box<dyn st
         &cli.opentrons_url,
         &image_config(cli)?,
         None,
+        None,
     )?)
 }
 
@@ -967,7 +968,7 @@ async fn get_current_image(
     source: &str,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None).await?;
+    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None, None).await?;
     let image = catalog
         .get_current_image(GetCurrentImageRequest::new(ImageSourceId::new(source)?))
         .await?;
@@ -995,7 +996,7 @@ async fn get_stored_image(
     id: &str,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None).await?;
+    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None, None).await?;
     let image = catalog
         .get_image(GetImageRequest::new(ImageId::new(id)?))
         .await?;

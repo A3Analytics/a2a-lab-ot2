@@ -230,6 +230,7 @@ async fn open_lab(dvr_root: &Path, injections: LiveVideoInjections) -> Lab {
         "http://127.0.0.1:9",
         &image_config,
         Some(Arc::new(ext_still)),
+        None,
     )
     .unwrap();
 
