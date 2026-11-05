@@ -16,7 +16,7 @@ Companion: [the devkit reusable-media plan](../../../../../a2a-lab-dev-kit-rs/ba
 
 ## Inspected baseline and prerequisite discrepancy
 
-Reconciled on 2026-11-04. No commit or worktree contains the shared persistent Orbbec owner, the continuous synchronized recorder, or their tests. TASK-48 through TASK-52 are Done only in the local gitignored backlog. Done metadata is not evidence that the source is on a branch. This task does not recreate that SDK pipeline. Downstream Orbbec session edits stay blocked until the missing source below is on a branch and the baseline tests named by those tasks pass. Those tests were not run here.
+Reconciled on 2026-11-04 and updated on 2026-11-05 after `main` received the older SDK stills. Current `main` (`fbafc2b` lineage, including `c7412c1`) has `src/orbbec.rs`, `src/orbbec_frames.rs`, `src/cameras/orbbec_set.rs`, and `tests/orbbec_camera.rs`. It still does not contain the shared persistent Orbbec owner, the continuous synchronized recorder, or their tests. TASK-48 through TASK-52 are Done only in the local gitignored backlog. Done metadata is not evidence that the shared session is on a branch. This task does not recreate that SDK pipeline. Downstream Orbbec session edits stay blocked until the missing source below is on a branch and the baseline tests named by those tasks pass. Those tests were not run here. `mise run quality` on this `main` passed 184 tests on 2026-11-05.
 
 ### Commits and worktrees checked
 
