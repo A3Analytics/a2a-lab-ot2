@@ -25,7 +25,7 @@ use tokio::net::TcpListener;
 
 pub(crate) const INTENTIONAL_MEDIA_PARITY_DIFFERENCES: &str = "
 intentional external vs camera media differences:
-- source ids are external-camera and camera; descriptions name the native index vs the second webcam.
+- source ids are external-camera and camera; descriptions name the native camera index vs the second webcam.
 - hardware selection uses A2ALAB_EXTERNAL_CAMERA_INDEX / --external-camera-index vs A2ALAB_CAMERA_INDEX / --camera-index.
 - external still capture uses the shared capture-timeout-ms budget and can open its camera index; camera still capture reuses the latest JPEG from the video pump and does not open a second device.
 - diagnostic text names Nokhwa for the external camera; shared contract uses the same error code classes and metadata fields.
