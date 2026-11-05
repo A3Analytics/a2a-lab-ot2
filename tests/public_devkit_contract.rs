@@ -10,11 +10,19 @@ fn cargo_uses_the_public_immutable_devkit_independently() {
 
     assert!(manifest.contains(&format!("git = \"{DEVKIT_URL}\"")));
     assert!(manifest.contains(&format!("rev = \"{DEVKIT_REVISION}\"")));
-    assert!(lockfile.contains(&format!(
-        "source = \"git+{DEVKIT_URL}?rev={DEVKIT_REVISION}#{DEVKIT_REVISION}\""
-    )));
+    let published =
+        format!("source = \"git+{DEVKIT_URL}?rev={DEVKIT_REVISION}#{DEVKIT_REVISION}\"");
+    let patched = manifest
+        .contains("[patch.\"https://github.com/A3Analytics/a2a-lab-dev-kit-rs\"]")
+        && manifest.contains("path = \"../a2a-lab-dev-kit-rs\"");
+    if patched {
+        assert!(!lockfile.contains(&published));
+        assert!(lockfile.contains("name = \"a2a-lab-dev-kit\""));
+    } else {
+        assert!(lockfile.contains(&published));
+        assert!(!manifest.contains("../a2a-lab-dev-kit-rs"));
+    }
     assert!(!manifest.contains("a2a-lab-tck"));
-    assert!(!manifest.contains("../a2a-lab-dev-kit-rs"));
     assert_ne!(DEVKIT_REVISION, TCK_REVISION);
 }
 
