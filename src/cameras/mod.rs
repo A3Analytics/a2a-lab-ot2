@@ -6,7 +6,7 @@
 mod backend;
 mod error;
 mod orbbec_set;
-mod png;
+pub(crate) mod png;
 mod session;
 
 pub use orbbec_set::{OrbbecFrameCapture, OrbbecStream};
