@@ -7,6 +7,7 @@ pub mod fixture;
 pub mod frame_set_service;
 pub mod frame_sets;
 pub mod images;
+pub mod lab_config;
 pub mod memory;
 pub mod oidc;
 pub mod opentrons;
@@ -19,7 +20,7 @@ pub mod videos;
 
 pub use agent::{
     DEFAULT_ANTHROPIC_MODEL, DEFAULT_BEDROCK_MODEL, DEFAULT_OPENAI_MODEL, LabAgent, ModelProvider,
-    selected_model,
+    RecordingServeAgentFactory, selected_model,
 };
 pub use cameras::{OrbbecStream, SessionPump, SharedSession, StreamingDevice};
 pub use fixture::{
@@ -33,6 +34,12 @@ pub use images::{
     DEFAULT_IMAGE_RETENTION_PER_SOURCE, IMAGE_HISTORY_MAX_AGE, ImageCapture, ImageCatalogConfig,
     ImageHistoryMaintenance, ImageServeConfig, LiveImageCatalog, image_catalog, open_image_catalog,
 };
+pub use lab_config::{
+    ClapValueSource, ExplicitSetting, LabConfigCliValues, LabConfigInputs, ResolvedChatSettings,
+    ResolvedDvrStorage, ResolvedLabConfig, ResolvedVideoSettings, ServeChatLegacyInputs,
+    SettingProvenance, build_serve_lab_agent, resolve_lab_config, selected_config_path,
+    serve_chat_settings, uses_resolved_chat_configuration, uses_resolved_video_configuration,
+};
 pub use memory::ConversationStore;
 pub use oidc::{OidcConfig, with_oidc};
 pub use opentrons::{OpentronsClient, OpentronsLab};
@@ -42,6 +49,8 @@ pub use sila::{
 pub use videos::{
     DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_LIVE_VIDEO_MEMORY_SECS, DEFAULT_VIDEO_DVR_ROOT,
     DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, ExternalVideoConfig, IndexedVideoDvr,
-    LiveJpegSource, LiveVideoCatalog, LiveVideoInjections, VideoDvrCatalog, VideoServeConfig,
-    WebcamVideoConfig, open_video_catalog, start_live_videos,
+    LiveCameraInputFormat, LiveJpegSource, LiveVideoCatalog, LiveVideoDelivery,
+    LiveVideoInjections, LiveVideoSourceDescriptor, VideoDvrCatalog, VideoServeConfig,
+    WebcamVideoConfig, open_resolved_video_catalog, open_video_catalog, resolved_video_summary,
+    start_live_video_catalog, start_live_videos,
 };

@@ -1,7 +1,7 @@
 //! Model-backed answers for plain-text A2A messages.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use a2a_lab_dev_kit::{
@@ -111,6 +111,46 @@ pub fn selected_model(
 
 fn nonempty(value: Option<&str>) -> Option<&str> {
     value.filter(|text| !text.trim().is_empty())
+}
+
+/// Records the provider and model passed to the serve agent factory (tests).
+#[derive(Debug, Default, Clone)]
+pub struct RecordingServeAgentFactory {
+    recorded: Arc<StdMutex<Option<(ModelProvider, String)>>>,
+}
+
+impl RecordingServeAgentFactory {
+    /// Creates an empty recorder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            recorded: Arc::new(StdMutex::new(None)),
+        }
+    }
+
+    /// Stores `provider` and `model` once; errors if called again.
+    pub fn record(&self, provider: ModelProvider, model: &str) -> Result<(), A2aLabError> {
+        let mut slot = self
+            .recorded
+            .lock()
+            .map_err(|error| A2aLabError::unavailable(format!("record serve agent: {error}")))?;
+        if slot.is_some() {
+            return Err(A2aLabError::invalid(
+                "serve_agent_factory",
+                "factory invoked more than once",
+            ));
+        }
+        *slot = Some((provider, model.to_owned()));
+        Ok(())
+    }
+
+    /// Returns the recorded pair, if any.
+    pub fn take_recorded(&self) -> Result<Option<(ModelProvider, String)>, A2aLabError> {
+        self.recorded
+            .lock()
+            .map_err(|error| A2aLabError::unavailable(format!("record serve agent: {error}")))
+            .map(|mut slot| slot.take())
+    }
 }
 
 fn bedrock_profile() -> String {

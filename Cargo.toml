@@ -18,6 +18,7 @@ missing_panics_doc = "allow"
 a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", rev = "64ea97d3edcac8f51ba802dbed7fc4a595aec763", default-features = false, features = [
     "sila2",
     "web-ui",
+    "yuv",
 ] }
 axum = "0.8.9"
 aws-config = { version = "1", default-features = false, features = [

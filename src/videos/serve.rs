@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 use a2a_lab_dev_kit::A2aLabError;
 
 use crate::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
+use crate::lab_config::ResolvedVideoSettings;
 use crate::videos::catalog::{
     ExternalVideoConfig, LiveVideoCatalog, LiveVideoInjections, WebcamVideoConfig,
-    start_live_videos,
+    start_live_video_catalog, start_live_videos,
 };
 use crate::videos::dvr::DEFAULT_DISK_VIDEO_RETENTION_SECS;
 use crate::videos::external::LiveJpegSource;
+use crate::videos::source::LiveCameraInputFormat;
 
 /// Default live catalog frame rate.
 pub const DEFAULT_VIDEO_FPS: u32 = 5;
@@ -162,6 +164,58 @@ impl VideoServeConfig {
     }
 }
 
+/// One startup line for resolved video settings.
+#[must_use]
+pub fn resolved_video_summary(settings: &ResolvedVideoSettings) -> String {
+    if settings.sources.is_empty() {
+        return "videos       off".to_owned();
+    }
+    let parts = settings
+        .sources
+        .iter()
+        .map(|source| {
+            let input = match source.input {
+                LiveCameraInputFormat::Mjpeg => "mjpeg",
+                LiveCameraInputFormat::Yuy2 => "yuy2",
+            };
+            format!(
+                "{} index {} {input} name {}",
+                source.id, source.device_index, source.name
+            )
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "videos       {} fps {} memory {}s disk {}s dvr {}",
+        parts.join("; "),
+        settings.fps,
+        settings.live_retention_secs,
+        settings.disk_retention_secs,
+        settings.dvr_storage.path.display()
+    )
+}
+
+/// Starts the live catalog from resolved configuration when any source is listed.
+pub async fn open_resolved_video_catalog(
+    settings: &ResolvedVideoSettings,
+    injections: LiveVideoInjections,
+) -> Result<Option<LiveVideoCatalog>, A2aLabError> {
+    if settings.sources.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        start_live_video_catalog(
+            &settings.sources,
+            settings.fps,
+            settings.live_retention_secs,
+            settings.disk_retention_secs,
+            &settings.dvr_storage.path,
+            settings.max_image_bytes,
+            injections,
+        )
+        .await?,
+    ))
+}
+
 /// Starts the live catalog when at least one camera source is configured.
 pub async fn open_video_catalog(
     config: &VideoServeConfig,
@@ -185,10 +239,7 @@ pub async fn open_video_catalog(
             config.disk_retention_secs,
             &config.disk_root,
             config.max_image_bytes,
-            LiveVideoInjections {
-                external: external_source,
-                webcam: webcam_source,
-            },
+            LiveVideoInjections::legacy_jpeg(external_source, webcam_source),
         )
         .await?,
     ))

@@ -64,6 +64,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "image",
  "jiff",
  "jsonwebtoken",
  "mdns-sd",
@@ -91,6 +92,7 @@ dependencies = [
  "tower-service",
  "uuid",
  "wasm-bindgen-cli-support",
+ "yuv",
 ]
 
 [[package]]
@@ -2365,6 +2367,8 @@ dependencies = [
  "moxcms",
  "num-traits",
  "png",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -5679,6 +5683,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "yuv"
+version = "0.8.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d109d1eacc7b034329873d2d848039b365c65ab7d751b19ee84e4921c62c607"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5769,3 +5782,18 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
+dependencies = [
+ "zune-core",
+]

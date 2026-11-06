@@ -10,24 +10,24 @@ It targets an OpenTrons 2 robot with API version `v10.0.0`.
 
 The OT-2 robot-server is an a2a-lab. These operations are how a caller lists, runs, and observes it:
 
-| Operation            | On the OT-2                                                              |
-| -------------------- | ------------------------------------------------------------------------ |
-| `list_tasks`         | Protocols and robot-server actions the OT-2 can run                      |
-| `start_task`         | Starts one of those tasks on the robot                                   |
-| `get_task_status`    | State of that run                                                        |
-| `list_log_sources`   | Journals and command streams the OT-2 exposes                            |
-| `query_logs`         | Records from those sources                                               |
-| `list_metrics`       | Gauges such as health, run progress, door, lights, and attached hardware |
-| `query_metric`       | Current value of one gauge                                               |
-| `list_image_sources` | `opentrons-camera`, plus `external-camera` when a host device is set     |
-| `list_images`        | Metadata for frames already captured from one source                     |
-| `search_images`      | Metadata matching a source, time range, and/or caption text              |
-| `get_image`          | One stored frame, inline                                                 |
-| `get_current_image`  | A newly captured frame from one source, inline                           |
-| `list_video_sources` | `external-camera` and/or `camera` when those native sources are enabled |
-| `get_video_frame_at` | A retained MJPEG frame from disk or the live window for one source              |
-| `get_video_clip`     | A finite retained clip from the indexed DVR                                     |
-| `get_video_timeline` | Retained coverage for one source                                                |
+| Operation            | On the OT-2                                                                    |
+| -------------------- | ------------------------------------------------------------------------------ |
+| `list_tasks`         | Protocols and robot-server actions the OT-2 can run                            |
+| `start_task`         | Starts one of those tasks on the robot                                         |
+| `get_task_status`    | State of that run                                                              |
+| `list_log_sources`   | Journals and command streams the OT-2 exposes                                  |
+| `query_logs`         | Records from those sources                                                     |
+| `list_metrics`       | Gauges such as health, run progress, door, lights, and attached hardware       |
+| `query_metric`       | Current value of one gauge                                                     |
+| `list_image_sources` | `opentrons-camera`, plus `external-camera` when a host device is set           |
+| `list_images`        | Metadata for frames already captured from one source                           |
+| `search_images`      | Metadata matching a source, time range, and/or caption text                    |
+| `get_image`          | One stored frame, inline                                                       |
+| `get_current_image`  | A newly captured frame from one source, inline                                 |
+| `list_video_sources` | `external-camera` and/or `camera` when those native sources are enabled        |
+| `get_video_frame_at` | A retained MJPEG frame from disk or the live window for one source             |
+| `get_video_clip`     | A finite retained clip from the indexed DVR                                    |
+| `get_video_timeline` | Retained coverage for one source                                               |
 | `follow_video`       | Live follow; playback bytes are served on `/media/video-live/` on the A2A host |
 
 `opentrons-camera` is the OT-2 on-board camera, asset `opentrons-ot2`. Current frames come from pinned robot-server `v10.0.0` `POST /camera/picture`. This agent does not call `GET /camera/stream`, does not enable the camera, and does not use the Flex live-stream service. OT-2 live streaming is unsupported. The operator enables the camera on the robot.
@@ -110,6 +110,15 @@ mise run a2a-lab-ot2-example
 ## Second webcam
 
 Source `camera` is off unless `--camera-index` or `A2ALAB_CAMERA_INDEX` is set. Live video opens the closest 1280x720 MJPEG mode on that index. Still capture reuses the latest JPEG from that pump and does not open the device again. A failure on `camera` does not affect `external-camera`.
+
+## Configuration file
+
+`A2ALAB_CONFIG` selects a JSON file. An explicit `--config` path wins. Setting neither keeps the flag and environment behavior above. Samples and the precedence, duration, migration, and container rules are in [A2A-LAB configuration file](<backlog/docs/technical/configuration/doc-6 - A2A-LAB-configuration-file.md>).
+
+```bash
+export A2ALAB_CONFIG="$PWD/.mise/examples/combined.json"
+mise run a2a-lab-ot2 -- config validate
+```
 
 ## Agent image deployment
 

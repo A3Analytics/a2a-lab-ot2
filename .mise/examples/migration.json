@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "videos": {
+    "sources": [
+      {
+        "id": "external-camera",
+        "name": "External camera",
+        "description": "Still frame from the configured external camera.",
+        "format": "mjpeg",
+        "device_index": 4
+      },
+      {
+        "id": "camera",
+        "name": "Camera",
+        "description": "Live MJPEG from the configured camera.",
+        "format": "yuy2",
+        "device_index": 0
+      }
+    ],
+    "live_retention": "5s",
+    "dvr": {
+      "retention": "3d",
+      "storage_path": ".a2a-lab-ot2/video-dvr"
+    }
+  }
+}

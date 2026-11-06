@@ -20,3 +20,7 @@ CREATE TABLE IF NOT EXISTS dvr_segments (
 
 CREATE INDEX IF NOT EXISTS dvr_segments_window
     ON dvr_segments (source_id, track_id, start_us, end_us);
+
+CREATE INDEX IF NOT EXISTS dvr_segments_source_start
+    ON dvr_segments (source_id, start_us, track_id)
+    WHERE payload_ready = 1;

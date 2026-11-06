@@ -19,15 +19,19 @@ use a2a_lab_dev_kit::{
 };
 use a2a_lab_ot2::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use a2a_lab_ot2::{
-    ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS, DEFAULT_DISK_VIDEO_RETENTION_SECS,
-    DEFAULT_IMAGE_RETENTION_PER_SOURCE, DEFAULT_SILA_PORT, DEFAULT_SILA_UUID,
-    DEFAULT_SYNC_CHUNK_ROOT, DEFAULT_SYNC_DB, DEFAULT_VIDEO_DVR_ROOT, DEFAULT_VIDEO_FPS,
-    DEFAULT_VIDEO_RETENTION_SECS, FixtureConfig, FixtureServer, FixtureVariant,
-    ImageHistoryMaintenance, ImageServeConfig, LabAgent, LiveImageCatalog, LiveVideoCatalog,
-    ModelProvider, OidcConfig, OpentronsLab, SilaConfig, VideoServeConfig, image_catalog,
-    open_image_catalog, open_video_catalog, prepare_sila, selected_model, sila_server, with_oidc,
+    ClapValueSource, ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS,
+    DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_IMAGE_RETENTION_PER_SOURCE, DEFAULT_SILA_PORT,
+    DEFAULT_SILA_UUID, DEFAULT_SYNC_CHUNK_ROOT, DEFAULT_SYNC_DB, DEFAULT_VIDEO_DVR_ROOT,
+    DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, ExplicitSetting, FixtureConfig, FixtureServer,
+    FixtureVariant, ImageHistoryMaintenance, ImageServeConfig, LabAgent, LabConfigCliValues,
+    LabConfigInputs, LiveImageCatalog, LiveVideoCatalog, LiveVideoInjections, ModelProvider,
+    OidcConfig, OpentronsLab, ServeChatLegacyInputs, SilaConfig, VideoServeConfig,
+    build_serve_lab_agent, image_catalog, open_image_catalog, open_resolved_video_catalog,
+    open_video_catalog, prepare_sila, resolve_lab_config, resolved_video_summary,
+    selected_config_path, sila_server, uses_resolved_video_configuration, with_oidc,
 };
-use clap::{Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -230,6 +234,9 @@ struct Cli {
         default_value = DEFAULT_SYNC_CHUNK_ROOT
     )]
     sync_chunk_root: PathBuf,
+    /// Path to an `a2a-lab.json` configuration file. `A2ALAB_CONFIG` applies when this flag is omitted.
+    #[arg(long, env = "A2ALAB_CONFIG", global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -271,6 +278,11 @@ enum Command {
         /// Controlled fixture behavior used for compliance failure evidence
         #[arg(long, default_value = "standard")]
         variant: FixtureVariant,
+    },
+    /// Configuration file commands
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
     /// `list_tasks`
     ListTasks,
@@ -342,10 +354,27 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Validate the selected configuration without starting services
+    Validate,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    let config_inputs = lab_config_inputs(&cli, &matches);
     let command = cli.command.take().unwrap_or_default();
+    if let Command::Config {
+        command: ConfigCommand::Validate,
+    } = &command
+    {
+        return run_config_validate(&config_inputs);
+    }
+    if selected_config_path(&config_inputs)?.is_some() {
+        resolve_lab_config(&config_inputs).map_err(config_error)?;
+    }
     if let Command::OrbbecSdkVersion = &command {
         return print_orbbec_sdk_version();
     }
@@ -369,7 +398,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let lab = connect(&cli)?;
     match command {
-        Command::Serve => serve(lab, &cli).await?,
+        Command::Serve => serve(lab, &cli, &config_inputs).await?,
         Command::ListTasks => list_tasks(&lab).await?,
         Command::ListLogSources => list_log_sources(&lab).await?,
         Command::ListMetrics => list_metrics(&lab).await?,
@@ -409,7 +438,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         }
-        Command::Fixture { .. } | Command::AgentMessage { .. } | Command::OrbbecSdkVersion => {
+        Command::Fixture { .. }
+        | Command::AgentMessage { .. }
+        | Command::OrbbecSdkVersion
+        | Command::Config { .. } => {
             unreachable!("handled before the lab client connects");
         }
         Command::Engine {
@@ -475,11 +507,107 @@ fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
     Ok(OpentronsLab::new(&cli.opentrons_url)?.with_readonly(cli.readonly))
 }
 
-fn prepare_images(cli: &Cli) -> Result<ImageServeConfig, Box<dyn std::error::Error>> {
-    let images = image_config(cli)?;
-    let videos = merged_video_config(cli)?;
+fn lab_config_cli_values(cli: &Cli) -> LabConfigCliValues {
+    LabConfigCliValues {
+        config: cli.config.clone(),
+        model_provider: ModelProvider::from(cli.model_provider),
+        model: cli.model.clone(),
+        bedrock_model: cli.bedrock_model.clone(),
+        external_camera_index: cli.external_camera_index,
+        external_camera_description: cli.external_camera_description.clone(),
+        camera_index: cli.camera_index,
+        video_fps: cli.video_fps,
+        video_retention_secs: cli.video_retention_secs,
+        video_disk_retention_secs: cli.video_disk_retention_secs,
+        video_dvr_root: cli.video_dvr_root.clone(),
+        max_image_bytes: cli.max_image_bytes,
+    }
+}
+
+fn lab_config_inputs(cli: &Cli, matches: &ArgMatches) -> LabConfigInputs {
+    let values = lab_config_cli_values(cli);
+    LabConfigInputs {
+        config_path: explicit_option(matches, "config", values.config),
+        model_provider: explicit_setting(matches, "model_provider", values.model_provider),
+        model: explicit_option(matches, "model", values.model),
+        bedrock_model: explicit_option(matches, "bedrock_model", values.bedrock_model),
+        external_camera_index: explicit_option(
+            matches,
+            "external_camera_index",
+            values.external_camera_index,
+        ),
+        external_camera_description: explicit_setting(
+            matches,
+            "external_camera_description",
+            values.external_camera_description,
+        ),
+        camera_index: explicit_option(matches, "camera_index", values.camera_index),
+        video_fps: explicit_setting(matches, "video_fps", values.video_fps),
+        video_retention_secs: explicit_setting(
+            matches,
+            "video_retention_secs",
+            values.video_retention_secs,
+        ),
+        video_disk_retention_secs: explicit_setting(
+            matches,
+            "video_disk_retention_secs",
+            values.video_disk_retention_secs,
+        ),
+        video_dvr_root: explicit_setting(matches, "video_dvr_root", values.video_dvr_root),
+        max_image_bytes: explicit_setting(matches, "max_image_bytes", values.max_image_bytes),
+    }
+}
+
+fn explicit_setting<T: Clone>(matches: &ArgMatches, id: &str, value: T) -> ExplicitSetting<T> {
+    ExplicitSetting {
+        value,
+        source: map_value_source(matches.value_source(id)),
+    }
+}
+
+fn explicit_option<T: Clone>(
+    matches: &ArgMatches,
+    id: &str,
+    value: Option<T>,
+) -> ExplicitSetting<Option<T>> {
+    ExplicitSetting {
+        value,
+        source: map_value_source(matches.value_source(id)),
+    }
+}
+
+fn map_value_source(source: Option<ValueSource>) -> Option<ClapValueSource> {
+    match source {
+        Some(ValueSource::CommandLine) => Some(ClapValueSource::CommandLine),
+        Some(ValueSource::EnvVariable) => Some(ClapValueSource::Environment),
+        Some(ValueSource::DefaultValue) => Some(ClapValueSource::DefaultValue),
+        _ => None,
+    }
+}
+
+fn run_config_validate(inputs: &LabConfigInputs) -> Result<(), Box<dyn std::error::Error>> {
+    resolve_lab_config(inputs).map_err(config_error)?;
+    println!("configuration valid");
+    Ok(())
+}
+
+fn config_error(error: A2aLabError) -> Box<dyn std::error::Error> {
+    Box::new(error)
+}
+
+fn prepare_images(
+    cli: &Cli,
+    config_inputs: &LabConfigInputs,
+) -> Result<ImageServeConfig, Box<dyn std::error::Error>> {
+    let mut images = image_config(cli)?;
+    if uses_resolved_video_configuration(config_inputs)? {
+        let resolved = resolve_lab_config(config_inputs)?;
+        for source in &resolved.video.sources {
+            images = images.with_source_label(&source.id, &source.name);
+        }
+    }
     println!("{}", images.summary());
-    println!("{}", videos.summary());
+    println!("{}", video_startup_summary(cli, config_inputs)?);
     if images.orbbec_enabled() {
         println!(
             "frame sets   http://{}:{}/ot2/frame-sets/ui",
@@ -489,6 +617,17 @@ fn prepare_images(cli: &Cli) -> Result<ImageServeConfig, Box<dyn std::error::Err
         println!("frame sets   off");
     }
     Ok(images)
+}
+
+fn video_startup_summary(
+    cli: &Cli,
+    inputs: &LabConfigInputs,
+) -> Result<String, a2a_lab_dev_kit::A2aLabError> {
+    if uses_resolved_video_configuration(inputs)? {
+        Ok(resolved_video_summary(&resolve_lab_config(inputs)?.video))
+    } else {
+        Ok(merged_video_config(cli)?.summary())
+    }
 }
 
 async fn open_frame_sets(
@@ -524,6 +663,7 @@ async fn open_frame_sets(
 async fn prepare_serve_images(
     lab: &OpentronsLab,
     cli: &Cli,
+    config_inputs: &LabConfigInputs,
 ) -> Result<
     (
         ImageServeConfig,
@@ -533,7 +673,7 @@ async fn prepare_serve_images(
     ),
     Box<dyn std::error::Error>,
 > {
-    let images = prepare_images(cli)?;
+    let images = prepare_images(cli, config_inputs)?;
     let opentrons = format!("opentrons robot-server at {}", cli.opentrons_url);
     lab.client()
         .health()
@@ -561,10 +701,14 @@ async fn prepare_serve_images(
 }
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-async fn serve(mut lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(
+    mut lab: OpentronsLab,
+    cli: &Cli,
+    config_inputs: &LabConfigInputs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (images, catalog, _history_maintenance, capture_pump) =
-        prepare_serve_images(&lab, cli).await?;
-    let videos = prepare_serve_videos(cli).await?;
+        prepare_serve_images(&lab, cli, config_inputs).await?;
+    let videos = prepare_serve_videos(cli, config_inputs).await?;
     let frame_sets = open_frame_sets(
         &images,
         &catalog,
@@ -605,12 +749,24 @@ async fn serve(mut lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::erro
             connected.map_err(|error| startup_error(&mcp_target, error))?
         }
     };
-    let provider = ModelProvider::from(cli.model_provider);
-    let model = selected_model(provider, cli.model.as_deref(), cli.bedrock_model.as_deref());
-    let model_target = format!("{} model {model}", provider.as_str());
-    let agent = LabAgent::from_provider(provider, &model, DEFAULT_MCP_URL, store)
-        .await
-        .map_err(|error| startup_error(&model_target, error))?;
+    let legacy_chat = ServeChatLegacyInputs {
+        model_provider: ModelProvider::from(cli.model_provider),
+        model: cli.model.clone(),
+        bedrock_model: cli.bedrock_model.clone(),
+    };
+    let (agent, chat) = build_serve_lab_agent(
+        config_inputs,
+        &legacy_chat,
+        DEFAULT_MCP_URL,
+        store,
+        |provider, model, mcp_url, store| async move {
+            LabAgent::from_provider(provider, &model, &mcp_url, store).await
+        },
+    )
+    .await
+    .map_err(|error| startup_error("chat agent", error))?;
+    let provider = chat.provider;
+    let model = chat.model;
     let _mcp_lab = mcp_lab;
     let mut a2a = A2aServer::new(&service)
         .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>)
@@ -666,7 +822,14 @@ async fn serve(mut lab: OpentronsLab, cli: &Cli) -> Result<(), Box<dyn std::erro
 
 async fn prepare_serve_videos(
     cli: &Cli,
+    inputs: &LabConfigInputs,
 ) -> Result<Option<LiveVideoCatalog>, Box<dyn std::error::Error>> {
+    if uses_resolved_video_configuration(inputs)? {
+        let resolved = resolve_lab_config(inputs)?;
+        return open_resolved_video_catalog(&resolved.video, LiveVideoInjections::none())
+            .await
+            .map_err(|error| startup_error("videos", error).into());
+    }
     let videos_config = merged_video_config(cli)?;
     open_video_catalog(&videos_config, None, None)
         .await

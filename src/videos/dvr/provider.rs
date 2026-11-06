@@ -457,15 +457,13 @@ impl VideoProvider for VideoDvrCatalog {
         let dvr = self.dvr.media_coverage(request.source_id()).await;
         match (live, dvr) {
             (Ok(live_tl), Ok(coverage)) => {
-                let newest = live_tl.newest_at().or_else(|| {
-                    coverage
-                        .intervals()
-                        .last()
-                        .map(|interval| interval.end().saturating_add_micros(-1))
-                });
+                let intervals = coverage.intervals().to_vec();
+                let newest = intervals
+                    .last()
+                    .map(|interval| newest_inside(*interval, live_tl.newest_at()));
                 VideoTimeline::new(
                     request.source_id().clone(),
-                    coverage.intervals().to_vec(),
+                    intervals,
                     newest,
                     live_tl.live_available(),
                 )
@@ -587,6 +585,14 @@ impl VideoProvider for VideoDvrCatalog {
     }
 }
 
+/// Live memory can sit one frame past the newest indexed interval while the
+/// disk writer catches up. `newest_at` has to stay inside that interval.
+fn newest_inside(interval: TimeRange, live_newest: Option<UtcTimestamp>) -> UtcTimestamp {
+    live_newest
+        .filter(|at| interval.contains(*at))
+        .unwrap_or_else(|| interval.end().saturating_add_micros(-1))
+}
+
 fn clip_session_has(session: &PackagedHlsSession, path: &str) -> bool {
     if path == session.init_relative_path() || path == session.playlist_relative_path() {
         return true;
@@ -614,5 +620,28 @@ impl VideoDvrCatalog {
         for clip in self.clips.lock().await.iter_mut() {
             clip.expires_at = now;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newest_inside;
+    use a2a_lab_dev_kit::{TimeRange, UtcTimestamp};
+
+    fn at(value: &str) -> UtcTimestamp {
+        UtcTimestamp::parse(value).unwrap()
+    }
+
+    fn range() -> TimeRange {
+        TimeRange::new(at("2024-06-01T00:00:00Z"), at("2024-06-01T00:00:01Z")).unwrap()
+    }
+
+    #[test]
+    fn newest_stays_inside_when_live_runs_ahead_of_disk() {
+        let interval = range();
+        let ahead = newest_inside(interval, Some(at("2024-06-01T00:00:01Z")));
+        assert!(interval.contains(ahead));
+        let inside = newest_inside(interval, Some(at("2024-06-01T00:00:00.500000Z")));
+        assert_eq!(inside, at("2024-06-01T00:00:00.500000Z"));
     }
 }

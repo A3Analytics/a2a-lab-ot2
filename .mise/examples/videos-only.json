@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "videos": {
+    "sources": [
+      {
+        "id": "bench",
+        "name": "Bench camera",
+        "description": "Overview of the bench",
+        "format": "mjpeg",
+        "device_index": 4
+      },
+      {
+        "id": "detail",
+        "format": "yuy2",
+        "device_index": 6
+      }
+    ],
+    "fps": 5,
+    "live_retention": "5m",
+    "dvr": {
+      "retention": "1h",
+      "storage_path": "./state/video-dvr"
+    }
+  }
+}

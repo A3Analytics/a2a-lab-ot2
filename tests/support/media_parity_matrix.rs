@@ -544,6 +544,7 @@ pub async fn run() {
                 bytes: orb_live.clone(),
                 side: Side::Webcam,
             })),
+            ..Default::default()
         },
     )
     .await;
@@ -590,6 +591,7 @@ pub async fn run() {
                 step: AtomicUsize::new(0),
                 side: Side::Webcam,
             })),
+            ..Default::default()
         },
     )
     .await;
@@ -633,6 +635,7 @@ pub async fn run() {
                 bytes: jpeg(2, 2, 31),
                 side: Side::Webcam,
             })),
+            ..Default::default()
         },
     )
     .await;
@@ -659,6 +662,7 @@ pub async fn run() {
                     bytes: jpeg(3, 3, 41),
                     side: Side::Webcam,
                 })),
+                ..Default::default()
             },
         )
         .await;
@@ -676,6 +680,7 @@ pub async fn run() {
                 bytes: jpeg(3, 3, 43),
                 side: Side::Webcam,
             })),
+            ..Default::default()
         },
     )
     .await;
@@ -700,6 +705,7 @@ pub async fn run() {
                 bytes: jpeg(2, 2, 51),
                 side: Side::Webcam,
             })),
+            ..Default::default()
         },
     )
     .await;

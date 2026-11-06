@@ -419,6 +419,261 @@ async fn minute_rotation_finalizes_previous_chunk() {
 }
 
 #[tokio::test]
+async fn frame_at_uses_bounds_and_delta_without_a_history_scan() {
+    let store = open_store("bounds", 86_400).await;
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    store
+        .append_mjpeg_frame(&source, ts("2024-06-01T00:00:00Z"), 1_000_000, &jpeg())
+        .await
+        .unwrap();
+    let inside = store
+        .frame_at(DvrFrameAtRequest::new(
+            source.clone(),
+            track.clone(),
+            ts("2024-06-01T00:00:00.500000Z"),
+            Some(2_000_000),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(inside.actual_at(), ts("2024-06-01T00:00:00Z"));
+    let too_far = store
+        .frame_at(DvrFrameAtRequest::new(
+            source.clone(),
+            track.clone(),
+            ts("2024-06-01T00:00:00.500000Z"),
+            Some(100),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(too_far.code(), "not_found");
+    let boundary = store
+        .frame_at(DvrFrameAtRequest::new(
+            source.clone(),
+            track,
+            ts("2024-06-01T00:00:01Z"),
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(boundary.code(), "no_recording");
+    let unknown = store
+        .frame_at(DvrFrameAtRequest::new(
+            VideoSourceId::new("missing").unwrap(),
+            MemoryVideos::mjpeg_track_id(&VideoSourceId::new("missing").unwrap()).unwrap(),
+            ts("2024-06-01T00:00:00Z"),
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code(), "not_found");
+}
+
+#[tokio::test]
+async fn lookup_and_coverage_plans_use_indexes() {
+    let store = open_store("plans", 86_400).await;
+    let lookup = store
+        .query_plan(
+            "SELECT start_us FROM dvr_frames
+             WHERE source_id = 'cam' AND track_id = 'cam-mjpeg' AND payload_ready = 1
+               AND start_us <= 10 AND end_us > 10
+             ORDER BY start_us DESC LIMIT 1",
+        )
+        .await
+        .unwrap();
+    let coverage = store
+        .query_plan(
+            "SELECT start_us FROM dvr_frames
+             WHERE source_id = 'cam' AND payload_ready = 1
+             ORDER BY start_us",
+        )
+        .await
+        .unwrap();
+    let lookup = lookup.join("\n");
+    let coverage = coverage.join("\n");
+    assert!(
+        lookup.contains("source_id") && lookup.contains("track_id") && lookup.contains("start_us"),
+        "{lookup}"
+    );
+    assert!(!lookup.contains("TEMP B-TREE"), "{lookup}");
+    assert!(coverage.contains("dvr_frames_source_start"), "{coverage}");
+    assert!(!coverage.contains("TEMP B-TREE"), "{coverage}");
+}
+
+#[tokio::test]
+async fn long_gapped_history_stays_readable_while_a_writer_appends() {
+    let store = open_store("scale", 86_400).await;
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    let start = ts("2024-06-01T00:00:00Z");
+    for offset in 0..500_i64 {
+        store
+            .append_mjpeg_frame(
+                &source,
+                start.saturating_add_micros(offset * 1_000_000),
+                1_000_000,
+                &jpeg(),
+            )
+            .await
+            .unwrap();
+    }
+    for offset in 800..1_000_i64 {
+        store
+            .append_mjpeg_frame(
+                &source,
+                start.saturating_add_micros(offset * 1_000_000),
+                1_000_000,
+                &jpeg(),
+            )
+            .await
+            .unwrap();
+    }
+    let store = std::sync::Arc::new(store);
+    let writer = {
+        let store = std::sync::Arc::clone(&store);
+        let source = source.clone();
+        tokio::spawn(async move {
+            for offset in 1_000..1_100_i64 {
+                store
+                    .append_mjpeg_frame(
+                        &source,
+                        start.saturating_add_micros(offset * 1_000_000),
+                        1_000_000,
+                        &jpeg(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        })
+    };
+    let coverage = tokio::time::timeout(Duration::from_secs(2), store.media_coverage(&source))
+        .await
+        .expect("coverage timed out")
+        .unwrap();
+    assert!(coverage.intervals().len() >= 2);
+    assert!(!coverage.discontinuities().is_empty());
+    let frame = tokio::time::timeout(
+        Duration::from_secs(1),
+        store.frame_at(DvrFrameAtRequest::new(
+            source,
+            track,
+            start.saturating_add_micros(900 * 1_000_000),
+            None,
+        )),
+    )
+    .await
+    .expect("frame lookup timed out")
+    .unwrap();
+    assert_eq!(
+        frame.actual_at(),
+        start.saturating_add_micros(900 * 1_000_000)
+    );
+    writer.await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_and_cleanup_follow_chunk_boundaries() {
+    let dir = temp_root("chunks");
+    let _ = std::fs::remove_dir_all(&dir);
+    let expired = VideoSourceId::new("expired").unwrap();
+    let kept = VideoSourceId::new("kept").unwrap();
+    let store = IndexedVideoDvr::open(&dir, 3_600).await.unwrap();
+    let old =
+        a2a_lab_ot2::time::from_unix_microseconds(minute_start_us(recent(180_000_000))).unwrap();
+    for offset in 0..10_i64 {
+        store
+            .append_mjpeg_frame(
+                &expired,
+                old.saturating_add_micros(offset * 1_000_000),
+                1_000_000,
+                &jpeg(),
+            )
+            .await
+            .unwrap();
+    }
+    let retained_at = old.saturating_add_micros(120_000_000);
+    store
+        .append_mjpeg_frame(&kept, old, 1_000_000, &jpeg())
+        .await
+        .unwrap();
+    let expired_track = MemoryVideos::mjpeg_track_id(&expired).unwrap();
+    let old_chunk = chunk_relpath(
+        expired.as_str(),
+        expired_track.as_str(),
+        minute_start_us(old),
+    );
+    let retained_chunk = chunk_relpath(
+        expired.as_str(),
+        expired_track.as_str(),
+        minute_start_us(retained_at),
+    );
+    let kept_track = MemoryVideos::mjpeg_track_id(&kept).unwrap();
+    let kept_chunk = chunk_relpath(kept.as_str(), kept_track.as_str(), minute_start_us(old));
+    drop(store);
+    let mut tail = std::fs::read(dir.join(format!("{old_chunk}.tmp"))).unwrap();
+    let indexed_len = tail.len();
+    tail.extend_from_slice(&[1, 2, 3, 4]);
+    std::fs::write(dir.join(format!("{old_chunk}.tmp")), &tail).unwrap();
+    let store = std::sync::Arc::new(IndexedVideoDvr::open(&dir, 3_600).await.unwrap());
+    assert_eq!(
+        std::fs::metadata(dir.join(format!("{old_chunk}.tmp")))
+            .unwrap()
+            .len(),
+        indexed_len as u64
+    );
+    let frame = store
+        .frame_at(DvrFrameAtRequest::new(
+            expired.clone(),
+            expired_track.clone(),
+            old,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(frame.payload(), DvrMediaPayload::MjpegFrame(bytes) if bytes == &jpeg()));
+    store
+        .append_mjpeg_frame(&expired, retained_at, 1_000_000, &jpeg())
+        .await
+        .unwrap();
+    let reader = {
+        let store = std::sync::Arc::clone(&store);
+        let expired = expired.clone();
+        tokio::spawn(async move {
+            for _ in 0..10 {
+                let _ = store.media_coverage(&expired).await;
+            }
+        })
+    };
+    store
+        .cleanup_source(&expired, old.saturating_add_micros(3_700_000_000))
+        .await
+        .unwrap();
+    reader.await.unwrap();
+    assert!(!dir.join(&old_chunk).exists());
+    assert!(!dir.join(format!("{old_chunk}.tmp")).exists());
+    assert!(dir.join(format!("{retained_chunk}.tmp")).exists());
+    assert!(dir.join(format!("{kept_chunk}.tmp")).exists());
+    assert!(
+        store
+            .frame_at(DvrFrameAtRequest::new(
+                expired,
+                MemoryVideos::mjpeg_track_id(&VideoSourceId::new("expired").unwrap()).unwrap(),
+                retained_at,
+                None,
+            ))
+            .await
+            .is_ok()
+    );
+    assert!(
+        store
+            .frame_at(DvrFrameAtRequest::new(kept, kept_track, old, None))
+            .await
+            .is_ok()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn chunk_retention_removes_expired_payloads() {
     let store = open_store("chunk-retain", 60).await;
     let source = VideoSourceId::new("cam-a").unwrap();

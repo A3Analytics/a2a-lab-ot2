@@ -8,8 +8,7 @@ use a2a_lab_dev_kit::{A2aLabError, ImageSource, ImageSourceId, ImageTransportCon
 
 use crate::camera::{
     CAMERA_SOURCE_ID, CameraCapture, CameraStill, DEFAULT_EXTERNAL_CAMERA_DESCRIPTION,
-    EXTERNAL_CAMERA_SOURCE_ID, ExternalCamera, camera_source,
-    external_camera_source_with_description,
+    EXTERNAL_CAMERA_SOURCE_ID, ExternalCamera, camera_source_named, external_camera_source_named,
 };
 use crate::images::{
     DEFAULT_IMAGE_HISTORY_DB, IMAGE_HISTORY_MAX_AGE, ImageCapture, ImageCatalogConfig,
@@ -32,7 +31,9 @@ pub const DEFAULT_CAPTURE_TIMEOUT_MS: u64 = 10_000;
 pub struct ImageServeConfig {
     camera_index: Option<u32>,
     description: String,
+    external_name: String,
     webcam_index: Option<u32>,
+    webcam_name: String,
     orbbec: Option<OrbbecSelection>,
     transport: ImageTransportConfig,
     capture_timeout: Duration,
@@ -69,7 +70,9 @@ impl ImageServeConfig {
         Ok(Self {
             camera_index,
             description,
+            external_name: "External camera".to_owned(),
             webcam_index: None,
+            webcam_name: "Camera".to_owned(),
             orbbec: None,
             transport,
             capture_timeout,
@@ -89,6 +92,17 @@ impl ImageServeConfig {
             serial: serial.map(str::to_owned),
         });
         Ok(self)
+    }
+
+    /// Uses a configured display name for `camera` or `external-camera`.
+    #[must_use]
+    pub fn with_source_label(mut self, id: &str, name: &str) -> Self {
+        match id {
+            CAMERA_SOURCE_ID => name.clone_into(&mut self.webcam_name),
+            EXTERNAL_CAMERA_SOURCE_ID => name.clone_into(&mut self.external_name),
+            _ => {}
+        }
+        self
     }
 
     /// Enables source `camera` without opening a device.
@@ -219,13 +233,13 @@ pub fn image_catalog(
             None => ExternalCamera::new(index, config.capture_timeout, config.max_image_bytes())?,
         };
         sources.push((
-            external_camera_source_with_description(&config.description)?,
+            external_camera_source_named(&config.description, &config.external_name)?,
             Arc::new(external),
         ));
     }
     if config.camera_enabled() {
         sources.push((
-            camera_source()?,
+            camera_source_named(&config.webcam_name)?,
             Arc::new(CameraStill::new(config.max_image_bytes())?),
         ));
     }

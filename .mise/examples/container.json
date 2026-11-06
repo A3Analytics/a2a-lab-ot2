@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "videos": {
+    "sources": [
+      {
+        "id": "external-camera",
+        "format": "mjpeg",
+        "device_index": 4
+      },
+      {
+        "id": "camera",
+        "format": "yuy2",
+        "device_index": 0
+      }
+    ],
+    "fps": 5,
+    "live_retention": "5s",
+    "dvr": {
+      "retention": "3d",
+      "storage_path": "/var/lib/a2a-lab-ot2/video-dvr"
+    }
+  }
+}

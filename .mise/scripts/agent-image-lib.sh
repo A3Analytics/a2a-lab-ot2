@@ -18,6 +18,25 @@ agent_container_name() {
   printf 'a2a-lab-ot2-agent\n'
 }
 
+agent_container_config_path() {
+  printf '/etc/a2alab/a2a-lab.json\n'
+}
+
+validate_a2alab_config_selection() {
+  local config="${A2ALAB_CONFIG:-}"
+  if [[ -z "$config" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$config" ]]; then
+    printf 'configuration file %s is missing or not a regular file\n' "$config" >&2
+    return 1
+  fi
+  if [[ ! -r "$config" ]]; then
+    printf 'configuration file %s is not readable\n' "$config" >&2
+    return 1
+  fi
+}
+
 normalize_architecture() {
   case "$1" in
     amd64 | x86_64 | linux/amd64) printf 'amd64\n' ;;
@@ -62,6 +81,25 @@ build_agent_run_args() {
     -p "${frame_port}:31003"
     -v "${state}:/var/lib/a2a-lab-ot2"
   )
+  if [[ -n "${A2ALAB_CONFIG:-}" ]]; then
+    args+=(-v "${A2ALAB_CONFIG}:$(agent_container_config_path):ro")
+  fi
+  local credential_name
+  local -a credential_names=(
+    AWS_PROFILE
+    AWS_REGION
+    AWS_DEFAULT_REGION
+    AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY
+    AWS_SESSION_TOKEN
+    OPENAI_API_KEY
+    ANTHROPIC_API_KEY
+  )
+  for credential_name in "${credential_names[@]}"; do
+    if [[ -n "${!credential_name:-}" ]]; then
+      args+=(-e "${credential_name}=${!credential_name}")
+    fi
+  done
   if [[ -n "${A2ALAB_PUBLIC_URL:-}" ]]; then
     args+=(-e "A2ALAB_PUBLIC_URL=${A2ALAB_PUBLIC_URL}")
   fi
@@ -97,6 +135,9 @@ build_agent_run_args() {
     args+=(-e "A2ALAB_IMAGE_RETENTION=${A2ALAB_IMAGE_RETENTION}")
   fi
   args+=("$image")
+  if [[ -n "${A2ALAB_CONFIG:-}" ]]; then
+    args+=(--config "$(agent_container_config_path)")
+  fi
   printf '%s\n' "${args[@]}"
 }
 
@@ -140,6 +181,9 @@ validate_agent_run() {
         return 1
       fi
     done
+  fi
+  if ! validate_a2alab_config_selection; then
+    return 1
   fi
   local rendered
   rendered="$(build_agent_run_args "image:test" "$state")"

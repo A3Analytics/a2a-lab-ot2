@@ -154,15 +154,30 @@ pub fn clear_camera_frame() {
     }
 }
 
+fn displayed_name(name: &str, fallback: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        fallback.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 fn latest_camera_frame() -> Option<Vec<u8>> {
     LATEST_CAMERA_JPEG.lock().ok().and_then(|slot| slot.clone())
 }
 
 /// Source descriptor for the optional second webcam.
 pub fn camera_source() -> Result<ImageSource, A2aLabError> {
+    camera_source_named("Camera")
+}
+
+/// Source descriptor for the optional second webcam with an operator-supplied name.
+pub fn camera_source_named(name: &str) -> Result<ImageSource, A2aLabError> {
+    let name = displayed_name(name, "Camera");
     Ok(ImageSource {
         id: ImageSourceId::new(CAMERA_SOURCE_ID)?,
-        name: "Camera".to_owned(),
+        name,
         description: "Still frame from the configured camera.".to_owned(),
         asset_id: None,
         semantic_id: None,
@@ -232,12 +247,20 @@ pub fn external_camera_source() -> Result<ImageSource, A2aLabError> {
 pub fn external_camera_source_with_description(
     description: &str,
 ) -> Result<ImageSource, A2aLabError> {
+    external_camera_source_named(description, "External camera")
+}
+
+/// Source descriptor with an operator-supplied description and name.
+pub fn external_camera_source_named(
+    description: &str,
+    name: &str,
+) -> Result<ImageSource, A2aLabError> {
     if description.is_empty() {
         return Err(A2aLabError::invalid("description", "must not be empty"));
     }
     Ok(ImageSource {
         id: ImageSourceId::new(EXTERNAL_CAMERA_SOURCE_ID)?,
-        name: "External camera".to_owned(),
+        name: displayed_name(name, "External camera"),
         description: description.to_owned(),
         asset_id: None,
         semantic_id: None,
@@ -374,15 +397,6 @@ impl ExternalCamera {
             "camera",
             format!("external camera index {}: {reason}", self.index),
         )
-    }
-}
-
-impl NativeCameraCapture {
-    pub(crate) fn read_open(self, camera: &mut Camera) -> Result<Vec<u8>, CameraCaptureError> {
-        let frame = camera
-            .frame_raw()
-            .map_err(|error| CameraCaptureError::Backend(error.to_string()))?;
-        owned_mjpeg(&frame, self.max_bytes)
     }
 }
 

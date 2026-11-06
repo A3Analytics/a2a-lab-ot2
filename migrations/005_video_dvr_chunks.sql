@@ -25,5 +25,9 @@ CREATE TABLE IF NOT EXISTS dvr_frames (
 CREATE INDEX IF NOT EXISTS dvr_frames_window
     ON dvr_frames (source_id, track_id, start_us, end_us);
 
+CREATE INDEX IF NOT EXISTS dvr_frames_source_start
+    ON dvr_frames (source_id, start_us, track_id)
+    WHERE payload_ready = 1;
+
 CREATE INDEX IF NOT EXISTS dvr_frames_chunk
     ON dvr_frames (source_id, track_id, chunk_relpath, payload_offset);

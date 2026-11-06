@@ -8,6 +8,7 @@ use a2a_lab_dev_kit::{
     DvrMediaSegment, DvrMediaStore, DvrMediaTrack, DvrRetentionBounds, DvrTrackId, MemoryVideos,
     Page, ReadDvrMediaWindowRequest, TimeRange, UtcTimestamp, VideoCodec, VideoSourceId,
 };
+use futures_util::TryStreamExt;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
 use sqlx::{Row, SqlitePool};
 use tokio::task;
@@ -16,7 +17,7 @@ use super::chunk::{
     append_payload, chunk_relpath, chunk_tmp_relpath, finalize_chunk, minute_start_us,
     read_payload_range, truncate_chunk_files,
 };
-use super::coverage::coverage_from_starts;
+use super::coverage::IntervalFold;
 
 const SCHEMA: &str = include_str!("../../../migrations/004_video_dvr.sql");
 const SCHEMA_CHUNKS: &str = include_str!("../../../migrations/005_video_dvr_chunks.sql");
@@ -442,26 +443,20 @@ impl IndexedVideoDvr {
             .await
             .map_err(db_error)?;
         let indexed = sqlx::query(
-            "SELECT chunk_relpath, payload_offset, payload_length
+            "SELECT chunk_relpath, MAX(payload_offset + payload_length) AS chunk_end
              FROM dvr_frames
-             WHERE payload_ready = 1",
+             WHERE payload_ready = 1 AND chunk_relpath != ''
+             GROUP BY chunk_relpath",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(db_error)?;
         let mut truncate_to = Vec::new();
-        let mut limits: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         for row in indexed {
             let relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
-            let offset: i64 = row.try_get("payload_offset").map_err(db_error)?;
-            let length: i64 = row.try_get("payload_length").map_err(db_error)?;
-            let end = u64::try_from(offset.saturating_add(length).max(0)).unwrap_or(0);
-            limits
-                .entry(relpath)
-                .and_modify(|current| *current = (*current).max(end))
-                .or_insert(end);
+            let end: i64 = row.try_get("chunk_end").map_err(db_error)?;
+            truncate_to.push((relpath, u64::try_from(end.max(0)).unwrap_or(0)));
         }
-        truncate_to.extend(limits);
         let root = self.root.clone();
         task::spawn_blocking(move || truncate_chunk_files(&root, &truncate_to))
             .await
@@ -512,8 +507,8 @@ impl IndexedVideoDvr {
             .await
             .map_err(db_error)?;
         let frame_rows = sqlx::query(
-            "SELECT chunk_relpath FROM dvr_frames
-             WHERE source_id = ?1 AND start_us < ?2",
+            "SELECT DISTINCT chunk_relpath FROM dvr_frames
+             WHERE source_id = ?1 AND start_us < ?2 AND chunk_relpath != ''",
         )
         .bind(source_id)
         .bind(cutoff.as_micros())
@@ -591,28 +586,46 @@ impl IndexedVideoDvr {
         Ok(u64::try_from(period.max(1)).unwrap_or(1))
     }
 
-    async fn segment_starts(
+    async fn fold_source_starts(
         &self,
         source_id: &VideoSourceId,
-    ) -> Result<Vec<UtcTimestamp>, A2aLabError> {
-        let rows = sqlx::query(
+        fold: &mut IntervalFold,
+    ) -> Result<(), A2aLabError> {
+        let mut segments = sqlx::query(
             "SELECT start_us FROM dvr_segments
-             WHERE source_id = ?1 AND payload_ready = 1
-             UNION ALL
-             SELECT start_us FROM dvr_frames
              WHERE source_id = ?1 AND payload_ready = 1
              ORDER BY start_us",
         )
         .bind(source_id.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db_error)?;
-        rows.into_iter()
-            .map(|row| {
-                let micros: i64 = row.try_get("start_us").map_err(db_error)?;
-                crate::time::from_unix_microseconds(micros)
-            })
-            .collect()
+        .fetch(&self.pool);
+        let mut frames = sqlx::query(
+            "SELECT start_us FROM dvr_frames
+             WHERE source_id = ?1 AND payload_ready = 1
+             ORDER BY start_us",
+        )
+        .bind(source_id.as_str())
+        .fetch(&self.pool);
+        let mut segment = next_start(&mut segments).await?;
+        let mut frame = next_start(&mut frames).await?;
+        loop {
+            let next = match (segment, frame) {
+                (Some(left), Some(right)) if left <= right => {
+                    segment = next_start(&mut segments).await?;
+                    left
+                }
+                (Some(left), None) => {
+                    segment = next_start(&mut segments).await?;
+                    left
+                }
+                (Some(_) | None, Some(right)) => {
+                    frame = next_start(&mut frames).await?;
+                    right
+                }
+                (None, None) => break,
+            };
+            fold.push(crate::time::from_unix_microseconds(next)?)?;
+        }
+        Ok(())
     }
 
     async fn load_payload(&self, relpath: &str) -> Result<Vec<u8>, A2aLabError> {
@@ -683,8 +696,15 @@ impl DvrMediaStore for IndexedVideoDvr {
     ) -> Result<DvrMediaCoverage, A2aLabError> {
         self.require_source(source_id).await?;
         let period = self.frame_period_us(source_id).await?;
-        let starts = self.segment_starts(source_id).await?;
-        coverage_from_starts(&starts, period)
+        let mut fold = IntervalFold::new(period);
+        self.fold_source_starts(source_id, &mut fold).await?;
+        let intervals = fold.finish()?;
+        if intervals.is_empty() {
+            return Err(A2aLabError::no_recording(
+                "source has no retained DVR media",
+            ));
+        }
+        DvrMediaCoverage::new(intervals)
     }
 
     async fn list_tracks(
@@ -834,53 +854,13 @@ impl DvrMediaStore for IndexedVideoDvr {
 
     async fn frame_at(&self, request: DvrFrameAtRequest) -> Result<DvrFrameAtResult, A2aLabError> {
         self.require_source(request.source_id()).await?;
-        let coverage = self.media_coverage(request.source_id()).await?;
         let at = request.at();
-        if !coverage
-            .intervals()
-            .iter()
-            .any(|interval| interval.contains(at))
-        {
-            if coverage
-                .discontinuities()
-                .iter()
-                .any(|gap| gap.gap().contains(at))
-            {
-                return Err(A2aLabError::recording_gap("requested instant is in a gap"));
-            }
-            return Err(A2aLabError::no_recording(
-                "requested instant is not retained",
-            ));
-        }
-        let row = sqlx::query(
-            "SELECT track_id, start_us, end_us, keyframe, payload_relpath, chunk_relpath,
-                    payload_offset, payload_length, payload_crc32, codec
-             FROM (
-                SELECT track_id, start_us, end_us, keyframe, payload_relpath,
-                       '' AS chunk_relpath, NULL AS payload_offset, NULL AS payload_length,
-                       NULL AS payload_crc32, codec
-                FROM dvr_segments
-                JOIN dvr_tracks USING (source_id, track_id)
-                WHERE source_id = ?1 AND track_id = ?2 AND payload_ready = 1
-                  AND start_us <= ?3
-                UNION ALL
-                SELECT track_id, start_us, end_us, keyframe, '' AS payload_relpath, chunk_relpath,
-                       payload_offset, payload_length, payload_crc32, codec
-                FROM dvr_frames
-                JOIN dvr_tracks USING (source_id, track_id)
-                WHERE source_id = ?1 AND track_id = ?2 AND payload_ready = 1
-                  AND start_us <= ?3
-             )
-             ORDER BY ABS(start_us - ?3), start_us
-             LIMIT 1",
-        )
-        .bind(request.source_id().as_str())
-        .bind(request.track_id().as_str())
-        .bind(at.as_micros())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(db_error)?
-        .ok_or_else(|| A2aLabError::not_found("DVR frame", at.to_string()))?;
+        let row = self
+            .containing_frame(request.source_id(), request.track_id(), at.as_micros())
+            .await?;
+        let Some(row) = row else {
+            return self.missing_frame(request.source_id(), at).await;
+        };
         let start_us: i64 = row.try_get("start_us").map_err(db_error)?;
         let actual = crate::time::from_unix_microseconds(start_us)?;
         if let Some(limit) = request.max_delta_us()
@@ -891,6 +871,112 @@ impl DvrMediaStore for IndexedVideoDvr {
         let segment = segment_from_row(self, &row).await?;
         Ok(DvrFrameAtResult::new(at, actual, segment.payload().clone()))
     }
+}
+
+impl IndexedVideoDvr {
+    async fn containing_frame(
+        &self,
+        source_id: &VideoSourceId,
+        track_id: &DvrTrackId,
+        at: i64,
+    ) -> Result<Option<SqliteRow>, A2aLabError> {
+        let segment = self
+            .lookup_frame(
+                "SELECT track_id, start_us, end_us, keyframe, payload_relpath,
+                        '' AS chunk_relpath, NULL AS payload_offset, NULL AS payload_length,
+                        NULL AS payload_crc32, codec
+                 FROM dvr_segments
+                 JOIN dvr_tracks USING (source_id, track_id)
+                 WHERE source_id = ?1 AND track_id = ?2 AND payload_ready = 1
+                   AND start_us <= ?3 AND end_us > ?3
+                 ORDER BY start_us DESC
+                 LIMIT 1",
+                source_id,
+                track_id,
+                at,
+            )
+            .await?;
+        let frame = self
+            .lookup_frame(
+                "SELECT track_id, start_us, end_us, keyframe, '' AS payload_relpath, chunk_relpath,
+                        payload_offset, payload_length, payload_crc32, codec
+                 FROM dvr_frames
+                 JOIN dvr_tracks USING (source_id, track_id)
+                 WHERE source_id = ?1 AND track_id = ?2 AND payload_ready = 1
+                   AND start_us <= ?3 AND end_us > ?3
+                 ORDER BY start_us DESC
+                 LIMIT 1",
+                source_id,
+                track_id,
+                at,
+            )
+            .await?;
+        Ok(match (segment, frame) {
+            (Some(left), Some(right)) => {
+                let left_start: i64 = left.try_get("start_us").map_err(db_error)?;
+                let right_start: i64 = right.try_get("start_us").map_err(db_error)?;
+                Some(if left_start >= right_start {
+                    left
+                } else {
+                    right
+                })
+            }
+            (Some(row), None) | (None, Some(row)) => Some(row),
+            (None, None) => None,
+        })
+    }
+
+    async fn lookup_frame(
+        &self,
+        sql: &str,
+        source_id: &VideoSourceId,
+        track_id: &DvrTrackId,
+        at: i64,
+    ) -> Result<Option<SqliteRow>, A2aLabError> {
+        sqlx::query(sql)
+            .bind(source_id.as_str())
+            .bind(track_id.as_str())
+            .bind(at)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_error)
+    }
+
+    async fn missing_frame(
+        &self,
+        source_id: &VideoSourceId,
+        at: UtcTimestamp,
+    ) -> Result<DvrFrameAtResult, A2aLabError> {
+        let bounds = self.retention_bounds(source_id).await?;
+        if at < bounds.oldest() || at >= bounds.newest() {
+            Err(A2aLabError::no_recording(
+                "requested instant is not retained",
+            ))
+        } else {
+            Err(A2aLabError::recording_gap("requested instant is in a gap"))
+        }
+    }
+
+    /// Returns SQLite's plan rows for a regression test.
+    #[doc(hidden)]
+    pub async fn query_plan(&self, sql: &str) -> Result<Vec<String>, A2aLabError> {
+        let rows = sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_error)?;
+        rows.into_iter()
+            .map(|row| row.try_get::<String, _>(3).map_err(db_error))
+            .collect()
+    }
+}
+
+async fn next_start(
+    stream: &mut (impl futures_util::Stream<Item = Result<SqliteRow, sqlx::Error>> + Unpin),
+) -> Result<Option<i64>, A2aLabError> {
+    let Some(row) = stream.try_next().await.map_err(db_error)? else {
+        return Ok(None);
+    };
+    Ok(Some(row.try_get("start_us").map_err(db_error)?))
 }
 
 fn track_from_row(

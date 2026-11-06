@@ -1,24 +1,27 @@
 //! Memory video catalog plus cancellable capture pumps per camera.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use a2a_lab_dev_kit::videos::{
+    CaptureClock, CaptureFormat, CaptureFormatPreference, CaptureIdentity, CaptureSession,
+    CaptureTiming, ColorCamera, ColorMatrix, ColorProperties, ColorRange,
+};
 use a2a_lab_dev_kit::{A2aLabError, MJPEG_MEDIA_TYPE, MemoryVideos, VideoSource, VideoSourceId};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 
-use crate::camera::{
-    CAMERA_SOURCE_ID, EXTERNAL_CAMERA_HEIGHT, EXTERNAL_CAMERA_SOURCE_ID, EXTERNAL_CAMERA_WIDTH,
-    remember_camera_frame,
-};
+use crate::camera::{remember_camera_frame, remember_external_frame};
 use crate::images::jpeg_dimensions;
 use crate::videos::dvr::{IndexedVideoDvr, VideoDvrCatalog, VideoDvrMaintenance};
-use crate::videos::external::{LiveJpegSource, NativeLiveJpeg, frame_budget};
+use crate::videos::external::{LiveJpegSource, frame_budget};
 use crate::videos::h264::H264Encoder;
-
-const CAMERA_VIDEO_WIDTH: u32 = 1280;
-const CAMERA_VIDEO_HEIGHT: u32 = 720;
-const CAMERA_VIDEO_DESCRIPTION: &str = "Live MJPEG from the configured camera.";
+use crate::videos::nokhwa_camera::NokhwaColorCamera;
+use crate::videos::raw_jpeg::captured_frame_jpeg;
+use crate::videos::source::{
+    LiveCameraInputFormat, LiveVideoDelivery, LiveVideoSourceDescriptor, validate_live_sources,
+};
 
 /// Live video catalog and the capture threads that fill it.
 pub struct LiveVideoCatalog {
@@ -55,20 +58,43 @@ impl Drop for LiveVideoCatalog {
 /// Injectable producers for hardware-free tests.
 #[derive(Default)]
 pub struct LiveVideoInjections {
-    /// Replaces the external Nokhwa session when set.
+    /// Replaces legacy `external-camera` when set.
     pub external: Option<Box<dyn LiveJpegSource>>,
-    /// Replaces the second webcam session when set.
+    /// Replaces legacy `camera` when set.
     pub webcam: Option<Box<dyn LiveJpegSource>>,
+    /// Injected [`ColorCamera`] backends keyed by stable source id.
+    pub cameras: HashMap<String, Box<dyn ColorCamera + Send>>,
 }
 
 impl LiveVideoInjections {
     /// No injected producers.
     #[must_use]
     pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Legacy JPEG pump overrides for `external-camera` and `camera`.
+    #[must_use]
+    pub fn legacy_jpeg(
+        external: Option<Box<dyn LiveJpegSource>>,
+        webcam: Option<Box<dyn LiveJpegSource>>,
+    ) -> Self {
         Self {
-            external: None,
-            webcam: None,
+            external,
+            webcam,
+            cameras: HashMap::new(),
         }
+    }
+
+    /// Registers an injected camera for `id`.
+    #[must_use]
+    pub fn with_color_camera(
+        mut self,
+        id: impl Into<String>,
+        camera: Box<dyn ColorCamera + Send>,
+    ) -> Self {
+        self.cameras.insert(id.into(), camera);
+        self
     }
 }
 
@@ -87,12 +113,104 @@ pub struct WebcamVideoConfig {
     pub index: u32,
 }
 
-enum PumpKind {
-    External { index: u32 },
-    Webcam { index: u32 },
+enum SourceInjection {
+    Jpeg(Box<dyn LiveJpegSource>),
+    Camera(Box<dyn ColorCamera + Send>),
 }
 
-/// Starts live capture for every configured source and records frames in the indexed DVR.
+enum CaptureDriver {
+    Jpeg(Box<dyn LiveJpegSource>),
+    SessionNative(CaptureSession<NokhwaColorCamera>),
+    SessionInjected(CaptureSession<DynColorCamera>),
+}
+
+struct DynColorCamera(Box<dyn ColorCamera + Send>);
+
+impl ColorCamera for DynColorCamera {
+    fn advertised(
+        &mut self,
+    ) -> Result<Vec<a2a_lab_dev_kit::videos::AdvertisedCaptureProfile>, A2aLabError> {
+        self.0.advertised()
+    }
+
+    fn open(
+        &mut self,
+        profile: &a2a_lab_dev_kit::videos::SelectedCaptureProfile,
+    ) -> Result<a2a_lab_dev_kit::videos::SelectedCaptureProfile, A2aLabError> {
+        self.0.open(profile)
+    }
+
+    fn raw_frame(&mut self) -> Result<a2a_lab_dev_kit::videos::RawCameraSample, A2aLabError> {
+        self.0.raw_frame()
+    }
+
+    fn stop(&mut self) -> Result<(), A2aLabError> {
+        self.0.stop()
+    }
+}
+
+/// Starts live capture for configured sources and records frames in the indexed DVR.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_live_video_catalog(
+    sources: &[LiveVideoSourceDescriptor],
+    fps: u32,
+    live_retention_secs: u64,
+    disk_retention_secs: u64,
+    disk_root: &Path,
+    max_bytes: u64,
+    mut injections: LiveVideoInjections,
+) -> Result<LiveVideoCatalog, A2aLabError> {
+    validate_live_sources(sources)?;
+    let live = MemoryVideos::new();
+    let dvr = IndexedVideoDvr::open(disk_root, disk_retention_secs).await?;
+    let inner = VideoDvrCatalog::open(live, dvr, Duration::from_secs(60))?;
+    for source in sources {
+        let source_id = VideoSourceId::new(&source.id)?;
+        insert_source(
+            inner.live(),
+            &source_id,
+            &source.name,
+            &source.description,
+            source.width,
+            source.height,
+            fps,
+        )
+        .await?;
+    }
+    let maintenance = if sources.is_empty() {
+        None
+    } else {
+        Some(inner.maintain_disk())
+    };
+    let (stop, rx) = watch::channel(false);
+    let retain_us =
+        i64::try_from(live_retention_secs.saturating_mul(1_000_000)).unwrap_or(i64::MAX);
+    let frame_period_us = 1_000_000u64 / u64::from(fps.max(1));
+    let runtime = tokio::runtime::Handle::current();
+    for source in sources {
+        let source_id = VideoSourceId::new(&source.id)?;
+        let injection = take_injection(source, &mut injections);
+        spawn_pump(
+            inner.clone(),
+            source.clone(),
+            source_id,
+            fps,
+            max_bytes,
+            injection,
+            rx.clone(),
+            retain_us,
+            frame_period_us,
+            &runtime,
+        );
+    }
+    Ok(LiveVideoCatalog {
+        inner,
+        maintenance,
+        stop,
+    })
+}
+
+/// Legacy two-slot entry point built from optional external and `camera` sources.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_live_videos(
     external: Option<ExternalVideoConfig<'_>>,
@@ -104,82 +222,26 @@ pub async fn start_live_videos(
     max_bytes: u64,
     injections: LiveVideoInjections,
 ) -> Result<LiveVideoCatalog, A2aLabError> {
-    if external.is_none() && webcam.is_none() {
-        return Err(A2aLabError::invalid(
-            "video",
-            "at least one live video source must be configured",
+    let mut sources = Vec::new();
+    if let Some(config) = external {
+        sources.push(LiveVideoSourceDescriptor::legacy_external(
+            config.index,
+            config.description,
         ));
     }
-    let live = MemoryVideos::new();
-    let dvr = IndexedVideoDvr::open(disk_root, disk_retention_secs).await?;
-    let inner = VideoDvrCatalog::open(live, dvr, Duration::from_secs(60))?;
-    if let Some(config) = &external {
-        insert_source(
-            inner.live(),
-            EXTERNAL_CAMERA_SOURCE_ID,
-            "External camera",
-            config.description,
-            EXTERNAL_CAMERA_WIDTH,
-            EXTERNAL_CAMERA_HEIGHT,
-            fps,
-        )
-        .await?;
-    }
-    if webcam.is_some() {
-        insert_source(
-            inner.live(),
-            CAMERA_SOURCE_ID,
-            "Camera",
-            CAMERA_VIDEO_DESCRIPTION,
-            CAMERA_VIDEO_WIDTH,
-            CAMERA_VIDEO_HEIGHT,
-            fps,
-        )
-        .await?;
-    }
-    let maintenance = Some(inner.maintain_disk());
-    let (stop, rx) = watch::channel(false);
-    let retain_us =
-        i64::try_from(live_retention_secs.saturating_mul(1_000_000)).unwrap_or(i64::MAX);
-    let frame_period_us = 1_000_000u64 / u64::from(fps.max(1));
-    let runtime = tokio::runtime::Handle::current();
-    if let Some(config) = external {
-        spawn_pump(
-            inner.clone(),
-            VideoSourceId::new(EXTERNAL_CAMERA_SOURCE_ID)?,
-            PumpKind::External {
-                index: config.index,
-            },
-            fps,
-            max_bytes,
-            injections.external,
-            rx.clone(),
-            retain_us,
-            frame_period_us,
-            &runtime,
-        );
-    }
     if let Some(config) = webcam {
-        spawn_pump(
-            inner.clone(),
-            VideoSourceId::new(CAMERA_SOURCE_ID)?,
-            PumpKind::Webcam {
-                index: config.index,
-            },
-            fps,
-            max_bytes,
-            injections.webcam,
-            rx,
-            retain_us,
-            frame_period_us,
-            &runtime,
-        );
+        sources.push(LiveVideoSourceDescriptor::legacy_camera(config.index));
     }
-    Ok(LiveVideoCatalog {
-        inner,
-        maintenance,
-        stop,
-    })
+    start_live_video_catalog(
+        &sources,
+        fps,
+        live_retention_secs,
+        disk_retention_secs,
+        disk_root,
+        max_bytes,
+        injections,
+    )
+    .await
 }
 
 /// Starts `external-camera` live capture when an index is configured.
@@ -203,22 +265,35 @@ pub async fn start_external_video(
         disk_retention_secs,
         disk_root,
         max_bytes,
-        LiveVideoInjections {
-            external: source,
-            webcam: None,
-        },
+        LiveVideoInjections::legacy_jpeg(source, None),
     )
     .await
+}
+
+fn take_injection(
+    source: &LiveVideoSourceDescriptor,
+    injections: &mut LiveVideoInjections,
+) -> Option<SourceInjection> {
+    if let Some(camera) = injections.cameras.remove(&source.id) {
+        return Some(SourceInjection::Camera(camera));
+    }
+    if source.remembers_external_still() {
+        return injections.external.take().map(SourceInjection::Jpeg);
+    }
+    if source.remembers_camera_still() {
+        return injections.webcam.take().map(SourceInjection::Jpeg);
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_pump(
     catalog: VideoDvrCatalog,
+    descriptor: LiveVideoSourceDescriptor,
     source_id: VideoSourceId,
-    kind: PumpKind,
     fps: u32,
     max_bytes: u64,
-    injected: Option<Box<dyn LiveJpegSource>>,
+    injected: Option<SourceInjection>,
     stop: watch::Receiver<bool>,
     retain_us: i64,
     frame_period_us: u64,
@@ -228,8 +303,8 @@ fn spawn_pump(
     std::thread::spawn(move || {
         pump(
             &catalog,
+            &descriptor,
             &source_id,
-            &kind,
             fps,
             max_bytes,
             injected,
@@ -245,20 +320,34 @@ fn spawn_pump(
 #[allow(clippy::too_many_lines)]
 fn pump(
     catalog: &VideoDvrCatalog,
+    descriptor: &LiveVideoSourceDescriptor,
     source_id: &VideoSourceId,
-    kind: &PumpKind,
     fps: u32,
     max_bytes: u64,
-    mut injected: Option<Box<dyn LiveJpegSource>>,
+    injected: Option<SourceInjection>,
     mut stop: watch::Receiver<bool>,
     retain_us: i64,
     frame_period_us: u64,
     runtime: &tokio::runtime::Handle,
 ) {
     let budget = frame_budget(fps);
-    let mut native_external: Option<NativeLiveJpeg> = None;
-    let mut native_webcam: Option<NativeLiveJpeg> = None;
-    let encode_native = matches!(kind, PumpKind::External { .. }) && injected.is_none();
+    let jpeg_injected = matches!(injected, Some(SourceInjection::Jpeg(_)));
+    let encode_h264 = descriptor.delivery == LiveVideoDelivery::H264 && !jpeg_injected;
+    let allow_native = injected.is_none();
+    let mut driver = match injected {
+        Some(SourceInjection::Jpeg(jpeg)) => Some(CaptureDriver::Jpeg(jpeg)),
+        Some(SourceInjection::Camera(camera)) => {
+            match open_injected_session(descriptor, fps, camera) {
+                Ok(session) => Some(CaptureDriver::SessionInjected(session)),
+                Err(error) => {
+                    eprintln!("{}: {error}", descriptor.id);
+                    let _ = runtime.block_on(catalog.live().set_live_available(source_id, false));
+                    return;
+                }
+            }
+        }
+        None => None,
+    };
     let mut encoder: Option<H264Encoder> = None;
     let mut encode_stamps = VecDeque::new();
     let mut codec_init = Vec::new();
@@ -271,66 +360,46 @@ fn pump(
             }
         }
     });
+    let mut sequence = 0_u64;
+    let mut disk_drops = DiskDropLog::new(source_id.as_str());
     while !*stop.borrow() {
         let started = Instant::now();
-        let next = match kind {
-            PumpKind::External { index: _ } if injected.is_some() => injected.as_mut().map_or_else(
-                || Err(A2aLabError::unavailable("external camera is closed")),
-                |source| source.next_jpeg(),
-            ),
-            PumpKind::External { index } => {
-                if native_external.is_none() {
-                    if let Ok(opened) = NativeLiveJpeg::open(*index, max_bytes) {
-                        native_external = Some(opened);
-                    } else if mark_down(catalog, source_id, runtime, &mut stop) {
-                        return;
-                    } else {
-                        continue;
-                    }
-                }
-                native_external.as_mut().map_or_else(
-                    || Err(A2aLabError::unavailable("external camera is closed")),
-                    NativeLiveJpeg::next_frame,
-                )
-            }
-            PumpKind::Webcam { .. } if injected.is_some() => injected.as_mut().map_or_else(
-                || Err(A2aLabError::unavailable("camera is closed")),
-                |source| source.next_jpeg(),
-            ),
-            PumpKind::Webcam { index } => {
-                if native_webcam.is_none() {
-                    match NativeLiveJpeg::open_mjpeg(*index, max_bytes) {
-                        Ok(opened) => native_webcam = Some(opened),
-                        Err(error) => {
-                            eprintln!("camera video: {error}");
-                            if mark_down(catalog, source_id, runtime, &mut stop) {
-                                return;
-                            }
-                            continue;
-                        }
-                    }
-                }
-                native_webcam.as_mut().map_or_else(
-                    || Err(A2aLabError::unavailable("camera is closed")),
-                    NativeLiveJpeg::read_jpeg,
-                )
-            }
-        };
-        let jpeg = match next {
-            Ok(jpeg) => jpeg,
-            Err(error) => {
-                if matches!(kind, PumpKind::Webcam { .. }) {
-                    eprintln!("camera video: {error}");
-                    native_webcam = None;
-                    let _ = runtime.block_on(catalog.live().set_live_available(source_id, false));
-                    if wait(&mut stop, std::time::Duration::from_millis(200)) {
+        if driver.is_none() && allow_native {
+            match open_native_session(descriptor, fps) {
+                Ok(session) => driver = Some(CaptureDriver::SessionNative(session)),
+                Err(error) => {
+                    eprintln!("{}: {error}", descriptor.id);
+                    if mark_down(catalog, source_id, runtime, &mut stop) {
                         return;
                     }
                     continue;
                 }
-                native_external = None;
+            }
+        }
+        let jpeg = match driver.as_mut() {
+            Some(CaptureDriver::Jpeg(source)) => source.next_jpeg(),
+            Some(CaptureDriver::SessionNative(session)) => {
+                read_session_jpeg(session, source_id, &mut sequence, max_bytes, descriptor)
+            }
+            Some(CaptureDriver::SessionInjected(session)) => {
+                read_session_jpeg(session, source_id, &mut sequence, max_bytes, descriptor)
+            }
+            None => Err(A2aLabError::unavailable("capture session is closed")),
+        };
+        let jpeg = match jpeg {
+            Ok(jpeg) => jpeg,
+            Err(error) => {
+                eprintln!("{}: {error}", descriptor.id);
+                if !matches!(driver.as_ref(), Some(CaptureDriver::Jpeg(_))) {
+                    driver = None;
+                }
                 let _ = runtime.block_on(catalog.live().set_live_available(source_id, false));
-                if injected.is_some() && wait(&mut stop, std::time::Duration::from_millis(50)) {
+                let delay = if matches!(driver.as_ref(), Some(CaptureDriver::Jpeg(_))) {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_millis(200)
+                };
+                if wait(&mut stop, delay) {
                     return;
                 }
                 continue;
@@ -339,19 +408,21 @@ fn pump(
         if jpeg_dimensions(&jpeg).is_err() {
             continue;
         }
-        if matches!(kind, PumpKind::Webcam { .. }) {
+        if descriptor.remembers_camera_still() {
             remember_camera_frame(jpeg.clone());
         }
-        let published = if encode_native {
+        if descriptor.remembers_external_still() {
+            remember_external_frame(jpeg.clone());
+        }
+        let published = if encode_h264 {
             if encoder.is_none() {
                 match H264Encoder::spawn() {
                     Ok(opened) => encoder = Some(opened),
                     Err(error) => {
-                        eprintln!("external camera h264: {error}");
-                        native_external = None;
+                        eprintln!("{} h264: {error}", descriptor.id);
                         let _ =
                             runtime.block_on(catalog.live().set_live_available(source_id, false));
-                        if wait(&mut stop, std::time::Duration::from_secs(2)) {
+                        if wait(&mut stop, Duration::from_secs(2)) {
                             return;
                         }
                         continue;
@@ -394,12 +465,13 @@ fn pump(
                                 codec_init.clone(),
                                 unit.sample,
                             ),
+                            &mut disk_drops,
                         );
                         true
                     }
                 }
                 Some(Err(error)) => {
-                    eprintln!("external camera h264: {error}");
+                    eprintln!("{} h264: {error}", descriptor.id);
                     encoder = None;
                     encode_stamps.clear();
                     codec_init.clear();
@@ -425,6 +497,7 @@ fn pump(
             queue_disk(
                 &disk_tx,
                 DiskJob::mjpeg(source_id.clone(), captured_at, frame_period_us, jpeg),
+                &mut disk_drops,
             );
             true
         };
@@ -443,11 +516,89 @@ fn pump(
             return;
         }
     }
+    match driver.as_mut() {
+        Some(CaptureDriver::SessionNative(session)) => {
+            let _ = session.stop();
+        }
+        Some(CaptureDriver::SessionInjected(session)) => {
+            let _ = session.stop();
+        }
+        _ => {}
+    }
+}
+
+fn open_injected_session(
+    descriptor: &LiveVideoSourceDescriptor,
+    fps: u32,
+    camera: Box<dyn ColorCamera + Send>,
+) -> Result<CaptureSession<DynColorCamera>, A2aLabError> {
+    let request = descriptor.capture_request(fps)?;
+    let mut session = CaptureSession::new(DynColorCamera(camera), request);
+    session.open()?;
+    Ok(session)
+}
+
+fn open_native_session(
+    descriptor: &LiveVideoSourceDescriptor,
+    fps: u32,
+) -> Result<CaptureSession<NokhwaColorCamera>, A2aLabError> {
+    let request = descriptor.capture_request(fps)?;
+    let mut session = CaptureSession::new(
+        NokhwaColorCamera::open_index(descriptor.device_index)?,
+        request,
+    );
+    session.open()?;
+    Ok(session)
+}
+
+fn read_session_jpeg(
+    session: &mut CaptureSession<impl ColorCamera>,
+    source_id: &VideoSourceId,
+    sequence: &mut u64,
+    max_bytes: u64,
+    descriptor: &LiveVideoSourceDescriptor,
+) -> Result<Vec<u8>, A2aLabError> {
+    let captured_at = crate::time::now()?;
+    let identity = CaptureIdentity::new(source_id.clone(), *sequence);
+    *sequence = sequence.saturating_add(1);
+    let timing = CaptureTiming::new(captured_at, CaptureClock::monotonic(0));
+    let color = match descriptor.input {
+        LiveCameraInputFormat::Yuy2 => {
+            ColorProperties::new(ColorMatrix::Bt601, ColorRange::Limited)
+        }
+        LiveCameraInputFormat::Mjpeg => {
+            ColorProperties::new(ColorMatrix::Unknown, ColorRange::Unknown)
+        }
+    };
+    let frame = session.read(identity, timing, color)?;
+    let selected = session.selected().ok_or_else(|| {
+        A2aLabError::invalid("camera", "capture session has no negotiated profile")
+    })?;
+    let negotiated = selected.mode().format();
+    let expected = descriptor.input.capture_preference();
+    let matches = match expected {
+        CaptureFormatPreference::Mjpeg => negotiated == CaptureFormat::Mjpeg,
+        CaptureFormatPreference::Yuy2 => negotiated == CaptureFormat::Yuy2,
+        CaptureFormatPreference::Auto => true,
+    };
+    if !matches {
+        return Err(A2aLabError::invalid(
+            "format",
+            "negotiated raw layout does not match the configured input format",
+        ));
+    }
+    if frame.format() != negotiated {
+        return Err(A2aLabError::invalid(
+            "format",
+            "raw sample layout does not match the negotiated input format",
+        ));
+    }
+    captured_frame_jpeg(&frame, max_bytes)
 }
 
 async fn insert_source(
     live: &MemoryVideos,
-    id: &str,
+    id: &VideoSourceId,
     name: &str,
     description: &str,
     width: u32,
@@ -455,7 +606,7 @@ async fn insert_source(
     fps: u32,
 ) -> Result<(), A2aLabError> {
     live.insert_source(VideoSource::new(
-        VideoSourceId::new(id)?,
+        id.clone(),
         name,
         description,
         None,
@@ -519,9 +670,59 @@ impl DiskJob {
     }
 }
 
-fn queue_disk(tx: &mpsc::Sender<DiskJob>, job: DiskJob) {
-    if tx.try_send(job).is_err() {
-        eprintln!("video DVR: disk writer is behind; skipped a frame");
+const DISK_DROP_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+struct DiskDropLog {
+    source: String,
+    dropped: u64,
+    last_report: Option<Instant>,
+    closed_reported: bool,
+}
+
+impl DiskDropLog {
+    fn new(source: &str) -> Self {
+        Self {
+            source: source.to_owned(),
+            dropped: 0,
+            last_report: None,
+            closed_reported: false,
+        }
+    }
+
+    fn observe(&mut self, now: Instant, closed: bool) -> Option<String> {
+        if closed {
+            if self.closed_reported {
+                return None;
+            }
+            self.closed_reported = true;
+            return Some(format!(
+                "video DVR: {} disk writer closed; dropped frames are no longer queued",
+                self.source
+            ));
+        }
+        self.dropped = self.dropped.saturating_add(1);
+        let due = self
+            .last_report
+            .is_none_or(|last| now.saturating_duration_since(last) >= DISK_DROP_REPORT_INTERVAL);
+        if !due {
+            return None;
+        }
+        self.last_report = Some(now);
+        Some(format!(
+            "video DVR: {} disk writer is behind; dropped {} frames",
+            self.source, self.dropped
+        ))
+    }
+}
+
+fn queue_disk(tx: &mpsc::Sender<DiskJob>, job: DiskJob, drops: &mut DiskDropLog) {
+    let closed = match tx.try_send(job) {
+        Ok(()) => return,
+        Err(TrySendError::Closed(_)) => true,
+        Err(TrySendError::Full(_)) => false,
+    };
+    if let Some(message) = drops.observe(Instant::now(), closed) {
+        eprintln!("{message}");
     }
 }
 
@@ -588,13 +789,52 @@ fn mark_down(
     stop: &mut watch::Receiver<bool>,
 ) -> bool {
     let _ = runtime.block_on(catalog.live().set_live_available(source_id, false));
-    wait(stop, std::time::Duration::from_secs(2))
+    wait(stop, Duration::from_secs(2))
 }
 
-fn wait(stop: &mut watch::Receiver<bool>, wait: std::time::Duration) -> bool {
+fn wait(stop: &mut watch::Receiver<bool>, wait: Duration) -> bool {
     if *stop.borrow() {
         return true;
     }
     std::thread::sleep(wait);
     *stop.borrow()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::{DISK_DROP_REPORT_INTERVAL, DiskDropLog};
+
+    #[test]
+    fn disk_drop_reports_are_source_scoped_and_rate_limited() {
+        let start = Instant::now();
+        let mut camera = DiskDropLog::new("camera");
+        let mut external = DiskDropLog::new("external-camera");
+        let first = camera.observe(start, false).unwrap();
+        assert_eq!(
+            first,
+            "video DVR: camera disk writer is behind; dropped 1 frames"
+        );
+        assert!(camera.observe(start, false).is_none());
+        let other = external.observe(start, false).unwrap();
+        assert!(other.contains("external-camera"));
+        assert!(other.contains("dropped 1 frames"));
+        let later = start + DISK_DROP_REPORT_INTERVAL;
+        let next = camera.observe(later, false).unwrap();
+        assert_eq!(
+            next,
+            "video DVR: camera disk writer is behind; dropped 3 frames"
+        );
+        let closed = camera.observe(later, true).unwrap();
+        assert_eq!(
+            closed,
+            "video DVR: camera disk writer closed; dropped frames are no longer queued"
+        );
+        assert!(camera.observe(later, true).is_none());
+        let external_again = external
+            .observe(later + DISK_DROP_REPORT_INTERVAL, false)
+            .unwrap();
+        assert!(external_again.contains("dropped 2 frames"));
+    }
 }

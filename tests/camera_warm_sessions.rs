@@ -180,6 +180,7 @@ async fn external_live_session_pumps_multiple_frames_before_shutdown() {
                 reads: Arc::clone(&reads),
             })),
             webcam: None,
+            ..Default::default()
         },
     )
     .await
@@ -211,6 +212,7 @@ async fn external_still_reuses_live_session_without_second_open() {
                 bytes: live_bytes.clone(),
             })),
             webcam: None,
+            ..Default::default()
         },
     )
     .await
@@ -282,6 +284,7 @@ async fn external_live_reconnects_after_transient_disconnect() {
                 reads: AtomicUsize::new(0),
             })),
             webcam: None,
+            ..Default::default()
         },
     )
     .await
@@ -308,6 +311,7 @@ async fn shutdown_stops_live_capture_without_leaking_threads() {
                 bytes: jpeg(2, 2, 1),
             })),
             webcam: None,
+            ..Default::default()
         },
     )
     .await
@@ -336,6 +340,7 @@ async fn camera_live_survives_external_failure() {
             webcam: Some(Box::new(RememberingWebcam {
                 bytes: camera_bytes.clone(),
             })),
+            ..Default::default()
         },
     )
     .await
@@ -408,6 +413,7 @@ async fn camera_live_and_still_share_exact_bytes_from_the_pump() {
             webcam: Some(Box::new(RememberingWebcam {
                 bytes: shared.clone(),
             })),
+            ..Default::default()
         },
     )
     .await
