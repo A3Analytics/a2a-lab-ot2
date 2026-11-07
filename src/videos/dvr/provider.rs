@@ -34,6 +34,7 @@ struct StoredFollow {
     source_id: VideoSourceId,
     anchor: Option<UtcTimestamp>,
     expires_at: Instant,
+    hls: Option<PackagedHlsSession>,
 }
 
 /// Combined live window and disk-backed DVR catalog.
@@ -128,6 +129,7 @@ impl VideoDvrCatalog {
             Some(anchor) => Ok(anchor),
             None => DvrMediaPackager::live_edge_anchor(&self.dvr, request.source_id()).await,
         };
+        let mut hls = None;
         if let Ok(anchor) = anchor
             && let Ok(session) = packager
                 .package_live_hls_at(
@@ -140,12 +142,14 @@ impl VideoDvrCatalog {
                 .await
         {
             follow = follow.with_playback_8x(session.playback_8x_metadata());
+            hls = Some(session);
         }
         self.follows.lock().await.push(StoredFollow {
             follow: follow.clone(),
             source_id: request.source_id().clone(),
             anchor: request.anchor_at(),
             expires_at: Instant::now() + self.clip_ttl,
+            hls,
         });
         Ok(follow)
     }
@@ -164,22 +168,34 @@ impl VideoDvrCatalog {
         id: &VideoFollowId,
         relative_path: Option<&str>,
     ) -> Result<ResolvedMediaAsset, A2aLabError> {
-        let stored = self
-            .encoded_follow(id)
-            .await
+        let mut follows = self.follows.lock().await;
+        let stored = follows
+            .iter_mut()
+            .find(|stored| stored.follow.id() == id)
             .ok_or_else(|| A2aLabError::not_found("video follow", id.to_string()))?;
         if stored.expires_at <= Instant::now() {
             return Err(A2aLabError::clip_expired(format!(
                 "live session `{id}` has expired"
             )));
         }
+        stored.expires_at = Instant::now() + self.clip_ttl;
+        let stored = stored.clone();
+        drop(follows);
+        let path = relative_path.unwrap_or(HLS_PLAYLIST_RELATIVE_PATH);
         let track_id = DvrTrackId::new("h264")?;
         let packager = DvrMediaPackager::default();
+        if path != HLS_PLAYLIST_RELATIVE_PATH
+            && let Some(session) = stored.hls.as_ref()
+            && clip_session_has(session, path)
+        {
+            let asset = packager.load_hls_asset(&self.dvr, session, path).await?;
+            return Ok(ResolvedMediaAsset::Bytes(asset));
+        }
         let anchor = match stored.anchor {
             Some(anchor) => anchor,
             None => DvrMediaPackager::live_edge_anchor(&self.dvr, &stored.source_id).await?,
         };
-        let session = packager
+        let mut session = packager
             .package_live_hls_at(
                 &self.dvr,
                 stored.follow.path(),
@@ -188,8 +204,19 @@ impl VideoDvrCatalog {
                 anchor,
             )
             .await?;
-        let path = relative_path.unwrap_or(HLS_PLAYLIST_RELATIVE_PATH);
+        if let Some(cached) = stored.hls.as_ref() {
+            session.pin_timeline_origin(cached.timeline_origin_us());
+        }
         let asset = packager.load_hls_asset(&self.dvr, &session, path).await?;
+        if let Some(stored) = self
+            .follows
+            .lock()
+            .await
+            .iter_mut()
+            .find(|stored| stored.follow.id() == id)
+        {
+            stored.hls = Some(session);
+        }
         Ok(ResolvedMediaAsset::Bytes(asset))
     }
 
@@ -506,6 +533,7 @@ impl VideoProvider for VideoDvrCatalog {
                 )));
             }
             stored.anchor = Some(anchor);
+            stored.hls = None;
             return Ok(stored.follow.clone());
         }
         drop(follows);

@@ -12,7 +12,7 @@ use crate::videos::catalog::{
 };
 use crate::videos::dvr::DEFAULT_DISK_VIDEO_RETENTION_SECS;
 use crate::videos::external::LiveJpegSource;
-use crate::videos::source::LiveCameraInputFormat;
+use crate::videos::source::{LiveCameraInputFormat, LiveVideoDelivery};
 
 /// Default live catalog frame rate.
 pub const DEFAULT_VIDEO_FPS: u32 = 5;
@@ -178,8 +178,12 @@ pub fn resolved_video_summary(settings: &ResolvedVideoSettings) -> String {
                 LiveCameraInputFormat::Mjpeg => "mjpeg",
                 LiveCameraInputFormat::Yuy2 => "yuy2",
             };
+            let delivery = match source.delivery {
+                LiveVideoDelivery::Mjpeg => "mjpeg",
+                LiveVideoDelivery::H264 => "h264",
+            };
             format!(
-                "{} index {} {input} name {}",
+                "{} index {} input {input} delivery {delivery} name {}",
                 source.id, source.device_index, source.name
             )
         })

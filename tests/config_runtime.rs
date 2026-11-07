@@ -262,7 +262,7 @@ async fn three_file_sources_reach_injected_cameras_and_the_chat_factory() {
             .video
             .sources
             .iter()
-            .all(|source| source.delivery == LiveVideoDelivery::Mjpeg)
+            .all(|source| source.delivery == LiveVideoDelivery::H264)
     );
     assert_eq!(resolved.video.dvr_storage.path, dir.join("dvr"));
     assert_ne!(
@@ -378,7 +378,7 @@ fn legacy_source_ids_keep_output_delivery() {
         resolved.video.sources[1].input,
         LiveCameraInputFormat::Mjpeg
     );
-    assert_eq!(resolved.video.sources[1].delivery, LiveVideoDelivery::Mjpeg);
+    assert_eq!(resolved.video.sources[1].delivery, LiveVideoDelivery::H264);
     let _ = fs::remove_dir_all(&dir);
 }
 

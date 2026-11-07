@@ -331,8 +331,7 @@ fn pump(
     runtime: &tokio::runtime::Handle,
 ) {
     let budget = frame_budget(fps);
-    let jpeg_injected = matches!(injected, Some(SourceInjection::Jpeg(_)));
-    let encode_h264 = descriptor.delivery == LiveVideoDelivery::H264 && !jpeg_injected;
+    let encode_h264 = descriptor.delivery == LiveVideoDelivery::H264 && injected.is_none();
     let allow_native = injected.is_none();
     let mut driver = match injected {
         Some(SourceInjection::Jpeg(jpeg)) => Some(CaptureDriver::Jpeg(jpeg)),

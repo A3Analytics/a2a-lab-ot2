@@ -217,7 +217,7 @@ fn descriptor_from_file_source(source: &VideoSourceConfig) -> LiveVideoSourceDes
             input,
             width: 1280,
             height: 720,
-            delivery: LiveVideoDelivery::Mjpeg,
+            delivery: LiveVideoDelivery::H264,
         },
         _ => LiveVideoSourceDescriptor {
             id: id.to_owned(),
@@ -227,7 +227,7 @@ fn descriptor_from_file_source(source: &VideoSourceConfig) -> LiveVideoSourceDes
             input,
             width: 1280,
             height: 720,
-            delivery: LiveVideoDelivery::Mjpeg,
+            delivery: LiveVideoDelivery::H264,
         },
     }
 }
@@ -340,7 +340,7 @@ fn legacy_camera_descriptor(index: u32, input: LiveCameraInputFormat) -> LiveVid
         input,
         width: 1280,
         height: 720,
-        delivery: LiveVideoDelivery::Mjpeg,
+        delivery: LiveVideoDelivery::H264,
     }
 }
 

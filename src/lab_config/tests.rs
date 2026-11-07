@@ -226,6 +226,7 @@ fn file_names_survive_explicit_device_indexes() {
         .unwrap();
     assert_eq!(camera.name, "orbbec");
     assert_eq!(camera.device_index, 12);
+    assert_eq!(camera.delivery, crate::videos::LiveVideoDelivery::H264);
     assert_eq!(external.name, "emeet");
     assert_eq!(external.device_index, 4);
     assert_eq!(

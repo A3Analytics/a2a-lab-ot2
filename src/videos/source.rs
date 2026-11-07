@@ -32,9 +32,9 @@ impl LiveCameraInputFormat {
 /// How a source publishes live and DVR samples after raw capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveVideoDelivery {
-    /// MJPEG live follow and MJPEG DVR, as for legacy `camera`.
+    /// Multipart JPEG delivery for test and compatibility fixtures.
     Mjpeg,
-    /// H.264 live follow and H.264 DVR, as for legacy `external-camera`.
+    /// H.264 live follow and H.264 DVR.
     H264,
 }
 
@@ -69,7 +69,7 @@ impl LiveVideoSourceDescriptor {
         }
     }
 
-    /// Legacy `camera`: MJPEG in and out at 1280×720.
+    /// Legacy `camera`: MJPEG in and H.264 out at 1280×720.
     #[must_use]
     pub fn legacy_camera(index: u32) -> Self {
         Self {
@@ -80,7 +80,7 @@ impl LiveVideoSourceDescriptor {
             input: LiveCameraInputFormat::Mjpeg,
             width: 1280,
             height: 720,
-            delivery: LiveVideoDelivery::Mjpeg,
+            delivery: LiveVideoDelivery::H264,
         }
     }
 
