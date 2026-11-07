@@ -92,6 +92,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn sync_history_keeps_only_the_color_jpeg() {
         let root = std::env::temp_dir().join(format!("sync-color-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 use a2a_lab_dev_kit::{
     A2aLabError, DvrFrameAtRequest, DvrMediaPackager, DvrMediaPayload, DvrMediaStore,
     FollowVideoRequest, GetVideoClipRequest, GetVideoFrameAtRequest, GetVideoFrameAtResult,
-    GetVideoTimelineRequest, HLS_PLAYLIST_RELATIVE_PATH, Image, ImageDescriptor, ImageId,
-    ImageSourceId, JsonObject, ListVideoSourcesRequest, MAX_PAGE_LIMIT, MemoryVideos,
-    PackagedHlsSession, PackagedMediaAsset, Page, PageRequest, ReadDvrMediaWindowRequest,
-    ResolvedMediaAsset, TimeRange, UtcTimestamp, VideoClip, VideoClipId, VideoClipStream,
-    VideoCodec, VideoFollow, VideoFollowId, VideoFrame, VideoLiveStream, VideoProvider,
-    VideoSource, VideoSourceId, VideoTimeline,
+    GetVideoTimelineRequest, HLS_PLAYLIST_RELATIVE_PATH, HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH,
+    Image, ImageDescriptor, ImageId, ImageSourceId, JsonObject, ListVideoSourcesRequest,
+    MAX_PAGE_LIMIT, MemoryVideos, PackagedHlsSession, PackagedMediaAsset, Page, PageRequest,
+    ReadDvrMediaWindowRequest, ResolvedMediaAsset, TimeRange, UtcTimestamp, VideoClip, VideoClipId,
+    VideoClipStream, VideoCodec, VideoFollow, VideoFollowId, VideoFrame, VideoLiveStream,
+    VideoProvider, VideoSource, VideoSourceId, VideoTimeline,
 };
 use tokio::sync::Mutex;
 
@@ -184,7 +184,7 @@ impl VideoDvrCatalog {
         let path = relative_path.unwrap_or(HLS_PLAYLIST_RELATIVE_PATH);
         let track_id = DvrTrackId::new("h264")?;
         let packager = DvrMediaPackager::default();
-        if path != HLS_PLAYLIST_RELATIVE_PATH
+        if !refreshes_live_playlist(path)
             && let Some(session) = stored.hls.as_ref()
             && clip_session_has(session, path)
         {
@@ -621,6 +621,10 @@ fn newest_inside(interval: TimeRange, live_newest: Option<UtcTimestamp>) -> UtcT
         .unwrap_or_else(|| interval.end().saturating_add_micros(-1))
 }
 
+fn refreshes_live_playlist(path: &str) -> bool {
+    path == HLS_PLAYLIST_RELATIVE_PATH || path == HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH
+}
+
 fn clip_session_has(session: &PackagedHlsSession, path: &str) -> bool {
     if path == session.init_relative_path() || path == session.playlist_relative_path() {
         return true;
@@ -653,8 +657,10 @@ impl VideoDvrCatalog {
 
 #[cfg(test)]
 mod tests {
-    use super::newest_inside;
-    use a2a_lab_dev_kit::{TimeRange, UtcTimestamp};
+    use super::{newest_inside, refreshes_live_playlist};
+    use a2a_lab_dev_kit::{
+        HLS_PLAYLIST_RELATIVE_PATH, HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH, TimeRange, UtcTimestamp,
+    };
 
     fn at(value: &str) -> UtcTimestamp {
         UtcTimestamp::parse(value).unwrap()
@@ -662,6 +668,15 @@ mod tests {
 
     fn range() -> TimeRange {
         TimeRange::new(at("2024-06-01T00:00:00Z"), at("2024-06-01T00:00:01Z")).unwrap()
+    }
+
+    #[test]
+    fn live_playlists_refresh_while_init_and_segments_stay_cached() {
+        assert!(refreshes_live_playlist(HLS_PLAYLIST_RELATIVE_PATH));
+        assert!(refreshes_live_playlist(HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH));
+        assert!(!refreshes_live_playlist("init.mp4"));
+        assert!(!refreshes_live_playlist("seg-1.m4s"));
+        assert!(!refreshes_live_playlist("seg-8x-1.m4s"));
     }
 
     #[test]

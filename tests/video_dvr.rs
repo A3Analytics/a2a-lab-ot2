@@ -3,8 +3,10 @@
 use std::time::Duration;
 
 use a2a_lab_dev_kit::{
-    DvrFrameAtRequest, DvrMediaPayload, DvrMediaStore, GetVideoClipRequest, MemoryVideos,
-    PageRequest, ReadDvrMediaWindowRequest, TimeRange, UtcTimestamp, VideoProvider, VideoSourceId,
+    DvrFrameAtRequest, DvrMediaPayload, DvrMediaStore, FollowVideoRequest, GetVideoClipRequest,
+    HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH, MemoryVideos, PageRequest, ReadDvrMediaWindowRequest,
+    ResolvedMediaAsset, TimeRange, UtcTimestamp, VideoCodec, VideoProvider, VideoSource,
+    VideoSourceId,
 };
 use a2a_lab_ot2::videos::dvr::VideoDvrCatalog;
 use a2a_lab_ot2::videos::dvr::chunk::{chunk_relpath, crc32, minute_start_us};
@@ -688,4 +690,108 @@ async fn chunk_retention_removes_expired_payloads() {
     store.cleanup_at(ts("2024-06-01T00:00:00Z")).await.unwrap();
     assert!(store.media_coverage(&source).await.is_err());
     assert!(!store.root().join(format!("{relpath}.tmp")).exists());
+}
+
+#[tokio::test]
+async fn live_trick_playlist_includes_media_recorded_after_the_first_request() {
+    let store = open_store("live-8x", 86_400).await;
+    let live = MemoryVideos::new();
+    let source = VideoSourceId::new("cam-h264").unwrap();
+    live.insert_source(
+        VideoSource::with_capabilities(
+            source.clone(),
+            "H264",
+            "encoded",
+            None,
+            None,
+            640,
+            480,
+            5,
+            "video/mp4",
+            vec![VideoCodec::H264],
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    live.set_live_available(&source, true).await.unwrap();
+    let catalog = VideoDvrCatalog::open(live, store, Duration::from_secs(60)).unwrap();
+    let start = ts("2024-06-01T00:00:00Z");
+    for index in 0..24 {
+        append_keyframe(&catalog, &source, start, index).await;
+    }
+    let follow = catalog
+        .follow_video(FollowVideoRequest::new(source.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        follow.playback_8x().rendition_path(),
+        Some(HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH)
+    );
+    let first = trick_playlist(&catalog, follow.id()).await;
+    for index in 24..33 {
+        append_keyframe(&catalog, &source, start, index).await;
+    }
+    let cached_init = catalog
+        .resolve_live_playback_asset(follow.id(), Some("init.mp4"))
+        .await
+        .unwrap();
+    assert!(matches!(cached_init, ResolvedMediaAsset::Bytes(_)));
+    let second = trick_playlist(&catalog, follow.id()).await;
+    let first_uris = playlist_uris(&first);
+    let added = playlist_uris(&second)
+        .into_iter()
+        .any(|uri| !first_uris.contains(&uri));
+    assert!(added, "refreshed 8x playlist did not list the new media");
+}
+
+async fn append_keyframe(
+    catalog: &VideoDvrCatalog,
+    source: &VideoSourceId,
+    start: UtcTimestamp,
+    index: i64,
+) {
+    catalog
+        .dvr()
+        .append_h264_sample(
+            source,
+            start.saturating_add_micros(index * 200_000),
+            200_000,
+            true,
+            &[
+                0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x01, 0x68,
+            ],
+            &[
+                0x00,
+                0x00,
+                0x00,
+                0x01,
+                0x65,
+                u8::try_from(index).unwrap_or(1),
+            ],
+        )
+        .await
+        .unwrap();
+}
+
+async fn trick_playlist(catalog: &VideoDvrCatalog, id: &a2a_lab_dev_kit::VideoFollowId) -> String {
+    let asset = catalog
+        .resolve_live_playback_asset(id, Some(HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH))
+        .await
+        .unwrap();
+    match asset {
+        ResolvedMediaAsset::Bytes(asset) => String::from_utf8(asset.bytes().to_vec()).unwrap(),
+        ResolvedMediaAsset::ClipStream(_) | ResolvedMediaAsset::LiveStream(_) => {
+            panic!("expected packaged HLS bytes")
+        }
+    }
+}
+
+fn playlist_uris(playlist: &str) -> Vec<String> {
+    playlist
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
 }
