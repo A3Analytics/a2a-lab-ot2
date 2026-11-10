@@ -223,6 +223,12 @@ async fn a2a_agent_message_continues_context_beside_lab_commands() {
             "get-video-clip",
             "get-video-timeline",
             "follow-video",
+            "get-frame-decision-capabilities",
+            "append-frame-decision",
+            "read-frame-decision-history",
+            "get-semantic-search-capabilities",
+            "search-semantic-frames",
+            "get-semantic-indexing-coverage",
             "agent-message",
         ]
     );
@@ -316,9 +322,13 @@ async fn mcp_lists_tools_and_readonly_hides_writes() {
 
 fn mcp_tool_names_sorted() -> Vec<String> {
     [
+        "append_frame_decision",
         "follow_video",
         "get_current_image",
+        "get_frame_decision_capabilities",
         "get_image",
+        "get_semantic_indexing_coverage",
+        "get_semantic_search_capabilities",
         "get_task_status",
         "get_video_clip",
         "get_video_frame_at",
@@ -331,7 +341,9 @@ fn mcp_tool_names_sorted() -> Vec<String> {
         "list_video_sources",
         "query_logs",
         "query_metric",
+        "read_frame_decision_history",
         "search_images",
+        "search_semantic_frames",
         "start_task",
     ]
     .into_iter()

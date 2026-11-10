@@ -5,13 +5,14 @@ use std::path::{Path, PathBuf};
 use a2a_lab_dev_kit::A2aLabError;
 
 use crate::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
-use crate::lab_config::ResolvedVideoSettings;
+use crate::lab_config::{LabConfigInputs, ResolvedSemanticIndexing, ResolvedVideoSettings};
 use crate::videos::catalog::{
     ExternalVideoConfig, LiveVideoCatalog, LiveVideoInjections, WebcamVideoConfig,
-    start_live_video_catalog, start_live_videos,
+    start_live_video_catalog_with_semantic, start_live_videos,
 };
 use crate::videos::dvr::DEFAULT_DISK_VIDEO_RETENTION_SECS;
 use crate::videos::external::LiveJpegSource;
+use crate::videos::semantic_indexing::SemanticServeInjections;
 use crate::videos::source::{LiveCameraInputFormat, LiveVideoDelivery};
 
 /// Default live catalog frame rate.
@@ -203,11 +204,25 @@ pub async fn open_resolved_video_catalog(
     settings: &ResolvedVideoSettings,
     injections: LiveVideoInjections,
 ) -> Result<Option<LiveVideoCatalog>, A2aLabError> {
+    open_resolved_video_catalog_with_semantic(settings, injections, None, None).await
+}
+
+/// Starts the live catalog and wires optional v2 semantic indexing before capture pumps run.
+pub async fn open_resolved_video_catalog_with_semantic(
+    settings: &ResolvedVideoSettings,
+    injections: LiveVideoInjections,
+    inputs: Option<&LabConfigInputs>,
+    semantic_injections: Option<SemanticServeInjections>,
+) -> Result<Option<LiveVideoCatalog>, A2aLabError> {
     if settings.sources.is_empty() {
         return Ok(None);
     }
+    let semantic = match inputs {
+        Some(inputs) => crate::lab_config::resolve_semantic_indexing(inputs, settings)?,
+        None => None,
+    };
     Ok(Some(
-        start_live_video_catalog(
+        start_live_video_catalog_with_semantic(
             &settings.sources,
             settings.fps,
             settings.live_retention_secs,
@@ -215,9 +230,19 @@ pub async fn open_resolved_video_catalog(
             &settings.dvr_storage.path,
             settings.max_image_bytes,
             injections,
+            semantic.as_ref(),
+            semantic_injections.unwrap_or_default(),
         )
         .await?,
     ))
+}
+
+/// Resolved semantic settings for serve when a configuration file is selected.
+pub async fn resolve_serve_semantic_indexing(
+    inputs: &LabConfigInputs,
+    settings: &ResolvedVideoSettings,
+) -> Result<Option<ResolvedSemanticIndexing>, A2aLabError> {
+    crate::lab_config::resolve_semantic_indexing(inputs, settings)
 }
 
 /// Starts the live catalog when at least one camera source is configured.

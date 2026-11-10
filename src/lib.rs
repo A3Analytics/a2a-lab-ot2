@@ -36,9 +36,10 @@ pub use images::{
 };
 pub use lab_config::{
     ClapValueSource, ExplicitSetting, LabConfigCliValues, LabConfigInputs, ResolvedChatSettings,
-    ResolvedDvrStorage, ResolvedLabConfig, ResolvedVideoSettings, ServeChatLegacyInputs,
-    SettingProvenance, build_serve_lab_agent, resolve_lab_config, selected_config_path,
-    serve_chat_settings, uses_resolved_chat_configuration, uses_resolved_video_configuration,
+    ResolvedDvrStorage, ResolvedLabConfig, ResolvedSemanticIndexing, ResolvedVideoSettings,
+    ServeChatLegacyInputs, SettingProvenance, build_serve_lab_agent, resolve_lab_config,
+    resolve_semantic_indexing, selected_config_path, serve_chat_settings,
+    uses_resolved_chat_configuration, uses_resolved_video_configuration,
 };
 pub use memory::ConversationStore;
 pub use oidc::{OidcConfig, with_oidc};
@@ -51,6 +52,7 @@ pub use videos::{
     DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, ExternalVideoConfig, IndexedVideoDvr,
     LiveCameraInputFormat, LiveJpegSource, LiveVideoCatalog, LiveVideoDelivery,
     LiveVideoInjections, LiveVideoSourceDescriptor, VideoDvrCatalog, VideoServeConfig,
-    WebcamVideoConfig, open_resolved_video_catalog, open_video_catalog, resolved_video_summary,
+    WebcamVideoConfig, open_resolved_video_catalog, open_resolved_video_catalog_with_semantic,
+    open_video_catalog, resolve_serve_semantic_indexing, resolved_video_summary,
     start_live_video_catalog, start_live_videos,
 };

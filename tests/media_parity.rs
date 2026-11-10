@@ -24,6 +24,7 @@ fn intentional_media_parity_differences_are_recorded() {
 }
 
 #[tokio::test]
+#[allow(clippy::large_futures)]
 async fn external_camera_media_parity_matrix() {
     matrix::run().await;
 }

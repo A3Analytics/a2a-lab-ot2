@@ -111,3 +111,15 @@ run = "bash .mise/scripts/agent-media-smoke-native.sh"
 [agent-orbbec-live]
 description = "Opt-in live Orbbec JPEG check; skipped unless A2ALAB_ORBBEC_LIVE=1"
 run = "bash .mise/scripts/agent-orbbec-live.sh"
+
+[semantic-eval-validate]
+description = "Validate versioned semantic evaluation manifests (read-only DVR; skips expired evidence)"
+run = "bash .mise/scripts/semantic-eval-validate.sh"
+
+[semantic-indexing-smoke]
+description = "Opt-in Luna description and embedding smoke on one retained frame (requires A2ALAB_SEMANTIC_INDEXING_SMOKE=1)"
+run = "bash .mise/scripts/semantic-indexing-smoke.sh"
+
+[jev-decision-smoke]
+description = "Opt-in Jev decision smoke report (requires A2ALAB_JEV_SMOKE=1 and credentials for live)"
+run = "bash .mise/scripts/jev-decision-smoke.sh"

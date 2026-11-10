@@ -1,12 +1,14 @@
 //! Indexed on-disk DVR implementing [`DvrMediaStore`].
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use a2a_lab_dev_kit::{
     A2aLabError, DvrFrameAtRequest, DvrFrameAtResult, DvrMediaCoverage, DvrMediaPayload,
-    DvrMediaSegment, DvrMediaStore, DvrMediaTrack, DvrRetentionBounds, DvrTrackId, MemoryVideos,
-    Page, ReadDvrMediaWindowRequest, TimeRange, UtcTimestamp, VideoCodec, VideoSourceId,
+    DvrMediaSegment, DvrMediaStore, DvrMediaTrack, DvrRetentionBounds, DvrStoreNamespace,
+    DvrTrackId, MemoryVideos, Page, ReadDvrMediaWindowRequest, SavedFrameRef, TimeRange,
+    UtcTimestamp, VideoCodec, VideoSourceId,
 };
 use futures_util::TryStreamExt;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
@@ -18,9 +20,23 @@ use super::chunk::{
     read_payload_range, truncate_chunk_files,
 };
 use super::coverage::IntervalFold;
+use super::frame_manifest::DEFAULT_SEMANTIC_STORE_NAMESPACE;
+use super::indexing_registration::{SaveFaults, commit_indexing_job_tx};
+use super::indexing_scope::IndexedSourceFilter;
 
 const SCHEMA: &str = include_str!("../../../migrations/004_video_dvr.sql");
 const SCHEMA_CHUNKS: &str = include_str!("../../../migrations/005_video_dvr_chunks.sql");
+const SCHEMA_SEMANTIC_MANIFEST: &str =
+    include_str!("../../../migrations/007_semantic_frame_manifest.sql");
+const SCHEMA_INDEXING_JOBS: &str =
+    include_str!("../../../migrations/008_semantic_indexing_jobs.sql");
+const SCHEMA_FRAME_DECISIONS: &str = include_str!("../../../migrations/009_frame_decisions.sql");
+const SCHEMA_INDEXING_JOB_LIFECYCLE: &str =
+    include_str!("../../../migrations/010_semantic_indexing_job_lifecycle.sql");
+const SCHEMA_DECISION_EVALUATION_JOBS: &str =
+    include_str!("../../../migrations/011_frame_decision_evaluation_jobs.sql");
+const SCHEMA_SEMANTIC_STAGE_SCHEDULES: &str =
+    include_str!("../../../migrations/012_semantic_stage_schedules.sql");
 
 /// Default root directory for indexed video payloads and SQLite index.
 pub const DEFAULT_VIDEO_DVR_ROOT: &str = ".a2a-lab-ot2/video-dvr";
@@ -37,6 +53,8 @@ pub struct IndexedVideoDvr {
     root: PathBuf,
     pool: SqlitePool,
     retain_us: i64,
+    pub(crate) save_faults: Arc<SaveFaults>,
+    indexing_sources: Arc<RwLock<IndexedSourceFilter>>,
 }
 
 impl IndexedVideoDvr {
@@ -83,7 +101,16 @@ impl IndexedVideoDvr {
             .connect_with(options)
             .await
             .map_err(db_error)?;
-        for statement in SCHEMA.split(';').chain(SCHEMA_CHUNKS.split(';')) {
+        for statement in SCHEMA
+            .split(';')
+            .chain(SCHEMA_CHUNKS.split(';'))
+            .chain(SCHEMA_SEMANTIC_MANIFEST.split(';'))
+            .chain(SCHEMA_INDEXING_JOBS.split(';'))
+            .chain(SCHEMA_FRAME_DECISIONS.split(';'))
+            .chain(SCHEMA_INDEXING_JOB_LIFECYCLE.split(';'))
+            .chain(SCHEMA_DECISION_EVALUATION_JOBS.split(';'))
+            .chain(SCHEMA_SEMANTIC_STAGE_SCHEDULES.split(';'))
+        {
             let statement = statement.trim();
             if statement.is_empty() {
                 continue;
@@ -97,10 +124,26 @@ impl IndexedVideoDvr {
             root,
             pool,
             retain_us: i64::try_from(retain_secs.saturating_mul(1_000_000)).unwrap_or(i64::MAX),
+            save_faults: Arc::new(SaveFaults::default()),
+            indexing_sources: Arc::new(RwLock::new(IndexedSourceFilter::all_sources())),
         };
+        store.backfill_indexing_job_runtime().await?;
         store.recover_partials().await?;
         store.cleanup_at(crate::time::now()?).await?;
+        store.reconcile_frame_decision_tombstones().await?;
         Ok(store)
+    }
+
+    async fn backfill_indexing_job_runtime(&self) -> Result<(), A2aLabError> {
+        sqlx::query(
+            "INSERT INTO semantic_indexing_job_runtime (job_id)
+             SELECT job_id FROM semantic_indexing_jobs
+             WHERE job_id NOT IN (SELECT job_id FROM semantic_indexing_job_runtime)",
+        )
+        .execute(self.sqlite_pool())
+        .await
+        .map_err(db_error)?;
+        Ok(())
     }
 
     #[must_use]
@@ -236,6 +279,11 @@ impl IndexedVideoDvr {
         keyframe: bool,
         payload: &[u8],
     ) -> Result<(), A2aLabError> {
+        if self.save_faults.fail_payload_append() {
+            return Err(A2aLabError::unavailable(
+                "video DVR test fault: payload append blocked",
+            ));
+        }
         let minute = minute_start_us(captured_at);
         self.finalize_chunks_before(source_id, track_id, minute)
             .await?;
@@ -257,6 +305,17 @@ impl IndexedVideoDvr {
         let (offset, checksum) = append_payload(&tmp_path, payload).await?;
         let end =
             captured_at.saturating_add_micros(i64::try_from(frame_period_us.max(1)).unwrap_or(1));
+        let store_ns = DvrStoreNamespace::new(DEFAULT_SEMANTIC_STORE_NAMESPACE)?;
+        let frame = SavedFrameRef::from_payload_bytes(
+            store_ns,
+            source_id.clone(),
+            track_id.clone(),
+            captured_at,
+            payload,
+            None,
+        )?;
+        let registered_at = crate::time::now()?;
+        let mut tx = self.pool.begin().await.map_err(db_error)?;
         sqlx::query(
             "INSERT INTO dvr_frames
                 (source_id, track_id, start_us, end_us, keyframe, minute_start_us, chunk_relpath,
@@ -282,9 +341,36 @@ impl IndexedVideoDvr {
         .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .bind(i64::try_from(payload.len()).unwrap_or(i64::MAX))
         .bind(i64::from(checksum))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(db_error)?;
+        self.register_manifest_revision_tx(
+            &mut tx,
+            &frame,
+            end,
+            checksum,
+            registered_at.as_micros(),
+        )
+        .await?;
+        if self
+            .indexing_sources
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .permits(source_id.as_str())
+        {
+            commit_indexing_job_tx(
+                &mut tx,
+                frame.frame_id().as_str(),
+                registered_at.as_micros(),
+            )
+            .await?;
+        }
+        if self.save_faults.fail_metadata_commit() {
+            return Err(A2aLabError::unavailable(
+                "video DVR test fault: metadata commit blocked",
+            ));
+        }
+        tx.commit().await.map_err(db_error)?;
         Ok(())
     }
 
@@ -637,7 +723,7 @@ impl IndexedVideoDvr {
             .map_err(|error| A2aLabError::unavailable(format!("read {display}: {error}")))
     }
 
-    async fn load_chunk_payload(
+    pub(crate) async fn load_chunk_payload(
         &self,
         relpath: &str,
         offset: u64,
@@ -957,6 +1043,26 @@ impl IndexedVideoDvr {
         }
     }
 
+    #[doc(hidden)]
+    #[must_use]
+    pub fn sqlite_pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    /// Restricts durable indexing jobs to configured live sources when semantic indexing is enabled.
+    pub fn set_indexed_source_filter(&self, filter: IndexedSourceFilter) {
+        if let Ok(mut guard) = self.indexing_sources.write() {
+            *guard = filter;
+        }
+    }
+
+    pub(crate) fn permits_indexing_source(&self, source_id: &str) -> bool {
+        self.indexing_sources
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .permits(source_id)
+    }
+
     /// Returns SQLite's plan rows for a regression test.
     #[doc(hidden)]
     pub async fn query_plan(&self, sql: &str) -> Result<Vec<String>, A2aLabError> {
@@ -1093,7 +1199,7 @@ fn walk_tmp_files(
 
 fn walk_incomplete_index(_root: &Path, _stale: &mut Vec<(String, String, i64)>) {}
 
-fn db_error(error: impl std::fmt::Display) -> A2aLabError {
+pub(crate) fn db_error(error: impl std::fmt::Display) -> A2aLabError {
     A2aLabError::unavailable(format!("video DVR database: {error}"))
 }
 
@@ -1109,7 +1215,7 @@ fn codec_label(codec: VideoCodec) -> &'static str {
     }
 }
 
-fn parse_codec(label: &str) -> Result<VideoCodec, A2aLabError> {
+pub(crate) fn parse_codec(label: &str) -> Result<VideoCodec, A2aLabError> {
     match label {
         "mjpeg" => Ok(VideoCodec::Mjpeg),
         "h264" => Ok(VideoCodec::H264),

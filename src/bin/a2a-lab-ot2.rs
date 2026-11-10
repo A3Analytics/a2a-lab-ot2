@@ -26,9 +26,10 @@ use a2a_lab_ot2::{
     FixtureVariant, ImageHistoryMaintenance, ImageServeConfig, LabAgent, LabConfigCliValues,
     LabConfigInputs, LiveImageCatalog, LiveVideoCatalog, LiveVideoInjections, ModelProvider,
     OidcConfig, OpentronsLab, ServeChatLegacyInputs, SilaConfig, VideoServeConfig,
-    build_serve_lab_agent, image_catalog, open_image_catalog, open_resolved_video_catalog,
-    open_video_catalog, prepare_sila, resolve_lab_config, resolved_video_summary,
-    selected_config_path, sila_server, uses_resolved_video_configuration, with_oidc,
+    build_serve_lab_agent, image_catalog, open_image_catalog,
+    open_resolved_video_catalog_with_semantic, open_video_catalog, prepare_sila,
+    resolve_lab_config, resolved_video_summary, selected_config_path, sila_server,
+    uses_resolved_video_configuration, with_oidc,
 };
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -284,6 +285,33 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Read-only semantic evaluation manifest discovery and validation
+    SemanticEval {
+        #[command(subcommand)]
+        command: SemanticEvalCommand,
+    },
+    /// Opt-in Luna description and embedding smoke on one retained frame
+    SemanticIndexingSmoke {
+        /// v2 configuration with `semantic_indexing`
+        #[arg(long)]
+        config: PathBuf,
+        /// Saved manifest frame id on Chupacabra DVR
+        #[arg(long)]
+        frame_id: String,
+        #[arg(long, env = "A2ALAB_VIDEO_DVR_ROOT", default_value = DEFAULT_VIDEO_DVR_ROOT)]
+        video_dvr_root: PathBuf,
+    },
+    /// Opt-in Jev decision smoke (fixture report without live credentials)
+    JevDecisionSmoke {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        frame_id: String,
+        #[arg(long, default_value = "jev-smoke")]
+        evaluation_id: String,
+        #[arg(long, env = "A2ALAB_VIDEO_DVR_ROOT", default_value = DEFAULT_VIDEO_DVR_ROOT)]
+        video_dvr_root: PathBuf,
+    },
     /// `list_tasks`
     ListTasks,
     /// `list_log_sources`
@@ -360,7 +388,26 @@ enum ConfigCommand {
     Validate,
 }
 
+#[derive(Subcommand)]
+enum SemanticEvalCommand {
+    /// Validate a versioned evaluation manifest against retained DVR evidence
+    Validate {
+        /// Evaluation manifest JSON (fixture or Chupacabra pilot export)
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Indexed DVR root (read-only open; does not create recordings)
+        #[arg(long, env = "A2ALAB_VIDEO_DVR_ROOT", default_value = DEFAULT_VIDEO_DVR_ROOT)]
+        video_dvr_root: PathBuf,
+    },
+    /// List retained DVR source/track rows for manifest authoring (stdout JSON)
+    Discover {
+        #[arg(long, env = "A2ALAB_VIDEO_DVR_ROOT", default_value = DEFAULT_VIDEO_DVR_ROOT)]
+        video_dvr_root: PathBuf,
+    },
+}
+
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = Cli::command().get_matches();
     let mut cli = Cli::from_arg_matches(&matches)?;
@@ -371,6 +418,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } = &command
     {
         return run_config_validate(&config_inputs);
+    }
+    if let Command::SemanticEval { command } = &command {
+        return run_semantic_eval(command).await;
+    }
+    if let Command::SemanticIndexingSmoke {
+        config,
+        frame_id,
+        video_dvr_root,
+    } = &command
+    {
+        return run_semantic_indexing_smoke(config, frame_id, video_dvr_root).await;
+    }
+    if let Command::JevDecisionSmoke {
+        config,
+        frame_id,
+        evaluation_id,
+        video_dvr_root,
+    } = &command
+    {
+        return run_jev_decision_smoke(config, frame_id, evaluation_id, video_dvr_root).await;
     }
     if selected_config_path(&config_inputs)?.is_some() {
         resolve_lab_config(&config_inputs).map_err(config_error)?;
@@ -398,7 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let lab = connect(&cli)?;
     match command {
-        Command::Serve => serve(lab, &cli, &config_inputs).await?,
+        Command::Serve => Box::pin(serve(lab, &cli, &config_inputs)).await?,
         Command::ListTasks => list_tasks(&lab).await?,
         Command::ListLogSources => list_log_sources(&lab).await?,
         Command::ListMetrics => list_metrics(&lab).await?,
@@ -441,7 +508,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Fixture { .. }
         | Command::AgentMessage { .. }
         | Command::OrbbecSdkVersion
-        | Command::Config { .. } => {
+        | Command::Config { .. }
+        | Command::SemanticEval { .. }
+        | Command::SemanticIndexingSmoke { .. }
+        | Command::JevDecisionSmoke { .. } => {
             unreachable!("handled before the lab client connects");
         }
         Command::Engine {
@@ -588,6 +658,79 @@ fn map_value_source(source: Option<ValueSource>) -> Option<ClapValueSource> {
 fn run_config_validate(inputs: &LabConfigInputs) -> Result<(), Box<dyn std::error::Error>> {
     resolve_lab_config(inputs).map_err(config_error)?;
     println!("configuration valid");
+    Ok(())
+}
+
+async fn run_semantic_indexing_smoke(
+    config: &Path,
+    frame_id: &str,
+    video_dvr_root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use a2a_lab_ot2::videos::semantic_indexing::run_indexing_smoke;
+    let report = run_indexing_smoke(config, video_dvr_root, frame_id).await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+async fn run_jev_decision_smoke(
+    config: &Path,
+    frame_id: &str,
+    evaluation_id: &str,
+    video_dvr_root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use a2a_lab_ot2::videos::semantic_indexing::run_jev_smoke;
+    let report = run_jev_smoke(config, video_dvr_root, frame_id, evaluation_id).await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+async fn run_semantic_eval(
+    command: &SemanticEvalCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use a2a_lab_ot2::videos::dvr::IndexedVideoDvr;
+    use a2a_lab_ot2::videos::semantic_eval::{
+        discover_retained_sources, load_manifest, validate_manifest,
+    };
+
+    match command {
+        SemanticEvalCommand::Validate {
+            manifest,
+            video_dvr_root,
+        } => {
+            let parsed = load_manifest(manifest)?;
+            let report = validate_manifest(&parsed, video_dvr_root).await?;
+            println!(
+                "semantic evaluation manifest valid: {}",
+                report.manifest_version
+            );
+            println!(
+                "sources checked={} available={} skipped={} retained_frames={}",
+                report.sources_checked,
+                report.sources_available,
+                report.sources_skipped,
+                report.total_retained_frames
+            );
+            println!(
+                "labeled_frames_verified={} untested_predicates={}",
+                report.labeled_frames_verified,
+                report.untested_predicates.join(", ")
+            );
+            for line in &report.warnings {
+                println!("{line}");
+            }
+            if !report.is_success() {
+                return Err("semantic evaluation manifest validation failed".into());
+            }
+        }
+        SemanticEvalCommand::Discover { video_dvr_root } => {
+            let store = IndexedVideoDvr::open(video_dvr_root, DEFAULT_DISK_VIDEO_RETENTION_SECS)
+                .await
+                .map_err(|error| error.to_string())?;
+            let records = discover_retained_sources(&store).await?;
+            let json = serde_json::to_string_pretty(&records)?;
+            println!("{json}");
+        }
+    }
     Ok(())
 }
 
@@ -826,9 +969,14 @@ async fn prepare_serve_videos(
 ) -> Result<Option<LiveVideoCatalog>, Box<dyn std::error::Error>> {
     if uses_resolved_video_configuration(inputs)? {
         let resolved = resolve_lab_config(inputs)?;
-        return open_resolved_video_catalog(&resolved.video, LiveVideoInjections::none())
-            .await
-            .map_err(|error| startup_error("videos", error).into());
+        return open_resolved_video_catalog_with_semantic(
+            &resolved.video,
+            LiveVideoInjections::none(),
+            Some(inputs),
+            None,
+        )
+        .await
+        .map_err(|error| startup_error("videos", error).into());
     }
     let videos_config = merged_video_config(cli)?;
     open_video_catalog(&videos_config, None, None)
@@ -849,7 +997,16 @@ fn share_with_videos(
     videos: Option<&LiveVideoCatalog>,
 ) -> Arc<dyn A2aLabApi> {
     match videos {
-        Some(videos) => service.with_videos(videos.provider()).share(),
+        Some(videos) => {
+            let mut service = service.with_videos(videos.provider());
+            if let Ok(Some(ledger)) = videos.frame_decision_ledger() {
+                service = service.with_frame_decisions(ledger);
+            }
+            if let Some(search) = videos.semantic_bundle().search.clone() {
+                service = service.with_semantic_search(search);
+            }
+            service.share()
+        }
         None => service.share(),
     }
 }

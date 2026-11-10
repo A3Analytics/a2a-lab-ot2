@@ -19,7 +19,10 @@ a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", r
     "sila2",
     "web-ui",
     "yuv",
+    "openh264",
 ] }
+async-trait = "0.1"
+base64 = "0.22.1"
 axum = "0.8.9"
 aws-config = { version = "1", default-features = false, features = [
     "behavior-version-latest",
@@ -33,7 +36,9 @@ aws-sdk-bedrockruntime = { version = "1", default-features = false, features = [
 ] }
 clap = { version = "4.5.53", features = ["derive", "env"] }
 futures-util = "0.3.31"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+yuv = { version = "0.8.20", default-features = false, features = ["sse"] }
+openh264 = { version = "0.9.9", features = ["source"] }
 jiff = { version = "0.2.37", features = ["serde"] }
 libloading = "0.8"
 nokhwa = { version = "0.10.11", default-features = false, features = [
@@ -51,6 +56,7 @@ rig = { version = "0.42", default-features = false, features = [
 ] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "sqlite",

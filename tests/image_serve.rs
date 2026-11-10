@@ -490,6 +490,12 @@ async fn both_sources_match_across_a2a_and_mcp() {
             "get-video-clip",
             "get-video-timeline",
             "follow-video",
+            "get-frame-decision-capabilities",
+            "append-frame-decision",
+            "read-frame-decision-history",
+            "get-semantic-search-capabilities",
+            "search-semantic-frames",
+            "get-semantic-indexing-coverage",
             "agent-message",
         ]
     );
@@ -635,9 +641,13 @@ async fn payload_limit_matches_and_readonly_keeps_image_reads() {
 
 fn expected_tools() -> Vec<String> {
     [
+        "append_frame_decision",
         "follow_video",
         "get_current_image",
+        "get_frame_decision_capabilities",
         "get_image",
+        "get_semantic_indexing_coverage",
+        "get_semantic_search_capabilities",
         "get_task_status",
         "get_video_clip",
         "get_video_frame_at",
@@ -650,7 +660,9 @@ fn expected_tools() -> Vec<String> {
         "list_video_sources",
         "query_logs",
         "query_metric",
+        "read_frame_decision_history",
         "search_images",
+        "search_semantic_frames",
         "start_task",
     ]
     .into_iter()

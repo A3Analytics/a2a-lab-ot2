@@ -6,6 +6,8 @@ mod external;
 mod h264;
 mod nokhwa_camera;
 mod raw_jpeg;
+pub mod semantic_eval;
+pub mod semantic_indexing;
 mod serve;
 mod source;
 
@@ -14,13 +16,15 @@ pub use catalog::{
     start_live_video_catalog, start_live_videos,
 };
 pub use dvr::{
-    DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_VIDEO_DVR_ROOT, IndexedVideoDvr,
-    VIDEO_DVR_CLEANUP_INTERVAL, VideoDvrCatalog, VideoDvrMaintenance,
+    ANNOTATION_RECONCILE_INTERVAL, DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_VIDEO_DVR_ROOT,
+    IndexedVideoDvr, VIDEO_DVR_CLEANUP_INTERVAL, VideoDvrAnnotationQueue, VideoDvrCatalog,
+    VideoDvrMaintenance,
 };
 pub use external::LiveJpegSource;
 pub use serve::{
     DEFAULT_LIVE_VIDEO_MEMORY_SECS, DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS,
-    VideoServeConfig, open_resolved_video_catalog, open_video_catalog, resolved_video_summary,
+    VideoServeConfig, open_resolved_video_catalog, open_resolved_video_catalog_with_semantic,
+    open_video_catalog, resolve_serve_semantic_indexing, resolved_video_summary,
 };
 pub use source::{
     LiveCameraInputFormat, LiveVideoDelivery, LiveVideoSourceDescriptor, validate_live_sources,

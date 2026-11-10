@@ -3,6 +3,7 @@
 mod inputs;
 mod resolve;
 mod selection;
+mod semantic;
 
 pub use inputs::{
     ClapValueSource, ExplicitSetting, LabConfigCliValues, LabConfigInputs, SettingProvenance,
@@ -14,6 +15,7 @@ pub use selection::{
     ServeChatLegacyInputs, build_serve_lab_agent, selected_config_path, serve_chat_settings,
     uses_resolved_chat_configuration, uses_resolved_video_configuration,
 };
+pub use semantic::{ResolvedSemanticIndexing, resolve_semantic_indexing};
 
 use a2a_lab_dev_kit::A2aLabError;
 

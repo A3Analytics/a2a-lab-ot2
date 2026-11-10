@@ -2,23 +2,34 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use a2a_lab_dev_kit::videos::{
     CaptureClock, CaptureFormat, CaptureFormatPreference, CaptureIdentity, CaptureSession,
     CaptureTiming, ColorCamera, ColorMatrix, ColorProperties, ColorRange,
 };
-use a2a_lab_dev_kit::{A2aLabError, MJPEG_MEDIA_TYPE, MemoryVideos, VideoSource, VideoSourceId};
+use a2a_lab_dev_kit::{
+    A2aLabError, FrameDecisionLedgerProvider, MJPEG_MEDIA_TYPE, MemoryVideos, VideoSource,
+    VideoSourceId,
+};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 
 use crate::camera::{remember_camera_frame, remember_external_frame};
 use crate::images::jpeg_dimensions;
-use crate::videos::dvr::{IndexedVideoDvr, VideoDvrCatalog, VideoDvrMaintenance};
+use crate::lab_config::ResolvedSemanticIndexing;
+use crate::videos::dvr::{
+    DvrFrameDecisionLedger, IndexedVideoDvr, VideoDvrAnnotationQueue, VideoDvrCatalog,
+    VideoDvrDecisionEvaluationQueue, VideoDvrMaintenance,
+};
 use crate::videos::external::{LiveJpegSource, frame_budget};
 use crate::videos::h264::H264Encoder;
 use crate::videos::nokhwa_camera::NokhwaColorCamera;
 use crate::videos::raw_jpeg::captured_frame_jpeg;
+use crate::videos::semantic_indexing::{
+    SemanticServeBundle, SemanticServeInjections, prepare_semantic_serve_bundle,
+};
 use crate::videos::source::{
     LiveCameraInputFormat, LiveVideoDelivery, LiveVideoSourceDescriptor, validate_live_sources,
 };
@@ -28,6 +39,11 @@ pub struct LiveVideoCatalog {
     inner: VideoDvrCatalog,
     #[allow(dead_code)] // keeps periodic cleanup alive until catalog drop
     maintenance: Option<VideoDvrMaintenance>,
+    #[allow(dead_code)] // keeps background reconcile alive until catalog drop
+    annotation: VideoDvrAnnotationQueue,
+    #[allow(dead_code)]
+    decision_evaluation: VideoDvrDecisionEvaluationQueue,
+    semantic: SemanticServeBundle,
     stop: watch::Sender<bool>,
 }
 
@@ -41,6 +57,22 @@ impl LiveVideoCatalog {
     #[must_use]
     pub fn dvr(&self) -> &IndexedVideoDvr {
         self.inner.dvr()
+    }
+
+    /// SQLite-backed Jev decision ledger when semantic indexing is enabled.
+    pub fn frame_decision_ledger(
+        &self,
+    ) -> Result<Option<Arc<dyn FrameDecisionLedgerProvider>>, A2aLabError> {
+        if self.semantic.search.is_none() {
+            return Ok(None);
+        }
+        DvrFrameDecisionLedger::pilot_authorized_producer(Arc::new(self.inner.dvr().clone()))
+            .map(|ledger| Some(ledger as Arc<dyn FrameDecisionLedgerProvider>))
+    }
+
+    #[must_use]
+    pub fn semantic_bundle(&self) -> &SemanticServeBundle {
+        &self.semantic
     }
 
     /// Stops capture threads and releases native sessions on drop.
@@ -158,11 +190,45 @@ pub async fn start_live_video_catalog(
     disk_retention_secs: u64,
     disk_root: &Path,
     max_bytes: u64,
+    injections: LiveVideoInjections,
+) -> Result<LiveVideoCatalog, A2aLabError> {
+    start_live_video_catalog_with_semantic(
+        sources,
+        fps,
+        live_retention_secs,
+        disk_retention_secs,
+        disk_root,
+        max_bytes,
+        injections,
+        None,
+        SemanticServeInjections::default(),
+    )
+    .await
+}
+
+/// Starts live capture and optionally wires semantic workers before pumps run.
+pub async fn start_live_video_catalog_with_semantic(
+    sources: &[LiveVideoSourceDescriptor],
+    fps: u32,
+    live_retention_secs: u64,
+    disk_retention_secs: u64,
+    disk_root: &Path,
+    max_bytes: u64,
     mut injections: LiveVideoInjections,
+    semantic: Option<&ResolvedSemanticIndexing>,
+    semantic_injections: SemanticServeInjections,
 ) -> Result<LiveVideoCatalog, A2aLabError> {
     validate_live_sources(sources)?;
     let live = MemoryVideos::new();
     let dvr = IndexedVideoDvr::open(disk_root, disk_retention_secs).await?;
+    let semantic_bundle = match semantic {
+        Some(settings) => {
+            prepare_semantic_serve_bundle(settings, &dvr, &semantic_injections).await?
+        }
+        None => SemanticServeBundle::empty(),
+    };
+    let annotation_worker = semantic_bundle.worker.clone();
+    let decision_worker = semantic_bundle.decision_worker.clone();
     let inner = VideoDvrCatalog::open(live, dvr, Duration::from_secs(60))?;
     for source in sources {
         let source_id = VideoSourceId::new(&source.id)?;
@@ -183,6 +249,18 @@ pub async fn start_live_video_catalog(
         Some(inner.maintain_disk())
     };
     let (stop, rx) = watch::channel(false);
+    let annotation = inner.maintain_annotation_jobs(rx.clone(), annotation_worker);
+    if let Some((coverage, reason)) = semantic_bundle.decision_unavailable {
+        let now_us = crate::time::now()?.as_micros();
+        let closed = inner
+            .dvr()
+            .mark_decision_evaluation_jobs_unavailable(coverage, reason, now_us)
+            .await?;
+        if closed > 0 {
+            eprintln!("video DVR: Jev unavailable; closed {closed} decision jobs as {reason}");
+        }
+    }
+    let decision_evaluation = inner.maintain_decision_evaluation_jobs(rx.clone(), decision_worker);
     let retain_us =
         i64::try_from(live_retention_secs.saturating_mul(1_000_000)).unwrap_or(i64::MAX);
     let frame_period_us = 1_000_000u64 / u64::from(fps.max(1));
@@ -206,6 +284,9 @@ pub async fn start_live_video_catalog(
     Ok(LiveVideoCatalog {
         inner,
         maintenance,
+        annotation,
+        decision_evaluation,
+        semantic: semantic_bundle,
         stop,
     })
 }
@@ -803,7 +884,10 @@ fn wait(stop: &mut watch::Receiver<bool>, wait: Duration) -> bool {
 mod tests {
     use std::time::Instant;
 
-    use super::{DISK_DROP_REPORT_INTERVAL, DiskDropLog};
+    use a2a_lab_dev_kit::VideoSourceId;
+    use tokio::sync::mpsc;
+
+    use super::{DISK_DROP_REPORT_INTERVAL, DiskDropLog, DiskJob, queue_disk};
 
     #[test]
     fn disk_drop_reports_are_source_scoped_and_rate_limited() {
@@ -835,5 +919,25 @@ mod tests {
             .observe(later + DISK_DROP_REPORT_INTERVAL, false)
             .unwrap();
         assert!(external_again.contains("dropped 2 frames"));
+    }
+
+    #[tokio::test]
+    async fn dropped_disk_queue_jobs_never_reach_dvr_append() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let source = VideoSourceId::new("camera").unwrap();
+        let capture = crate::time::now().unwrap();
+        let first = DiskJob::mjpeg(
+            source.clone(),
+            capture,
+            1_000_000,
+            vec![0xFF, 0xD8, 0x01, 0xD9],
+        );
+        let second = DiskJob::mjpeg(source, capture, 1_000_000, vec![0xFF, 0xD8, 0x02, 0xD9]);
+        let mut drops = DiskDropLog::new("camera");
+        queue_disk(&tx, first, &mut drops);
+        queue_disk(&tx, second, &mut drops);
+        let received = rx.recv().await.unwrap();
+        assert!(matches!(received, DiskJob::Mjpeg { .. }));
+        assert!(rx.try_recv().is_err() || drops.dropped >= 1);
     }
 }
