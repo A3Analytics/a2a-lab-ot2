@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use a2a_lab_dev_kit::{
     FrameDescriptionProvider, FrameDescriptionRequest, LoadedLabConfig, SemanticIndexingConfig,
-    TextEmbeddingKey, TextEmbeddingProvider, TextEmbeddingRequest,
-    validate_description_batch, validate_embedding_batch,
+    TextEmbeddingKey, TextEmbeddingProvider, TextEmbeddingRequest, validate_description_batch,
+    validate_embedding_batch,
 };
 use serde::Serialize;
 

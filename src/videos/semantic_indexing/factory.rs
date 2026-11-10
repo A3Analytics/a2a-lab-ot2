@@ -16,6 +16,7 @@ use super::description::LunaFrameDescriptionProvider;
 use super::embedding::ConfiguredTextEmbeddingProvider;
 use super::limits::{frame_description_limits, text_embedding_limits};
 use super::media::FrameDescriptionMedia;
+use crate::videos::dvr::DvrSearchEmbedder;
 
 /// Whether adapters call external inference APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,15 @@ pub async fn build_semantic_indexing_providers<M: FrameDescriptionMedia + 'stati
     }
 }
 
+/// Deterministic query embedder for DVR semantic search.
+pub async fn build_deterministic_search_embedder(
+    semantic: &SemanticIndexingConfig,
+) -> Result<DvrSearchEmbedder, a2a_lab_dev_kit::A2aLabError> {
+    Ok(DvrSearchEmbedder::Deterministic(Arc::new(
+        build_deterministic_providers(semantic).await?.embedding,
+    )))
+}
+
 /// Deterministic provider pair for tests and CI.
 pub async fn build_deterministic_providers(
     semantic: &SemanticIndexingConfig,
@@ -54,7 +64,10 @@ pub async fn build_deterministic_providers(
 > {
     let description_config = description_provider_config(&semantic.description)?;
     let embeddings = semantic.embeddings.as_ref().ok_or_else(|| {
-        a2a_lab_dev_kit::A2aLabError::invalid("semantic_indexing.embeddings", "embeddings are disabled")
+        a2a_lab_dev_kit::A2aLabError::invalid(
+            "semantic_indexing.embeddings",
+            "embeddings are disabled",
+        )
     })?;
     let embedding_config = embedding_provider_config(embeddings)?;
     let description_limits = frame_description_limits(&semantic.limits);
@@ -84,7 +97,10 @@ pub async fn build_deterministic_providers_for_source(
     let description_config =
         description_provider_config_for_model(&semantic.description, schedule.description_model())?;
     let embeddings = semantic.embeddings.as_ref().ok_or_else(|| {
-        a2a_lab_dev_kit::A2aLabError::invalid("semantic_indexing.embeddings", "embeddings are disabled")
+        a2a_lab_dev_kit::A2aLabError::invalid(
+            "semantic_indexing.embeddings",
+            "embeddings are disabled",
+        )
     })?;
     let embedding_config =
         embedding_provider_config_for_model(embeddings, schedule.embedding_model())?;
@@ -124,7 +140,10 @@ pub async fn build_live_providers<M: FrameDescriptionMedia + Send + Sync + 'stat
 > {
     let description_config = description_provider_config(&semantic.description)?;
     let embeddings = semantic.embeddings.as_ref().ok_or_else(|| {
-        a2a_lab_dev_kit::A2aLabError::invalid("semantic_indexing.embeddings", "embeddings are disabled")
+        a2a_lab_dev_kit::A2aLabError::invalid(
+            "semantic_indexing.embeddings",
+            "embeddings are disabled",
+        )
     })?;
     let embedding_config = embedding_provider_config(embeddings)?;
     let description_limits = frame_description_limits(&semantic.limits);
@@ -159,7 +178,10 @@ pub async fn build_live_providers_for_source<M: FrameDescriptionMedia + Send + S
     let description_config =
         description_provider_config_for_model(&semantic.description, schedule.description_model())?;
     let embeddings = semantic.embeddings.as_ref().ok_or_else(|| {
-        a2a_lab_dev_kit::A2aLabError::invalid("semantic_indexing.embeddings", "embeddings are disabled")
+        a2a_lab_dev_kit::A2aLabError::invalid(
+            "semantic_indexing.embeddings",
+            "embeddings are disabled",
+        )
     })?;
     let embedding_config =
         embedding_provider_config_for_model(embeddings, schedule.embedding_model())?;

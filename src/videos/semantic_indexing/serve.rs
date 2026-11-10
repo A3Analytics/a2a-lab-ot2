@@ -9,15 +9,16 @@ use a2a_lab_dev_kit::{
 
 use super::factory::{
     build_deterministic_description_provider, build_deterministic_providers,
-    build_deterministic_providers_for_source, build_live_description_provider,
-    build_live_providers, build_live_providers_for_source,
+    build_deterministic_providers_for_source, build_deterministic_search_embedder,
+    build_live_description_provider, build_live_providers, build_live_providers_for_source,
 };
 use super::media::EvidenceJpegMedia;
 use crate::lab_config::ResolvedSemanticIndexing;
 use crate::videos::dvr::{
     AnnotationQueueWorker, AnyDecisionEvaluationWorker, AnyIndexingAnnotationWorker,
-    DecisionEvaluationQueueWorker, DeterministicIndexingWorker, DvrSemanticSearchProvider,
-    IndexedSourceFilter, IndexedVideoDvr, IndexingWorkerFaults, LiveIndexingWorker,
+    DecisionEvaluationQueueWorker, DeterministicIndexingWorker, DvrSearchEmbedder,
+    DvrSemanticSearchProvider, IndexedSourceFilter, IndexedVideoDvr, IndexingWorkerFaults,
+    LiveIndexingWorker,
 };
 use crate::videos::semantic_indexing::{build_live_decision_worker, jev_live_worker_enabled};
 
@@ -26,6 +27,7 @@ use crate::videos::semantic_indexing::{build_live_decision_worker, jev_live_work
 pub struct SemanticServeInjections {
     pub worker: Option<AnnotationQueueWorker>,
     pub search: Option<Arc<dyn SemanticVideoSearchProvider>>,
+    pub search_embedder: Option<DvrSearchEmbedder>,
     pub force_deterministic_worker: bool,
     pub decision_worker: Option<DecisionEvaluationQueueWorker>,
     pub force_deterministic_decision_worker: bool,
@@ -68,9 +70,25 @@ pub async fn prepare_semantic_serve_bundle(
     let search = if semantic.config.embeddings.is_none() {
         None
     } else {
-        Some(match injections.search.clone() {
-            Some(provider) => provider,
-            None => Arc::new(DvrSemanticSearchProvider::new(dvr.clone(), semantic)?),
+        Some(if let Some(provider) = injections.search.clone() {
+            provider
+        } else {
+            let embedder = match injections.search_embedder.clone() {
+                Some(embedder) => embedder,
+                None => {
+                    prepare_search_embedder(
+                        &semantic.config,
+                        dvr,
+                        injections.force_deterministic_worker,
+                    )
+                    .await?
+                }
+            };
+            Arc::new(DvrSemanticSearchProvider::new(
+                dvr.clone(),
+                semantic,
+                embedder,
+            )?)
         })
     };
 
@@ -266,6 +284,20 @@ async fn build_live_worker(
 fn live_indexing_enabled() -> bool {
     std::env::var("A2ALAB_SEMANTIC_INDEXING_LIVE")
         .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
+}
+
+async fn prepare_search_embedder(
+    semantic: &SemanticIndexingConfig,
+    dvr: &IndexedVideoDvr,
+    force_deterministic: bool,
+) -> Result<DvrSearchEmbedder, A2aLabError> {
+    if force_deterministic || !live_indexing_enabled() {
+        return build_deterministic_search_embedder(semantic).await;
+    }
+    let media = Arc::new(EvidenceJpegMedia::new(Arc::new(dvr.clone())));
+    Ok(DvrSearchEmbedder::Live(Arc::new(
+        build_live_providers(semantic, media).await?.embedding,
+    )))
 }
 
 fn prepare_decision_evaluation_worker(

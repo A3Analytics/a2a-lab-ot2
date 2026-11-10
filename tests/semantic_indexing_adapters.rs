@@ -59,7 +59,7 @@ fn luna_defaults_match_agent_constants_independent_of_chat() {
     assert_eq!(bedrock.model(), DEFAULT_BEDROCK_DESCRIPTION_MODEL);
 
     let openai_doc = format!(
-        r#"{{"schema_version":2,"chat":{{"provider":"openai","model":"chat-only"}},"semantic_indexing":{{"description":{{"provider":"openai"}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
+        r#"{{"schema_version":2,"chat":{{"provider":"openai","model":"chat-only"}},"semantic_indexing":{{"description":{{"provider":"openai"}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine"}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
     );
     let semantic = semantic_config(&openai_doc);
     let description = description_provider_config(&semantic.description).unwrap();
@@ -70,7 +70,7 @@ fn luna_defaults_match_agent_constants_independent_of_chat() {
 #[test]
 fn explicit_description_model_override_is_recorded() {
     let document = format!(
-        r#"{{"schema_version":2,"semantic_indexing":{{"description":{{"provider":"bedrock","model":"custom-luna"}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
+        r#"{{"schema_version":2,"semantic_indexing":{{"description":{{"provider":"bedrock","model":"custom-luna"}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine"}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
     );
     let semantic = semantic_config(&document);
     let config = description_provider_config(&semantic.description).unwrap();
@@ -81,7 +81,7 @@ fn explicit_description_model_override_is_recorded() {
 #[tokio::test]
 async fn source_model_overrides_wire_independent_deterministic_providers() {
     let document = format!(
-        r#"{{"schema_version":2,"videos":{{"sources":[{{"id":"camera","format":"mjpeg","device_index":1,"semantic_indexing":{{"description":"5s","description_model":"luna-camera","embeddings":"1m","embedding_model":"embed-camera"}}}},{{"id":"external-camera","format":"mjpeg","device_index":2,"semantic_indexing":{{"description":"1.5s","description_model":"luna-external","embeddings":"5s","embedding_model":"embed-external"}}}}]}},"semantic_indexing":{{"embeddings":{{"provider":"bedrock","model":"global-embed","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
+        r#"{{"schema_version":2,"videos":{{"sources":[{{"id":"camera","format":"mjpeg","device_index":1,"semantic_indexing":{{"description":"5s","description_model":"luna-camera","embeddings":"1m","embedding_model":"embed-camera"}}}},{{"id":"external-camera","format":"mjpeg","device_index":2,"semantic_indexing":{{"description":"1.5s","description_model":"luna-external","embeddings":"5s","embedding_model":"embed-external"}}}}]}},"semantic_indexing":{{"embeddings":{{"provider":"bedrock","model":"global-embed","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine"}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
     );
     let config = A2aLabConfig::parse(&document).unwrap();
     let semantic = config.semantic_indexing.unwrap();
@@ -107,7 +107,7 @@ async fn source_model_overrides_wire_independent_deterministic_providers() {
 #[tokio::test]
 async fn deterministic_factory_round_trip_carries_provenance() {
     let document = format!(
-        r#"{{"schema_version":2,"semantic_indexing":{{"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
+        r#"{{"schema_version":2,"semantic_indexing":{{"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine"}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
     );
     let semantic = semantic_config(&document);
     let media = Arc::new(InjectedDescriptionMedia::new());
@@ -197,10 +197,11 @@ async fn embedding_maps_text_into_configured_space() {
 #[tokio::test]
 async fn cancelled_embedding_provider_reports_cancelled() {
     let document = format!(
-        r#"{{"schema_version":2,"semantic_indexing":{{"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
+        r#"{{"schema_version":2,"semantic_indexing":{{"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine"}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
     );
     let semantic = semantic_config(&document);
-    let embedding_config = embedding_provider_config(semantic.embeddings.as_ref().unwrap()).unwrap();
+    let embedding_config =
+        embedding_provider_config(semantic.embeddings.as_ref().unwrap()).unwrap();
     let provider = FakeTextEmbeddingProvider::new(
         embedding_config,
         TextEmbeddingLimits::pilot(),

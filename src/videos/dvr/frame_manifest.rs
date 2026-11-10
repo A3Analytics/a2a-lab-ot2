@@ -1,14 +1,13 @@
 //! Semantic frame manifest persisted beside the indexed DVR SQLite store.
 
 use a2a_lab_dev_kit::{
-    A2aLabError, DvrStoreNamespace, DvrTrackId, FrameDescriptionProvenance, Page, SavedFrameRef,
-    Sha256Digest, TextEmbeddingProvenance, TimeRange, UtcTimestamp, VideoSourceId,
+    A2aLabError, DvrStoreNamespace, DvrTrackId, FrameDescriptionProvenance, FrameEmbeddingVector,
+    FrameVectorIndexAttachment, ModelSpaceIdentity, Page, SavedFrameRef, Sha256Digest,
+    TextEmbeddingProvenance, TimeRange, UtcTimestamp, VideoSourceId,
 };
 use sqlx::Row;
 use sqlx::{Sqlite, Transaction};
 
-use super::chunk::crc32;
-use super::indexing_registration;
 use super::store::{IndexedVideoDvr, db_error};
 
 /// Default DVR store namespace for semantic manifest rows in this agent.
@@ -96,6 +95,24 @@ pub struct ListManifestFramesRequest {
     window: Option<TimeRange>,
     current_search_only: bool,
     page: ManifestPageRequest,
+}
+
+/// Ready searchable revisions compatible with one provenance selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestSearchCandidateFilter {
+    /// Required Luna description generation.
+    pub description_generation: u64,
+    /// Active embedding model space.
+    pub model_space: ModelSpaceIdentity,
+}
+
+/// One bounded scan of manifest rows considered before vector ranking.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestSearchCandidateScan {
+    /// Loaded revisions in deterministic capture order.
+    pub records: Vec<SemanticFrameManifestRecord>,
+    /// When true, additional ready rows exist beyond the scan limit.
+    pub truncated: bool,
 }
 
 impl ListManifestFramesRequest {
@@ -228,15 +245,21 @@ impl StoredFrameDescription {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredFrameEmbedding {
     provenance: TextEmbeddingProvenance,
+    vector: Option<FrameEmbeddingVector>,
 }
 
 impl StoredFrameEmbedding {
     #[must_use]
     pub const fn provenance(&self) -> &TextEmbeddingProvenance {
         &self.provenance
+    }
+
+    #[must_use]
+    pub const fn vector(&self) -> Option<&FrameEmbeddingVector> {
+        self.vector.as_ref()
     }
 }
 
@@ -322,20 +345,45 @@ impl IndexedVideoDvr {
             .await
     }
 
-    /// Persists text-embedding provenance and marks the embedding checkpoint.
+    /// Persists validated text-embedding provenance, vector payload, and checkpoint.
     pub async fn upsert_frame_embedding(
         &self,
         frame: &SavedFrameRef,
+        model_space: &ModelSpaceIdentity,
         provenance: &TextEmbeddingProvenance,
+        vector: &FrameEmbeddingVector,
         checkpoint: IndexingCheckpoint,
     ) -> Result<(), A2aLabError> {
+        if checkpoint == IndexingCheckpoint::Ready {
+            let description = self
+                .load_description(frame.frame_id().as_str())
+                .await?
+                .ok_or_else(|| {
+                    A2aLabError::invalid(
+                        "description",
+                        "ready embedding requires persisted description",
+                    )
+                })?;
+            FrameVectorIndexAttachment::new(
+                model_space.clone(),
+                description.provenance().clone(),
+                provenance.clone(),
+                vector.clone(),
+            )?;
+        } else if !provenance.matches_model_space(model_space) {
+            return Err(A2aLabError::invalid(
+                "embedding",
+                "provenance does not match the declared model space",
+            ));
+        }
         self.require_manifest_frame(frame.frame_id().as_str())
             .await?;
+        let blob = encode_embedding_vector(vector);
         sqlx::query(
             "INSERT INTO semantic_frame_embeddings (
                 frame_id, embedding_provider, embedding_model, dimensions, normalization, metric,
-                embedding_generation, model_space_generation, source_text_hash
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                embedding_generation, model_space_generation, source_text_hash, embedding_vector
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(frame_id) DO UPDATE SET
                 embedding_provider = excluded.embedding_provider,
                 embedding_model = excluded.embedding_model,
@@ -344,7 +392,8 @@ impl IndexedVideoDvr {
                 metric = excluded.metric,
                 embedding_generation = excluded.embedding_generation,
                 model_space_generation = excluded.model_space_generation,
-                source_text_hash = excluded.source_text_hash",
+                source_text_hash = excluded.source_text_hash,
+                embedding_vector = excluded.embedding_vector",
         )
         .bind(frame.frame_id().as_str())
         .bind(provenance.provider())
@@ -353,13 +402,83 @@ impl IndexedVideoDvr {
         .bind(normalization_label(provenance.normalization()))
         .bind(metric_label(provenance.metric()))
         .bind(i64::try_from(provenance.generation().get()).unwrap_or(i64::MAX))
-        .bind(i64::try_from(provenance.generation().get()).unwrap_or(i64::MAX))
+        .bind(i64::try_from(model_space.generation().get()).unwrap_or(i64::MAX))
         .bind(provenance.source_text_hash().as_str())
+        .bind(blob)
         .execute(self.sqlite_pool())
         .await
         .map_err(db_error)?;
         self.set_embedding_checkpoint(frame.frame_id().as_str(), checkpoint)
             .await
+    }
+
+    /// Lists ready searchable revisions for semantic ranking scans.
+    pub async fn scan_semantic_search_candidates(
+        &self,
+        source_id: &str,
+        range_start_us: i64,
+        range_end_us: i64,
+        filter: &ManifestSearchCandidateFilter,
+        scan_limit: u32,
+    ) -> Result<ManifestSearchCandidateScan, A2aLabError> {
+        if scan_limit == 0 {
+            return Err(A2aLabError::invalid(
+                "candidate_limit",
+                "must be greater than zero",
+            ));
+        }
+        let space = &filter.model_space;
+        let generation = i64::try_from(filter.description_generation).unwrap_or(i64::MAX);
+        let space_generation = i64::try_from(space.generation().get()).unwrap_or(i64::MAX);
+        let fetch_limit = i64::from(scan_limit.saturating_add(1));
+        let rows = sqlx::query(
+            "SELECT rev.frame_id, rev.store_namespace, rev.source_id, rev.track_id, rev.start_us,
+                    rev.end_us, rev.payload_sha256, rev.payload_crc32, rev.capture_group,
+                    rev.retained_state, rev.search_current, rev.revision_seq,
+                    rev.description_checkpoint, rev.embedding_checkpoint
+             FROM semantic_frame_revisions rev
+             INNER JOIN semantic_frame_descriptions desc ON desc.frame_id = rev.frame_id
+             INNER JOIN semantic_frame_embeddings emb ON emb.frame_id = rev.frame_id
+             WHERE rev.source_id = ?1
+               AND rev.start_us >= ?2
+               AND rev.start_us < ?3
+               AND rev.search_current = 1
+               AND rev.retained_state = 'retained'
+               AND rev.description_checkpoint = 'ready'
+               AND rev.embedding_checkpoint = 'ready'
+               AND desc.description_generation = ?4
+               AND emb.embedding_provider = ?5
+               AND emb.embedding_model = ?6
+               AND emb.dimensions = ?7
+               AND emb.normalization = ?8
+               AND emb.metric = ?9
+               AND emb.model_space_generation = ?10
+               AND emb.embedding_vector IS NOT NULL
+               AND length(emb.embedding_vector) > 0
+             ORDER BY rev.start_us ASC, rev.frame_id ASC
+             LIMIT ?11",
+        )
+        .bind(source_id)
+        .bind(range_start_us)
+        .bind(range_end_us)
+        .bind(generation)
+        .bind(space.provider())
+        .bind(space.model())
+        .bind(i64::from(space.dimensions()))
+        .bind(normalization_label(space.normalization()))
+        .bind(metric_label(space.metric()))
+        .bind(space_generation)
+        .bind(fetch_limit)
+        .fetch_all(self.sqlite_pool())
+        .await
+        .map_err(db_error)?;
+        let scan_usize = usize::try_from(scan_limit).unwrap_or(usize::MAX);
+        let truncated = rows.len() > scan_usize;
+        let mut records = Vec::new();
+        for row in rows.iter().take(scan_usize) {
+            records.push(self.record_from_row(row).await?);
+        }
+        Ok(ManifestSearchCandidateScan { records, truncated })
     }
 
     /// Lists manifest revisions with deterministic keyset paging.
@@ -469,12 +588,6 @@ impl IndexedVideoDvr {
                 registered_at.as_micros(),
             )
             .await?;
-        indexing_registration::commit_indexing_job_tx(
-            &mut tx,
-            frame.frame_id().as_str(),
-            registered_at.as_micros(),
-        )
-        .await?;
         tx.commit().await.map_err(db_error)?;
         Ok(outcome)
     }
@@ -582,38 +695,8 @@ impl IndexedVideoDvr {
         track_id: &DvrTrackId,
         start_us: UtcTimestamp,
     ) -> Result<(Vec<u8>, u32, UtcTimestamp), A2aLabError> {
-        let row = sqlx::query(
-            "SELECT end_us, chunk_relpath, payload_offset, payload_length, payload_crc32
-             FROM dvr_frames
-             WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3 AND payload_ready = 1",
-        )
-        .bind(source_id.as_str())
-        .bind(track_id.as_str())
-        .bind(start_us.as_micros())
-        .fetch_optional(self.sqlite_pool())
-        .await
-        .map_err(db_error)?;
-        let Some(row) = row else {
-            return Err(A2aLabError::not_found(
-                "DVR frame",
-                format!("{source_id}/{track_id}/{start_us}"),
-            ));
-        };
-        let end_us: i64 = row.try_get("end_us").map_err(db_error)?;
-        let chunk_relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
-        let offset: i64 = row.try_get("payload_offset").map_err(db_error)?;
-        let length: i64 = row.try_get("payload_length").map_err(db_error)?;
-        let expected_crc: i64 = row.try_get("payload_crc32").map_err(db_error)?;
-        let bytes = self
-            .load_chunk_payload(
-                &chunk_relpath,
-                u64::try_from(offset.max(0)).unwrap_or(0),
-                u64::try_from(length.max(0)).unwrap_or(0),
-                u32::try_from(expected_crc.max(0)).unwrap_or(0),
-            )
-            .await?;
-        let crc = crc32(&bytes);
-        Ok((bytes, crc, crate::time::from_unix_microseconds(end_us)?))
+        self.load_retained_payload_at_key(source_id, track_id, start_us)
+            .await
     }
 
     async fn record_from_row(
@@ -661,34 +744,11 @@ impl IndexedVideoDvr {
         frame: &SavedFrameRef,
         search_current: bool,
     ) -> Result<MediaPayloadStatus, A2aLabError> {
-        let row = sqlx::query(
-            "SELECT chunk_relpath, payload_offset, payload_length, payload_crc32
-             FROM dvr_frames
-             WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3 AND payload_ready = 1",
-        )
-        .bind(frame.source_id().as_str())
-        .bind(frame.track_id().as_str())
-        .bind(frame.captured_at().as_micros())
-        .fetch_optional(self.sqlite_pool())
-        .await
-        .map_err(db_error)?;
-        let Some(row) = row else {
-            return Ok(MediaPayloadStatus::Missing);
-        };
-        let chunk_relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
-        let offset: i64 = row.try_get("payload_offset").map_err(db_error)?;
-        let length: i64 = row.try_get("payload_length").map_err(db_error)?;
-        let expected_crc: i64 = row.try_get("payload_crc32").map_err(db_error)?;
-        let read = self
-            .load_chunk_payload(
-                &chunk_relpath,
-                u64::try_from(offset.max(0)).unwrap_or(0),
-                u64::try_from(length.max(0)).unwrap_or(0),
-                u32::try_from(expected_crc.max(0)).unwrap_or(0),
-            )
-            .await;
-        let bytes = match read {
-            Ok(bytes) => bytes,
+        let bytes = match self
+            .load_retained_payload_at_key(frame.source_id(), frame.track_id(), frame.captured_at())
+            .await
+        {
+            Ok((payload, _, _)) => payload,
             Err(error) => {
                 let message = error.to_string();
                 if message.contains("checksum mismatch") {
@@ -697,10 +757,6 @@ impl IndexedVideoDvr {
                 return Ok(MediaPayloadStatus::Missing);
             }
         };
-        let crc = crc32(&bytes);
-        if crc != u32::try_from(expected_crc.max(0)).unwrap_or(0) {
-            return Ok(MediaPayloadStatus::Corrupt);
-        }
         let digest = Sha256Digest::hash_bytes(&bytes);
         if digest != *frame.payload_digest() {
             return if search_current {
@@ -790,7 +846,7 @@ impl IndexedVideoDvr {
     ) -> Result<Option<StoredFrameEmbedding>, A2aLabError> {
         let row = sqlx::query(
             "SELECT embedding_provider, embedding_model, dimensions, normalization, metric,
-                    embedding_generation, source_text_hash
+                    embedding_generation, model_space_generation, source_text_hash, embedding_vector
              FROM semantic_frame_embeddings WHERE frame_id = ?1",
         )
         .bind(frame_id)
@@ -830,7 +886,16 @@ impl IndexedVideoDvr {
                     .as_str(),
             )?,
         )?;
-        Ok(Some(StoredFrameEmbedding { provenance }))
+        let dimensions = provenance.dimensions();
+        let vector = match row
+            .try_get::<Option<Vec<u8>>, _>("embedding_vector")
+            .map_err(db_error)?
+        {
+            None => None,
+            Some(bytes) if bytes.is_empty() => None,
+            Some(bytes) => Some(decode_embedding_vector(&bytes, dimensions)?),
+        };
+        Ok(Some(StoredFrameEmbedding { provenance, vector }))
     }
 
     pub(crate) async fn require_manifest_frame(&self, frame_id: &str) -> Result<(), A2aLabError> {
@@ -985,4 +1050,32 @@ fn parse_metric(value: &str) -> Result<a2a_lab_dev_kit::EmbeddingMetric, A2aLabE
         "euclidean" => Ok(a2a_lab_dev_kit::EmbeddingMetric::Euclidean),
         _ => Err(A2aLabError::invalid("metric", "unknown value")),
     }
+}
+
+fn encode_embedding_vector(vector: &FrameEmbeddingVector) -> Vec<u8> {
+    vector
+        .values()
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+fn decode_embedding_vector(
+    bytes: &[u8],
+    dimensions: u32,
+) -> Result<FrameEmbeddingVector, A2aLabError> {
+    let expected_bytes = usize::try_from(dimensions)
+        .map_err(|_| A2aLabError::invalid("dimensions", "vector dimension count overflowed usize"))?
+        .saturating_mul(std::mem::size_of::<f32>());
+    if bytes.len() != expected_bytes {
+        return Err(A2aLabError::invalid(
+            "embedding_vector",
+            format!("blob length must be {expected_bytes} bytes for {dimensions} dimensions"),
+        ));
+    }
+    let mut values = Vec::with_capacity(usize::try_from(dimensions).unwrap_or(0));
+    for chunk in bytes.as_chunks::<4>().0 {
+        values.push(f32::from_le_bytes(*chunk));
+    }
+    FrameEmbeddingVector::new(values, dimensions)
 }

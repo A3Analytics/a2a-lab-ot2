@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS semantic_frame_embeddings (
     embedding_generation INTEGER NOT NULL,
     model_space_generation INTEGER NOT NULL,
     source_text_hash TEXT NOT NULL,
+    embedding_vector BLOB,
     PRIMARY KEY (frame_id),
     FOREIGN KEY (frame_id) REFERENCES semantic_frame_revisions (frame_id)
 );

@@ -189,8 +189,7 @@ impl IndexedVideoDvr {
         .await
         .map_err(db_error)?;
         let next_due: i64 = row.try_get("next_due_us").map_err(db_error)?;
-        let last_selected: Option<i64> =
-            row.try_get("last_selected_start_us").map_err(db_error)?;
+        let last_selected: Option<i64> = row.try_get("last_selected_start_us").map_err(db_error)?;
         let selected = last_selected == Some(start_us) || start_us >= next_due;
         if selected && last_selected != Some(start_us) {
             sqlx::query(
@@ -263,8 +262,27 @@ impl IndexedVideoDvr {
     /// Counts jobs that are not terminal, for backlog limits.
     pub async fn count_active_indexing_jobs(&self) -> Result<u64, A2aLabError> {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM semantic_indexing_job_runtime
-             WHERE job_state NOT IN ('ready', 'terminal_failed', 'expired')",
+            "SELECT COUNT(*)
+             FROM semantic_indexing_job_runtime r
+             JOIN semantic_indexing_jobs j ON j.job_id = r.job_id
+             JOIN semantic_frame_revisions rev ON rev.frame_id = j.frame_id
+             WHERE rev.search_current = 1
+               AND rev.retained_state = 'retained'
+               AND r.job_state NOT IN ('terminal_failed', 'expired')
+               AND NOT (
+                 r.job_state = 'ready'
+                 AND rev.embedding_checkpoint = 'ready'
+                 AND EXISTS (
+                   SELECT 1 FROM semantic_frame_embeddings emb
+                   WHERE emb.frame_id = j.frame_id
+                     AND emb.model_space_generation = COALESCE(
+                       (SELECT model_space_generation FROM semantic_embedding_config_identity WHERE singleton_id = 1),
+                       0
+                     )
+                     AND emb.embedding_vector IS NOT NULL
+                     AND length(emb.embedding_vector) > 0
+                 )
+               )",
         )
         .fetch_one(self.sqlite_pool())
         .await
@@ -323,32 +341,32 @@ impl IndexedVideoDvr {
         lease_deadline_us: i64,
         now_us: i64,
     ) -> Result<Vec<IndexingJobRecord>, A2aLabError> {
-        let limit = i64::from(batch.max(1));
-        let candidates: Vec<(String, String)> = sqlx::query(
-            "SELECT j.job_id, j.frame_id
-             FROM semantic_indexing_jobs j
-             JOIN semantic_indexing_job_runtime r ON r.job_id = j.job_id
-             JOIN semantic_frame_revisions f ON f.frame_id = j.frame_id
-             WHERE f.search_current = 1
-               AND f.retained_state = 'retained'
-               AND r.job_state IN ('pending', 'retryable_failed', 'described')
-               AND r.next_retry_at_us <= ?1
-               AND (r.lease_expires_at_us IS NULL OR r.lease_expires_at_us < ?1)
-             ORDER BY j.created_at_us ASC, j.job_id ASC
-             LIMIT ?2",
-        )
-        .bind(now_us)
-        .bind(limit)
-        .fetch_all(self.sqlite_pool())
-        .await
-        .map_err(db_error)?
-        .into_iter()
-        .map(|row| {
-            let job_id: String = row.try_get("job_id").map_err(db_error)?;
-            let frame_id: String = row.try_get("frame_id").map_err(db_error)?;
-            Ok((job_id, frame_id))
-        })
-        .collect::<Result<Vec<_>, A2aLabError>>()?;
+        let batch = batch.max(1);
+        let backfill_reserve = usize::from(batch > 1);
+        let batch_usize = usize::try_from(batch).unwrap_or(usize::MAX);
+        let live_budget = batch_usize.saturating_sub(backfill_reserve);
+        let live_candidates = self
+            .indexing_job_claim_candidates(
+                super::indexing_registration::INDEXING_PRIORITY_LIVE,
+                live_budget,
+                now_us,
+            )
+            .await?;
+        let backfill_budget = batch_usize.saturating_sub(live_candidates.len());
+        let backfill_candidates = if backfill_budget == 0 {
+            Vec::new()
+        } else {
+            self.indexing_job_claim_candidates(
+                super::indexing_registration::INDEXING_PRIORITY_BACKFILL,
+                backfill_budget,
+                now_us,
+            )
+            .await?
+        };
+        let candidates: Vec<(String, String)> = live_candidates
+            .into_iter()
+            .chain(backfill_candidates)
+            .collect();
 
         let mut claimed = Vec::new();
         for (job_id, frame_id) in candidates {
@@ -360,6 +378,59 @@ impl IndexedVideoDvr {
             }
         }
         Ok(claimed)
+    }
+
+    async fn indexing_job_claim_candidates(
+        &self,
+        enqueue_priority: i32,
+        limit: usize,
+        now_us: i64,
+    ) -> Result<Vec<(String, String)>, A2aLabError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        sqlx::query(
+            "SELECT j.job_id, j.frame_id
+             FROM semantic_indexing_jobs j
+             JOIN semantic_indexing_job_runtime r ON r.job_id = j.job_id
+             JOIN semantic_frame_revisions f ON f.frame_id = j.frame_id
+             WHERE f.search_current = 1
+               AND f.retained_state = 'retained'
+               AND j.enqueue_priority = ?3
+               AND r.job_state IN ('pending', 'retryable_failed', 'described')
+               AND r.next_retry_at_us <= ?1
+               AND (r.lease_expires_at_us IS NULL OR r.lease_expires_at_us < ?1)
+               AND NOT (
+                 r.job_state = 'ready'
+                 AND f.embedding_checkpoint = 'ready'
+                 AND EXISTS (
+                   SELECT 1 FROM semantic_frame_embeddings emb
+                   WHERE emb.frame_id = j.frame_id
+                     AND emb.model_space_generation = COALESCE(
+                       (SELECT model_space_generation FROM semantic_embedding_config_identity WHERE singleton_id = 1),
+                       0
+                     )
+                     AND emb.embedding_vector IS NOT NULL
+                     AND length(emb.embedding_vector) > 0
+                 )
+               )
+             ORDER BY j.created_at_us ASC, j.job_id ASC
+             LIMIT ?2",
+        )
+        .bind(now_us)
+        .bind(limit)
+        .bind(i64::from(enqueue_priority))
+        .fetch_all(self.sqlite_pool())
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .map(|row| {
+            let job_id: String = row.try_get("job_id").map_err(db_error)?;
+            let frame_id: String = row.try_get("frame_id").map_err(db_error)?;
+            Ok((job_id, frame_id))
+        })
+        .collect()
     }
 
     pub(crate) async fn try_claim_one_job(
@@ -449,7 +520,7 @@ impl IndexedVideoDvr {
         Ok(true)
     }
 
-    /// Marks embedding provenance committed; transitions to ready (vector backend out of scope).
+    /// Marks embedding provenance and vector payload committed; transitions to ready.
     pub async fn complete_indexing_embedding_cas(
         &self,
         job_id: &str,

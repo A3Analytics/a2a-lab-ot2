@@ -22,7 +22,7 @@ use super::chunk::{
 };
 use super::coverage::IntervalFold;
 use super::frame_manifest::DEFAULT_SEMANTIC_STORE_NAMESPACE;
-use super::indexing_registration::{SaveFaults, commit_indexing_job_tx};
+use super::indexing_registration::{INDEXING_PRIORITY_LIVE, SaveFaults, commit_indexing_job_tx};
 use super::indexing_scope::IndexedSourceFilter;
 
 const SCHEMA: &str = include_str!("../../../migrations/004_video_dvr.sql");
@@ -40,6 +40,10 @@ const SCHEMA_SEMANTIC_STAGE_SCHEDULES: &str =
     include_str!("../../../migrations/012_semantic_stage_schedules.sql");
 const SCHEMA_EMBEDDING_CONFIG_IDENTITY: &str =
     include_str!("../../../migrations/013_embedding_config_identity.sql");
+const SCHEMA_INDEXING_JOB_PRIORITY: &str =
+    include_str!("../../../migrations/014_semantic_indexing_job_priority.sql");
+const SCHEMA_EMBEDDING_CONFIG_GENERATION: &str =
+    include_str!("../../../migrations/015_embedding_config_generation.sql");
 
 /// Default root directory for indexed video payloads and SQLite index.
 pub const DEFAULT_VIDEO_DVR_ROOT: &str = ".a2a-lab-ot2/video-dvr";
@@ -61,21 +65,24 @@ pub struct IndexedVideoDvr {
 }
 
 impl IndexedVideoDvr {
-    /// Persists the active embedding space and invalidates only stale vectors.
+    /// Persists the active embedding model space and schedules re-embedding when it changes.
     pub async fn sync_embedding_config(
         &self,
         config: &a2a_lab_dev_kit::SemanticEmbeddingsConfig,
     ) -> Result<bool, A2aLabError> {
+        let model_space = config.model_space_identity()?;
         let space = config.space();
         let identity = format!(
-            "{}|{}|{}|{:?}|{:?}",
-            config.provider(),
-            config.model(),
+            "{}|{}|{}|{:?}|{:?}|{}",
+            model_space.provider(),
+            model_space.model(),
             space.dimensions,
             space.normalization,
-            space.metric
+            space.metric,
+            model_space.generation().get()
         );
         let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+        let generation = i64::try_from(model_space.generation().get()).unwrap_or(i64::MAX);
         let prior: Option<String> = sqlx::query_scalar(
             "SELECT config_digest FROM semantic_embedding_config_identity WHERE singleton_id = 1",
         )
@@ -87,45 +94,185 @@ impl IndexedVideoDvr {
         }
         let now_us = crate::time::now()?.as_micros();
         let mut tx = self.pool.begin().await.map_err(db_error)?;
-        sqlx::query(
-            "INSERT INTO semantic_embedding_config_identity
-             (singleton_id, provider, model, dimensions, normalization, metric, config_digest, updated_at_us)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(singleton_id) DO UPDATE SET provider=excluded.provider,
-               model=excluded.model, dimensions=excluded.dimensions,
-               normalization=excluded.normalization, metric=excluded.metric,
-               config_digest=excluded.config_digest, updated_at_us=excluded.updated_at_us",
-        )
-        .bind(config.provider())
-        .bind(config.model())
-        .bind(i64::from(space.dimensions))
-        .bind(format!("{:?}", space.normalization))
-        .bind(format!("{:?}", space.metric))
-        .bind(&digest)
-        .bind(now_us)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_error)?;
         if prior.is_some() {
-            sqlx::query(
-                "UPDATE semantic_frame_revisions
-                 SET embedding_checkpoint = 'pending'
-                 WHERE search_current = 1 AND retained_state = 'retained'",
+            self.wipe_retained_embedding_vectors_tx(&mut tx).await?;
+            self.persist_embedding_config_identity_tx(
+                &mut tx,
+                &model_space,
+                space,
+                generation,
+                &digest,
+                now_us,
             )
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
-            sqlx::query(
-                "UPDATE semantic_indexing_job_runtime
-                 SET job_state = 'pending', lease_owner = NULL, lease_expires_at_us = NULL
-                 WHERE job_state IN ('ready', 'described', 'vector_pending')",
+            .await?;
+            self.requeue_retained_indexing_for_rebuild_tx(&mut tx)
+                .await?;
+        } else {
+            self.persist_embedding_config_identity_tx(
+                &mut tx,
+                &model_space,
+                space,
+                generation,
+                &digest,
+                now_us,
             )
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+            .await?;
         }
         tx.commit().await.map_err(db_error)?;
         Ok(prior.is_some())
+    }
+
+    async fn persist_embedding_config_identity_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        model_space: &a2a_lab_dev_kit::ModelSpaceIdentity,
+        space: &a2a_lab_dev_kit::EmbeddingSpaceConfig,
+        generation: i64,
+        digest: &str,
+        now_us: i64,
+    ) -> Result<(), A2aLabError> {
+        sqlx::query(
+            "INSERT INTO semantic_embedding_config_identity
+             (singleton_id, provider, model, dimensions, normalization, metric,
+              model_space_generation, config_digest, updated_at_us)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(singleton_id) DO UPDATE SET provider=excluded.provider,
+               model=excluded.model, dimensions=excluded.dimensions,
+               normalization=excluded.normalization, metric=excluded.metric,
+               model_space_generation=excluded.model_space_generation,
+               config_digest=excluded.config_digest, updated_at_us=excluded.updated_at_us",
+        )
+        .bind(model_space.provider())
+        .bind(model_space.model())
+        .bind(i64::from(space.dimensions))
+        .bind(format!("{:?}", space.normalization))
+        .bind(format!("{:?}", space.metric))
+        .bind(generation)
+        .bind(digest)
+        .bind(now_us)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_error)?;
+        Ok(())
+    }
+
+    /// Clears searchable vector payloads and ready eligibility before identity rotation.
+    async fn wipe_retained_embedding_vectors_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ) -> Result<(), A2aLabError> {
+        sqlx::query(
+            "UPDATE semantic_frame_embeddings
+             SET embedding_vector = NULL
+             WHERE frame_id IN (
+                 SELECT frame_id FROM semantic_frame_revisions
+                 WHERE search_current = 1 AND retained_state = 'retained'
+             )",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(db_error)?;
+        sqlx::query(
+            "UPDATE semantic_frame_revisions
+             SET embedding_checkpoint = 'pending'
+             WHERE search_current = 1 AND retained_state = 'retained'",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(db_error)?;
+        sqlx::query(
+            "UPDATE semantic_indexing_job_runtime
+             SET job_state = 'pending',
+                 lease_owner = NULL,
+                 lease_expires_at_us = NULL,
+                 completed_at_us = NULL
+             WHERE job_state = 'ready'
+               AND job_id IN (
+                 SELECT j.job_id FROM semantic_indexing_jobs j
+                 JOIN semantic_frame_revisions rev ON rev.frame_id = j.frame_id
+                 WHERE rev.search_current = 1 AND rev.retained_state = 'retained'
+               )",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(db_error)?;
+        Ok(())
+    }
+
+    /// Requeues durable indexing jobs after vectors are gone and identity is current.
+    async fn requeue_retained_indexing_for_rebuild_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ) -> Result<(), A2aLabError> {
+        sqlx::query(
+            "UPDATE semantic_indexing_job_runtime
+             SET job_state = CASE
+                   WHEN description_generation IS NOT NULL THEN 'described'
+                   ELSE 'pending'
+                 END,
+                 lease_owner = NULL,
+                 lease_expires_at_us = NULL,
+                 completed_at_us = NULL
+             WHERE job_id IN (
+               SELECT j.job_id FROM semantic_indexing_jobs j
+               JOIN semantic_frame_revisions rev ON rev.frame_id = j.frame_id
+               WHERE rev.search_current = 1 AND rev.retained_state = 'retained'
+             )",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(db_error)?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub async fn count_searchable_embedding_vectors(&self) -> Result<u64, A2aLabError> {
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(model_space_generation, 0)
+             FROM semantic_embedding_config_identity WHERE singleton_id = 1",
+        )
+        .fetch_optional(self.sqlite_pool())
+        .await
+        .map_err(db_error)?
+        .unwrap_or(0);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM semantic_frame_embeddings emb
+             JOIN semantic_frame_revisions rev ON rev.frame_id = emb.frame_id
+             WHERE rev.search_current = 1
+               AND rev.retained_state = 'retained'
+               AND rev.embedding_checkpoint = 'ready'
+               AND emb.embedding_vector IS NOT NULL
+               AND length(emb.embedding_vector) > 0
+               AND emb.model_space_generation = ?1",
+        )
+        .bind(active)
+        .fetch_one(self.sqlite_pool())
+        .await
+        .map_err(db_error)?;
+        Ok(u64::try_from(count.max(0)).unwrap_or(0))
+    }
+
+    #[doc(hidden)]
+    pub async fn count_nonempty_embedding_vectors(&self) -> Result<u64, A2aLabError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM semantic_frame_embeddings
+             WHERE embedding_vector IS NOT NULL AND length(embedding_vector) > 0",
+        )
+        .fetch_one(self.sqlite_pool())
+        .await
+        .map_err(db_error)?;
+        Ok(u64::try_from(count.max(0)).unwrap_or(0))
+    }
+
+    /// Active embedding model-space generation from the persisted config identity row.
+    pub async fn active_model_space_generation(&self) -> Result<Option<u64>, A2aLabError> {
+        let generation: Option<i64> = sqlx::query_scalar(
+            "SELECT model_space_generation FROM semantic_embedding_config_identity WHERE singleton_id = 1",
+        )
+        .fetch_optional(self.sqlite_pool())
+        .await
+        .map_err(db_error)?;
+        Ok(generation.and_then(|value| u64::try_from(value.max(0)).ok()))
     }
 
     /// Opens or creates the store. Validates storage before capture starts.
@@ -198,11 +345,79 @@ impl IndexedVideoDvr {
             save_faults: Arc::new(SaveFaults::default()),
             indexing_sources: Arc::new(RwLock::new(IndexedSourceFilter::all_sources())),
         };
+        store.migrate_semantic_embedding_vectors().await?;
+        store.migrate_indexing_job_priority().await?;
+        store.migrate_embedding_config_generation().await?;
         store.backfill_indexing_job_runtime().await?;
         store.recover_partials().await?;
         store.cleanup_at(crate::time::now()?).await?;
         store.reconcile_frame_decision_tombstones().await?;
         Ok(store)
+    }
+
+    async fn migrate_semantic_embedding_vectors(&self) -> Result<(), A2aLabError> {
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM pragma_table_info('semantic_frame_embeddings')
+             WHERE name = 'embedding_vector' LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_error)?;
+        if exists.is_none() {
+            sqlx::query("ALTER TABLE semantic_frame_embeddings ADD COLUMN embedding_vector BLOB")
+                .execute(&self.pool)
+                .await
+                .map_err(db_error)?;
+        }
+        Ok(())
+    }
+
+    async fn migrate_embedding_config_generation(&self) -> Result<(), A2aLabError> {
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM pragma_table_info('semantic_embedding_config_identity')
+             WHERE name = 'model_space_generation' LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_error)?;
+        if exists.is_some() {
+            return Ok(());
+        }
+        for statement in SCHEMA_EMBEDDING_CONFIG_GENERATION.split(';') {
+            let statement = statement.trim();
+            if statement.is_empty() {
+                continue;
+            }
+            sqlx::query(statement)
+                .execute(&self.pool)
+                .await
+                .map_err(db_error)?;
+        }
+        Ok(())
+    }
+
+    async fn migrate_indexing_job_priority(&self) -> Result<(), A2aLabError> {
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM pragma_table_info('semantic_indexing_jobs')
+             WHERE name = 'enqueue_priority' LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_error)?;
+        if exists.is_some() {
+            return Ok(());
+        }
+        for statement in SCHEMA_INDEXING_JOB_PRIORITY.split(';') {
+            let statement = statement.trim();
+            if statement.is_empty() {
+                continue;
+            }
+            sqlx::query(statement)
+                .execute(&self.pool)
+                .await
+                .map_err(db_error)?;
+        }
+        Ok(())
     }
 
     async fn backfill_indexing_job_runtime(&self) -> Result<(), A2aLabError> {
@@ -433,6 +648,7 @@ impl IndexedVideoDvr {
                 &mut tx,
                 frame.frame_id().as_str(),
                 registered_at.as_micros(),
+                INDEXING_PRIORITY_LIVE,
             )
             .await?;
         }
@@ -783,6 +999,65 @@ impl IndexedVideoDvr {
             fold.push(crate::time::from_unix_microseconds(next)?)?;
         }
         Ok(())
+    }
+
+    /// Loads verified bytes for one retained DVR key (chunk frames or legacy per-file segments).
+    pub(crate) async fn load_retained_payload_at_key(
+        &self,
+        source_id: &VideoSourceId,
+        track_id: &DvrTrackId,
+        start_us: UtcTimestamp,
+    ) -> Result<(Vec<u8>, u32, UtcTimestamp), A2aLabError> {
+        let row = sqlx::query(
+            "SELECT end_us, chunk_relpath, payload_offset, payload_length, payload_crc32
+             FROM dvr_frames
+             WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3 AND payload_ready = 1",
+        )
+        .bind(source_id.as_str())
+        .bind(track_id.as_str())
+        .bind(start_us.as_micros())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_error)?;
+        if let Some(row) = row {
+            let end_us: i64 = row.try_get("end_us").map_err(db_error)?;
+            let chunk_relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
+            let offset: i64 = row.try_get("payload_offset").map_err(db_error)?;
+            let length: i64 = row.try_get("payload_length").map_err(db_error)?;
+            let expected_crc: i64 = row.try_get("payload_crc32").map_err(db_error)?;
+            let bytes = self
+                .load_chunk_payload(
+                    &chunk_relpath,
+                    u64::try_from(offset.max(0)).unwrap_or(0),
+                    u64::try_from(length.max(0)).unwrap_or(0),
+                    u32::try_from(expected_crc.max(0)).unwrap_or(0),
+                )
+                .await?;
+            let crc = super::chunk::crc32(&bytes);
+            return Ok((bytes, crc, crate::time::from_unix_microseconds(end_us)?));
+        }
+        let segment = sqlx::query(
+            "SELECT end_us, payload_relpath
+             FROM dvr_segments
+             WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3 AND payload_ready = 1",
+        )
+        .bind(source_id.as_str())
+        .bind(track_id.as_str())
+        .bind(start_us.as_micros())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_error)?;
+        let Some(segment) = segment else {
+            return Err(A2aLabError::not_found(
+                "DVR frame",
+                format!("{source_id}/{track_id}/{}", start_us.as_micros()),
+            ));
+        };
+        let end_us: i64 = segment.try_get("end_us").map_err(db_error)?;
+        let relpath: String = segment.try_get("payload_relpath").map_err(db_error)?;
+        let bytes = self.load_payload(&relpath).await?;
+        let crc = super::chunk::crc32(&bytes);
+        Ok((bytes, crc, crate::time::from_unix_microseconds(end_us)?))
     }
 
     async fn load_payload(&self, relpath: &str) -> Result<Vec<u8>, A2aLabError> {

@@ -310,51 +310,17 @@ impl IndexedVideoDvr {
         frame: &SavedFrameRef,
         max_bytes: usize,
     ) -> Result<Vec<u8>, FrameEvidenceFailure> {
-        let row = sqlx::query(
-            "SELECT chunk_relpath, payload_offset, payload_length, payload_crc32
-             FROM dvr_frames
-             WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3 AND payload_ready = 1",
-        )
-        .bind(frame.source_id().as_str())
-        .bind(frame.track_id().as_str())
-        .bind(frame.captured_at().as_micros())
-        .fetch_optional(self.sqlite_pool())
-        .await
-        .map_err(|error| db_failure(error.to_string()))?;
-        let Some(row) = row else {
-            return Err(FrameEvidenceFailure::new(
-                FrameEvidenceFailureKind::MissingOrExpired,
-                "saved frame payload row is missing",
-            ));
-        };
-        let chunk_relpath: String = row
-            .try_get("chunk_relpath")
-            .map_err(|error| db_failure(error.to_string()))?;
-        let offset: i64 = row
-            .try_get("payload_offset")
-            .map_err(|error| db_failure(error.to_string()))?;
-        let length: i64 = row
-            .try_get("payload_length")
-            .map_err(|error| db_failure(error.to_string()))?;
-        let expected_crc: i64 = row
-            .try_get("payload_crc32")
-            .map_err(|error| db_failure(error.to_string()))?;
-        let length = usize::try_from(length.max(0)).unwrap_or(0);
-        if length > max_bytes {
+        let bytes = self
+            .load_retained_payload_at_key(frame.source_id(), frame.track_id(), frame.captured_at())
+            .await
+            .map_err(|error| map_load_error(error.to_string()))?
+            .0;
+        if bytes.len() > max_bytes {
             return Err(FrameEvidenceFailure::new(
                 FrameEvidenceFailureKind::DecodeLimitsExceeded,
                 "payload length exceeds the configured byte cap",
             ));
         }
-        let bytes = self
-            .load_chunk_payload(
-                &chunk_relpath,
-                u64::try_from(offset.max(0)).unwrap_or(0),
-                u64::try_from(length).unwrap_or(0),
-                u32::try_from(expected_crc.max(0)).unwrap_or(0),
-            )
-            .await
-            .map_err(|error| map_load_error(error.to_string()))?;
         let digest = Sha256Digest::hash_bytes(&bytes);
         if digest != *frame.payload_digest() {
             return Err(FrameEvidenceFailure::new(
@@ -647,7 +613,7 @@ fn apply_roi(
         if end > rgb.len() {
             return Err(FrameEvidenceFailure::new(
                 FrameEvidenceFailureKind::CorruptPayload,
-            "region of interest crop exceeds RGB buffer",
+                "region of interest crop exceeds RGB buffer",
             ));
         }
         out.extend_from_slice(&rgb[start..end]);

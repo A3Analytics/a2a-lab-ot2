@@ -2,8 +2,9 @@
 
 use a2a_lab_dev_kit::{
     DvrMediaStore, DvrStoreNamespace, EmbeddingMetric, FrameDescriptionProvenance,
-    FrameRoiTransform, MemoryVideos, ProvenanceGeneration, Sha256Digest, TextEmbeddingProvenance,
-    TimeRange, UtcTimestamp, VectorNormalization, VideoSourceId,
+    FrameEmbeddingVector, FrameRoiTransform, MemoryVideos, ModelSpaceIdentity,
+    ProvenanceGeneration, Sha256Digest, TextEmbeddingProvenance, TimeRange, UtcTimestamp,
+    VectorNormalization, VideoSourceId,
 };
 use a2a_lab_ot2::IndexedVideoDvr;
 use a2a_lab_ot2::videos::dvr::{
@@ -82,6 +83,18 @@ async fn list_manifest_ids(
     ids
 }
 
+fn sample_model_space() -> ModelSpaceIdentity {
+    ModelSpaceIdentity::new(
+        "bedrock",
+        "text-embed-v1",
+        4,
+        VectorNormalization::L2Unit,
+        EmbeddingMetric::Cosine,
+        ProvenanceGeneration::new(1).unwrap(),
+    )
+    .unwrap()
+}
+
 fn sample_embedding(text: &str) -> TextEmbeddingProvenance {
     TextEmbeddingProvenance::new(
         "bedrock",
@@ -93,6 +106,10 @@ fn sample_embedding(text: &str) -> TextEmbeddingProvenance {
         Sha256Digest::hash_bytes(text.as_bytes()),
     )
     .unwrap()
+}
+
+fn sample_vector() -> FrameEmbeddingVector {
+    FrameEmbeddingVector::new(vec![0.1, 0.2, 0.3, 0.4], 4).unwrap()
 }
 
 #[tokio::test]
@@ -252,7 +269,13 @@ async fn manifest_stores_description_and_embedding_checkpoints() {
         .await
         .unwrap();
     store
-        .upsert_frame_embedding(&frame, &sample_embedding(text), IndexingCheckpoint::Ready)
+        .upsert_frame_embedding(
+            &frame,
+            &sample_model_space(),
+            &sample_embedding(text),
+            &sample_vector(),
+            IndexingCheckpoint::Ready,
+        )
         .await
         .unwrap();
     let record = store
@@ -267,8 +290,191 @@ async fn manifest_stores_description_and_embedding_checkpoints() {
             .map(a2a_lab_ot2::videos::dvr::StoredFrameDescription::text),
         Some(text)
     );
-    assert!(record.embedding().is_some());
+    assert_eq!(
+        record.embedding().and_then(|item| item.vector()),
+        Some(&sample_vector())
+    );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn embedding_vector_survives_dvr_reopen() {
+    let (dir, store) = open_store("vector-reopen").await;
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    let capture = fresh_capture(50_000_000);
+    store
+        .append_mjpeg_frame(&source, capture, 1_000_000, &jpeg(50))
+        .await
+        .unwrap();
+    let (frame, _) = store
+        .register_manifest_at_dvr_key(&store_ns(), &source, &track, capture)
+        .await
+        .unwrap();
+    let text = "tips aligned on deck";
+    let vector = sample_vector();
+    store
+        .upsert_frame_description(&frame, text, &sample_description(text))
+        .await
+        .unwrap();
+    store
+        .upsert_frame_embedding(
+            &frame,
+            &sample_model_space(),
+            &sample_embedding(text),
+            &vector,
+            IndexingCheckpoint::Ready,
+        )
+        .await
+        .unwrap();
+    drop(store);
+    let reopened = IndexedVideoDvr::open(&dir, 86_400).await.unwrap();
+    let record = reopened
+        .get_manifest_frame(frame.frame_id().as_str())
+        .await
+        .unwrap();
+    assert_eq!(record.embedding().and_then(|e| e.vector()), Some(&vector));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn legacy_provenance_without_vector_blob_round_trips() {
+    let (dir, store) = open_store("legacy-vector").await;
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    let capture = fresh_capture(60_000_000);
+    store
+        .append_mjpeg_frame(&source, capture, 1_000_000, &jpeg(60))
+        .await
+        .unwrap();
+    let (frame, _) = store
+        .register_manifest_at_dvr_key(&store_ns(), &source, &track, capture)
+        .await
+        .unwrap();
+    let text = "legacy checkpoint";
+    store
+        .upsert_frame_description(&frame, text, &sample_description(text))
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO semantic_frame_embeddings (
+            frame_id, embedding_provider, embedding_model, dimensions, normalization, metric,
+            embedding_generation, model_space_generation, source_text_hash
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )
+    .bind(frame.frame_id().as_str())
+    .bind("bedrock")
+    .bind("text-embed-v1")
+    .bind(4_i64)
+    .bind("l2_unit")
+    .bind("cosine")
+    .bind(1_i64)
+    .bind(1_i64)
+    .bind(sample_embedding(text).source_text_hash().as_str())
+    .execute(store.sqlite_pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE semantic_frame_revisions SET embedding_checkpoint = 'ready' WHERE frame_id = ?1",
+    )
+    .bind(frame.frame_id().as_str())
+    .execute(store.sqlite_pool())
+    .await
+    .unwrap();
+    let record = store
+        .get_manifest_frame(frame.frame_id().as_str())
+        .await
+        .unwrap();
+    assert!(record.embedding().is_some());
+    assert!(record.embedding().unwrap().vector().is_none());
+    drop(store);
+    let reopened = IndexedVideoDvr::open(&dir, 86_400).await.unwrap();
+    let again = reopened
+        .get_manifest_frame(frame.frame_id().as_str())
+        .await
+        .unwrap();
+    assert!(again.embedding().unwrap().vector().is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn rejects_non_finite_and_dimension_mismatched_vectors() {
+    let (_dir, store) = open_store("reject-vector").await;
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    let capture = fresh_capture(70_000_000);
+    store
+        .append_mjpeg_frame(&source, capture, 1_000_000, &jpeg(70))
+        .await
+        .unwrap();
+    let (frame, _) = store
+        .register_manifest_at_dvr_key(&store_ns(), &source, &track, capture)
+        .await
+        .unwrap();
+    let text = "reject path";
+    store
+        .upsert_frame_description(&frame, text, &sample_description(text))
+        .await
+        .unwrap();
+    let space = sample_model_space();
+    let embed = sample_embedding(text);
+    let short = FrameEmbeddingVector::new(vec![0.1, 0.2], 4).expect_err("short");
+    assert!(short.to_string().contains("length"));
+    let nan = FrameEmbeddingVector::new(vec![f32::NAN, 0.2, 0.3, 0.4], 4).expect_err("nan");
+    assert!(nan.to_string().contains("finite"));
+    assert!(
+        store
+            .upsert_frame_embedding(
+                &frame,
+                &space,
+                &embed,
+                &sample_vector(),
+                IndexingCheckpoint::Ready
+            )
+            .await
+            .is_ok()
+    );
+    let wrong_hash = TextEmbeddingProvenance::new(
+        "bedrock",
+        "text-embed-v1",
+        4,
+        VectorNormalization::L2Unit,
+        EmbeddingMetric::Cosine,
+        ProvenanceGeneration::new(1).unwrap(),
+        Sha256Digest::hash_bytes(b"other text"),
+    )
+    .unwrap();
+    let mismatch = store
+        .upsert_frame_embedding(
+            &frame,
+            &space,
+            &wrong_hash,
+            &sample_vector(),
+            IndexingCheckpoint::Ready,
+        )
+        .await
+        .expect_err("hash");
+    assert!(mismatch.to_string().contains("source_text_hash"));
+    let wrong_space = ModelSpaceIdentity::new(
+        "bedrock",
+        "text-embed-v1",
+        4,
+        VectorNormalization::L2Unit,
+        EmbeddingMetric::Cosine,
+        ProvenanceGeneration::new(2).unwrap(),
+    )
+    .unwrap();
+    let space_err = store
+        .upsert_frame_embedding(
+            &frame,
+            &wrong_space,
+            &embed,
+            &sample_vector(),
+            IndexingCheckpoint::Ready,
+        )
+        .await
+        .expect_err("space");
+    assert!(space_err.to_string().contains("generation"));
 }
 
 #[tokio::test]

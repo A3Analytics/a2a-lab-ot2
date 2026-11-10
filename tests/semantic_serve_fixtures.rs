@@ -47,7 +47,7 @@ fn semantic_document(description_model: Option<&str>) -> String {
         .map(|value| format!(r#","model":"{value}""#))
         .unwrap_or_default();
     format!(
-        r#"{{"schema_version":2,"chat":{{"provider":"openai","model":"chat-only"}},"videos":{{"sources":[{{"id":"camera","device_index":0,"format":"mjpeg"}}]}},"semantic_indexing":{{"description":{{"provider":"bedrock"{model}}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
+        r#"{{"schema_version":2,"chat":{{"provider":"openai","model":"chat-only"}},"videos":{{"sources":[{{"id":"camera","device_index":0,"format":"mjpeg"}}]}},"semantic_indexing":{{"description":{{"provider":"bedrock"{model}}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine"}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
     )
 }
 

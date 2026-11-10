@@ -25,12 +25,12 @@ pub use annotation_queue::{
     ANNOTATION_RECONCILE_INTERVAL, AnnotationQueueWorker, VideoDvrAnnotationQueue,
 };
 pub use annotation_worker::{
-    AnyIndexingAnnotationWorker, DeterministicIndexingWorker, IndexingAnnotationWorker,
-    DeterministicDescriptionOnlyWorker, IndexingWorkerBatchReport, LiveDescriptionOnlyWorker,
+    AnyIndexingAnnotationWorker, DeterministicDescriptionOnlyWorker, DeterministicIndexingWorker,
+    IndexingAnnotationWorker, IndexingWorkerBatchReport, LiveDescriptionOnlyWorker,
     LiveIndexingWorker,
 };
 pub mod semantic_search;
-pub use semantic_search::DvrSemanticSearchProvider;
+pub use semantic_search::{DvrSearchEmbedder, DvrSemanticSearchProvider};
 mod indexing_scope;
 pub use decision_evaluation_enqueue::{
     DecisionEvaluationFrameSelection, DecisionEvaluationTarget, EnqueueDecisionEvaluationsReport,
@@ -57,12 +57,14 @@ pub use frame_evidence::{
 };
 pub use frame_manifest::{
     DEFAULT_SEMANTIC_STORE_NAMESPACE, IndexingCheckpoint, ListManifestFramesRequest,
-    ManifestPageRequest, ManifestRetainedState, MediaPayloadStatus, RegisterManifestOutcome,
+    ManifestPageRequest, ManifestRetainedState, ManifestSearchCandidateFilter,
+    ManifestSearchCandidateScan, MediaPayloadStatus, RegisterManifestOutcome,
     SemanticFrameManifestRecord, StoredFrameDescription, StoredFrameEmbedding,
 };
 pub use indexing_job_store::{IndexingJobRecord, IndexingJobState, IndexingWorkerQueueStats};
 pub use indexing_registration::{
-    DEFAULT_RECONCILE_BATCH, IndexingReconcileReport, SaveFaults, indexing_job_id,
+    DEFAULT_RECONCILE_BATCH, INDEXING_PRIORITY_BACKFILL, INDEXING_PRIORITY_LIVE,
+    IndexingReconcileReport, SaveFaults, indexing_job_id,
 };
 pub use indexing_scope::IndexedSourceFilter;
 pub use inventory::{DvrTrackInventory, FramePayloadEvidence};

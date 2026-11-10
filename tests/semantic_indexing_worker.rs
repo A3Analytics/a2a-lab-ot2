@@ -11,20 +11,22 @@ use a2a_lab_dev_kit::{
 };
 use a2a_lab_ot2::IndexedVideoDvr;
 use a2a_lab_ot2::videos::dvr::{
-    DEFAULT_SEMANTIC_STORE_NAMESPACE, DeterministicIndexingWorker,
-    IndexingCheckpoint, IndexingJobState, IndexingWorkerFaults, indexing_job_id,
+    DEFAULT_SEMANTIC_STORE_NAMESPACE, DeterministicIndexingWorker, IndexingCheckpoint,
+    IndexingJobState, IndexingWorkerFaults, indexing_job_id,
 };
 
-const SEMANTIC_LIMITS: &str = r#""limits":{"worker":{"max_batch_items":4,"max_concurrency":2,"max_queue_backlog":64,"max_retry_attempts":3,"job_deadline":"30s","retry_backoff":"1s"},"search":{"top_k":10,"candidate_limit":1000,"max_neighbor_frames":5,"query_window":"2h"},"roi":{"min_edge_pixels":280,"max_edge_pixels":1568,"max_rois_per_frame":8},"storage":{"vector_index_path":"./state/semantic-index","max_disk_bytes":1073741824},"decisions":{"max_batch_items":8,"max_concurrency":2,"job_deadline":"45s","coverage_policy":"on_demand"}}"#;
-
 fn semantic_config() -> SemanticIndexingConfig {
-    let document = format!(
-        r#"{{"schema_version":2,"semantic_indexing":{{"description":{{"provider":"bedrock"}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
-    );
-    A2aLabConfig::parse(&document)
-        .unwrap()
-        .semantic_indexing
-        .unwrap()
+    const BASE: &str = concat!(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../a2a-lab-dev-kit-rs/tests/fixtures/a2a-lab-v2-semantic-valid.json"
+    )),);
+    let mut config = A2aLabConfig::parse(BASE).unwrap();
+    let semantic = config.semantic_indexing.as_mut().unwrap();
+    semantic.limits.worker.max_batch_items = 4;
+    semantic.limits.worker.max_concurrency = 2;
+    semantic.limits.worker.max_queue_backlog = 64;
+    semantic.limits.worker.max_retry_attempts = 3;
+    semantic.clone()
 }
 
 fn temp_root(name: &str) -> std::path::PathBuf {
@@ -92,6 +94,7 @@ async fn job_states_progress_through_ready_with_attempt_metadata() {
     let manifest = store.get_manifest_frame(ready.frame_id()).await.unwrap();
     assert_eq!(manifest.description_checkpoint(), IndexingCheckpoint::Ready);
     assert_eq!(manifest.embedding_checkpoint(), IndexingCheckpoint::Ready);
+    assert!(manifest.embedding().and_then(|e| e.vector()).is_some());
 }
 
 #[tokio::test]
@@ -202,6 +205,23 @@ async fn persisted_description_survives_embedding_outage() {
         store.get_indexing_job(&job_id).await.unwrap().state(),
         IndexingJobState::Ready
     );
+}
+
+#[tokio::test]
+async fn crash_before_embedding_commit_leaves_vector_absent() {
+    let (_dir, store) = open_store("crash-embed").await;
+    let (job_id, frame_id) = seed_job(&store).await;
+    let semantic = semantic_config();
+    let faults = IndexingWorkerFaults::new();
+    faults.set_crash_before_embedding_commit(true);
+    let worker = worker_for(&semantic, Arc::clone(&faults)).await;
+    let report = worker.run_batch(&store, &semantic).await.unwrap();
+    assert_eq!(report.failures(), 1);
+    let manifest = store.get_manifest_frame(&frame_id).await.unwrap();
+    assert_ne!(manifest.embedding_checkpoint(), IndexingCheckpoint::Ready);
+    assert!(manifest.embedding().and_then(|e| e.vector()).is_none());
+    let job = store.get_indexing_job(&job_id).await.unwrap();
+    assert_ne!(job.state(), IndexingJobState::Ready);
 }
 
 #[tokio::test]

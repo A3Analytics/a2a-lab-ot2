@@ -64,15 +64,17 @@ impl VideoDvrCatalog {
                 }
                 let paused = catalog.dvr().worker_meta_materialization_paused().await;
                 if paused {
-                    eprintln!("video DVR annotation reconcile paused: queue backlog at limit");
-                } else if let Err(error) = catalog
+                    eprintln!("video DVR annotation worker paused: queue backlog at limit");
+                }
+                if let Err(error) = catalog
                     .dvr()
                     .reconcile_indexing_jobs(&store_ns, DEFAULT_RECONCILE_BATCH)
                     .await
                 {
                     eprintln!("video DVR annotation reconcile: {error}");
                 }
-                if let Some(worker) = worker.as_ref()
+                if !paused
+                    && let Some(worker) = worker.as_ref()
                     && let Err(error) = worker
                         .inner
                         .run_batch(catalog.dvr(), worker.semantic.as_ref())

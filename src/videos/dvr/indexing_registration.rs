@@ -18,6 +18,11 @@ pub use super::frame_manifest::DEFAULT_SEMANTIC_STORE_NAMESPACE;
 const FRAME_INDEXING_JOB_KIND: &str = "frame_indexing";
 pub const DEFAULT_RECONCILE_BATCH: u32 = 256;
 
+/// Claimed before historical backfill jobs (`INDEXING_PRIORITY_BACKFILL`).
+pub const INDEXING_PRIORITY_LIVE: i32 = 0;
+/// Drained after live capture jobs; `created_at_us` is the frame capture instant.
+pub const INDEXING_PRIORITY_BACKFILL: i32 = 1;
+
 /// Test-only faults injected on the DVR save path.
 #[derive(Debug, Default)]
 pub struct SaveFaults {
@@ -92,6 +97,16 @@ impl IndexingReconcileReport {
     pub const fn has_more(&self) -> bool {
         self.has_more
     }
+
+    fn absorb(&mut self, batch: &Self) {
+        self.examined = self.examined.saturating_add(batch.examined);
+        self.registered = self.registered.saturating_add(batch.registered);
+        self.jobs_created = self.jobs_created.saturating_add(batch.jobs_created);
+        self.idempotent = self.idempotent.saturating_add(batch.idempotent);
+        self.missing_payload = self.missing_payload.saturating_add(batch.missing_payload);
+        self.corrupt_payload = self.corrupt_payload.saturating_add(batch.corrupt_payload);
+        self.has_more = batch.has_more;
+    }
 }
 
 impl IndexedVideoDvr {
@@ -113,7 +128,11 @@ impl IndexedVideoDvr {
             .register_manifest_at_dvr_key(store, source_id, track_id, start_us)
             .await?;
         let job_created = self
-            .ensure_indexing_job_for_frame(frame.frame_id().as_str())
+            .ensure_indexing_job_for_frame(
+                frame.frame_id().as_str(),
+                INDEXING_PRIORITY_LIVE,
+                start_us.as_micros(),
+            )
             .await?;
         Ok((frame, outcome, job_created))
     }
@@ -127,18 +146,25 @@ impl IndexedVideoDvr {
     ) -> Result<IndexingReconcileReport, A2aLabError> {
         let limit = i64::from(batch.max(1));
         let rows = sqlx::query(
-            "SELECT f.source_id, f.track_id, f.start_us
-             FROM dvr_frames f
-             WHERE f.payload_ready = 1
-               AND NOT EXISTS (
+            "SELECT source_id, track_id, start_us
+             FROM (
+                SELECT source_id, track_id, start_us
+                FROM dvr_frames
+                WHERE payload_ready = 1
+                UNION
+                SELECT source_id, track_id, start_us
+                FROM dvr_segments
+                WHERE payload_ready = 1
+             ) retained
+             WHERE NOT EXISTS (
                  SELECT 1 FROM semantic_indexing_jobs j
                  JOIN semantic_frame_revisions r ON r.frame_id = j.frame_id
-                 WHERE r.source_id = f.source_id
-                   AND r.track_id = f.track_id
-                   AND r.start_us = f.start_us
+                 WHERE r.source_id = retained.source_id
+                   AND r.track_id = retained.track_id
+                   AND r.start_us = retained.start_us
                    AND r.search_current = 1
                )
-             ORDER BY f.source_id, f.track_id, f.start_us
+             ORDER BY source_id, track_id, start_us
              LIMIT ?1",
         )
         .bind(limit + 1)
@@ -182,7 +208,11 @@ impl IndexedVideoDvr {
             match register {
                 Ok((frame, outcome)) => {
                     let job_created = self
-                        .ensure_indexing_job_for_frame(frame.frame_id().as_str())
+                        .ensure_indexing_job_for_frame(
+                            frame.frame_id().as_str(),
+                            INDEXING_PRIORITY_BACKFILL,
+                            start_us.as_micros(),
+                        )
                         .await?;
                     if job_created {
                         report.jobs_created = report.jobs_created.saturating_add(1);
@@ -227,15 +257,57 @@ impl IndexedVideoDvr {
         Ok(report)
     }
 
+    /// Registers every retained DVR key lacking manifest/job pairs before returning.
+    pub async fn reconcile_retained_indexing_until_idle(
+        &self,
+        store: &DvrStoreNamespace,
+    ) -> Result<IndexingReconcileReport, A2aLabError> {
+        let mut total = IndexingReconcileReport {
+            examined: 0,
+            registered: 0,
+            jobs_created: 0,
+            idempotent: 0,
+            missing_payload: 0,
+            corrupt_payload: 0,
+            has_more: false,
+        };
+        loop {
+            let batch = self
+                .reconcile_indexing_jobs(store, DEFAULT_RECONCILE_BATCH)
+                .await?;
+            total.absorb(&batch);
+            if !batch.has_more() {
+                break;
+            }
+        }
+        total.has_more = false;
+        Ok(total)
+    }
+
     pub(crate) async fn ensure_indexing_job_for_frame(
         &self,
         frame_id: &str,
+        enqueue_priority: i32,
+        created_at_us: i64,
     ) -> Result<bool, A2aLabError> {
-        let registered_at = crate::time::now()?.as_micros();
         let mut tx = self.sqlite_pool().begin().await.map_err(db_error)?;
-        let created = commit_indexing_job_tx(&mut tx, frame_id, registered_at).await?;
+        let created =
+            commit_indexing_job_tx(&mut tx, frame_id, created_at_us, enqueue_priority).await?;
         tx.commit().await.map_err(db_error)?;
         Ok(created)
+    }
+
+    #[doc(hidden)]
+    pub async fn indexing_job_enqueue_priority(&self, job_id: &str) -> Result<i32, A2aLabError> {
+        let priority: i64 = sqlx::query_scalar(
+            "SELECT enqueue_priority FROM semantic_indexing_jobs WHERE job_id = ?1",
+        )
+        .bind(job_id)
+        .fetch_optional(self.sqlite_pool())
+        .await
+        .map_err(db_error)?
+        .unwrap_or(INDEXING_PRIORITY_BACKFILL.into());
+        Ok(i32::try_from(priority).unwrap_or(INDEXING_PRIORITY_BACKFILL))
     }
 
     #[doc(hidden)]
@@ -267,19 +339,21 @@ pub fn indexing_job_id(frame_id: &str) -> String {
 pub(crate) async fn commit_indexing_job_tx(
     tx: &mut Transaction<'_, Sqlite>,
     frame_id: &str,
-    registered_at_us: i64,
+    created_at_us: i64,
+    enqueue_priority: i32,
 ) -> Result<bool, A2aLabError> {
     let job_id = indexing_job_id(frame_id);
     let result = sqlx::query(
-        "INSERT INTO semantic_indexing_jobs (job_id, frame_id, job_kind, created_at_us)
-         SELECT ?1, ?2, ?3, ?4
+        "INSERT INTO semantic_indexing_jobs (job_id, frame_id, job_kind, created_at_us, enqueue_priority)
+         SELECT ?1, ?2, ?3, ?4, ?5
          WHERE EXISTS (SELECT 1 FROM semantic_frame_revisions WHERE frame_id = ?2)
          ON CONFLICT(frame_id, job_kind) DO NOTHING",
     )
     .bind(&job_id)
     .bind(frame_id)
     .bind(FRAME_INDEXING_JOB_KIND)
-    .bind(registered_at_us)
+    .bind(created_at_us)
+    .bind(i64::from(enqueue_priority))
     .execute(&mut **tx)
     .await
     .map_err(db_error)?;
