@@ -189,7 +189,8 @@ impl IndexedVideoDvr {
         .await
         .map_err(db_error)?;
         let next_due: i64 = row.try_get("next_due_us").map_err(db_error)?;
-        let last_selected: Option<i64> = row.try_get("last_selected_start_us").map_err(db_error)?;
+        let last_selected: Option<i64> =
+            row.try_get("last_selected_start_us").map_err(db_error)?;
         let selected = last_selected == Some(start_us) || start_us >= next_due;
         if selected && last_selected != Some(start_us) {
             sqlx::query(

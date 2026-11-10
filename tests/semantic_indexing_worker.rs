@@ -11,8 +11,8 @@ use a2a_lab_dev_kit::{
 };
 use a2a_lab_ot2::IndexedVideoDvr;
 use a2a_lab_ot2::videos::dvr::{
-    DEFAULT_SEMANTIC_STORE_NAMESPACE, DeterministicIndexingWorker, IndexingCheckpoint,
-    IndexingJobState, IndexingWorkerFaults, indexing_job_id,
+    DEFAULT_SEMANTIC_STORE_NAMESPACE, DeterministicIndexingWorker,
+    IndexingCheckpoint, IndexingJobState, IndexingWorkerFaults, indexing_job_id,
 };
 
 const SEMANTIC_LIMITS: &str = r#""limits":{"worker":{"max_batch_items":4,"max_concurrency":2,"max_queue_backlog":64,"max_retry_attempts":3,"job_deadline":"30s","retry_backoff":"1s"},"search":{"top_k":10,"candidate_limit":1000,"max_neighbor_frames":5,"query_window":"2h"},"roi":{"min_edge_pixels":280,"max_edge_pixels":1568,"max_rois_per_frame":8},"storage":{"vector_index_path":"./state/semantic-index","max_disk_bytes":1073741824},"decisions":{"max_batch_items":8,"max_concurrency":2,"job_deadline":"45s","coverage_policy":"on_demand"}}"#;

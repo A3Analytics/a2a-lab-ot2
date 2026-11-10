@@ -63,7 +63,7 @@ pub fn embedding_provider_config_for_model(
         space.dimensions,
         space.normalization,
         space.metric,
-        a2a_lab_dev_kit::ProvenanceGeneration::new(space.generation)?,
+        a2a_lab_dev_kit::ProvenanceGeneration::new(1)?,
     )?;
     TextEmbeddingProviderConfig::new(embeddings.provider(), model, identity)
 }

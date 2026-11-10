@@ -26,11 +26,9 @@ impl DvrSemanticSearchProvider {
         dvr: IndexedVideoDvr,
         semantic: &ResolvedSemanticIndexing,
     ) -> Result<Self, A2aLabError> {
-        let embeddings = semantic
-            .config
-            .embeddings
-            .as_ref()
-            .ok_or_else(|| A2aLabError::unavailable("semantic vector search is disabled"))?;
+        let embeddings = semantic.config.embeddings.as_ref().ok_or_else(|| {
+            A2aLabError::unavailable("semantic vector search is disabled")
+        })?;
         Ok(Self {
             dvr,
             model_space: embeddings.model_space_identity()?,

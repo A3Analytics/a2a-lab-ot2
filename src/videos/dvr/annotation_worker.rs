@@ -298,9 +298,8 @@ where
             .describe_frames(vec![request.clone()])
             .await
             .map_err(map_indexing_failure)?;
-        let validated =
-            validate_description_batch(limits, std::slice::from_ref(&request), &responses)
-                .map_err(map_indexing_failure)?;
+        let validated = validate_description_batch(limits, std::slice::from_ref(&request), &responses)
+            .map_err(map_indexing_failure)?;
         let item = validated
             .first()
             .ok_or_else(|| A2aLabError::unavailable("empty description batch"))?;

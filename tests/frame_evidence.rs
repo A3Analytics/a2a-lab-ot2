@@ -15,6 +15,12 @@ use a2a_lab_ot2::videos::dvr::{
 use image::ExtendedColorType;
 use image::codecs::jpeg::JpegEncoder;
 
+#[test]
+fn standard_decode_cap_accepts_native_external_camera_edge() {
+    assert_eq!(FrameEvidenceLimits::standard().max_edge(), 1920);
+    assert!(FrameEvidenceLimits::standard().max_rgb_bytes() >= 1920 * 1080 * 3);
+}
+
 fn temp_root(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "a2a-lab-ot2-evidence-{name}-{}",

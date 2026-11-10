@@ -107,13 +107,17 @@ impl FrameEvidenceLimits {
         })
     }
 
-    /// Production-style caps aligned with Jev edge bounds and 16MiB images.
+    /// Production-style source decode caps for retained 1920x1080 media.
+    ///
+    /// Jev/model input limits remain enforced downstream; this bound only
+    /// prevents the source decoder from rejecting a native external-camera
+    /// frame before preprocessing.
     #[must_use]
     pub fn standard() -> Self {
         Self {
             max_payload_bytes: 8 * 1024 * 1024,
             max_rgb_bytes: 16 * 1024 * 1024,
-            max_edge: 1568,
+            max_edge: 1920,
         }
     }
 
@@ -133,7 +137,7 @@ impl FrameEvidenceLimits {
     }
 }
 
-/// Optional ROI on the oriented original frame.
+/// Optional region of interest on the oriented original frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameEvidenceRequest<'a> {
     frame: &'a SavedFrameRef,
@@ -631,7 +635,7 @@ fn apply_roi(
     if crop_w > limits.max_edge() || crop_h > limits.max_edge() {
         return Err(FrameEvidenceFailure::new(
             FrameEvidenceFailureKind::DecodeLimitsExceeded,
-            "ROI crop edge exceeds the configured limit",
+            "region of interest crop edge exceeds the configured limit",
         ));
     }
     let stride = usize::try_from(width).unwrap_or(0).saturating_mul(3);
@@ -643,7 +647,7 @@ fn apply_roi(
         if end > rgb.len() {
             return Err(FrameEvidenceFailure::new(
                 FrameEvidenceFailureKind::CorruptPayload,
-                "ROI crop exceeds RGB buffer",
+            "region of interest crop exceeds RGB buffer",
             ));
         }
         out.extend_from_slice(&rgb[start..end]);
@@ -676,7 +680,7 @@ fn roi_is_full_frame(roi: FrameRoiTransform) -> bool {
 }
 
 fn full_frame_transform() -> FrameRoiTransform {
-    FrameRoiTransform::new([0.0, 0.0, 1.0, 1.0]).expect("full frame bounds")
+    FrameRoiTransform::full_frame()
 }
 
 fn ensure_rgb_bounds(len: usize, limits: FrameEvidenceLimits) -> Result<(), FrameEvidenceFailure> {

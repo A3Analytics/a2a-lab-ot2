@@ -25,8 +25,8 @@ pub use annotation_queue::{
     ANNOTATION_RECONCILE_INTERVAL, AnnotationQueueWorker, VideoDvrAnnotationQueue,
 };
 pub use annotation_worker::{
-    AnyIndexingAnnotationWorker, DeterministicDescriptionOnlyWorker, DeterministicIndexingWorker,
-    IndexingAnnotationWorker, IndexingWorkerBatchReport, LiveDescriptionOnlyWorker,
+    AnyIndexingAnnotationWorker, DeterministicIndexingWorker, IndexingAnnotationWorker,
+    DeterministicDescriptionOnlyWorker, IndexingWorkerBatchReport, LiveDescriptionOnlyWorker,
     LiveIndexingWorker,
 };
 pub mod semantic_search;

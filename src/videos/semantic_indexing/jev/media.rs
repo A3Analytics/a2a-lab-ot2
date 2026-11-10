@@ -59,11 +59,12 @@ impl JevDecisionMedia for InjectedJevDecisionMedia {
         let frame_id = frame.frame_id().as_str().to_owned();
         let frames = self.frames.clone();
         async move {
-            frames.get(&frame_id).cloned().ok_or_else(|| {
-                FrameDecisionEvaluationFailure::InvalidEvidence {
+            frames
+                .get(&frame_id)
+                .cloned()
+                .ok_or_else(|| FrameDecisionEvaluationFailure::InvalidEvidence {
                     message: format!("no injected frame still for {frame_id}"),
-                }
-            })
+                })
         }
     }
 
@@ -75,11 +76,12 @@ impl JevDecisionMedia for InjectedJevDecisionMedia {
         let key = digest.as_str().to_owned();
         let references = self.references.clone();
         async move {
-            references.get(&key).cloned().ok_or_else(|| {
-                FrameDecisionEvaluationFailure::InvalidEvidence {
+            references
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| FrameDecisionEvaluationFailure::InvalidEvidence {
                     message: format!("no injected reference for {key}"),
-                }
-            })
+                })
         }
     }
 }

@@ -38,11 +38,14 @@ pub fn resolve_semantic_indexing(
                 .sources
                 .iter()
                 .map(|source| {
-                    source.semantic_indexing.clone().unwrap_or_else(|| {
-                        a2a_lab_dev_kit::SemanticStreamSchedule::every_saved_frame(
-                            source.id.as_str(),
-                        )
-                    })
+                    source
+                        .semantic_indexing
+                        .clone()
+                        .unwrap_or_else(|| {
+                            a2a_lab_dev_kit::SemanticStreamSchedule::every_saved_frame(
+                                source.id.as_str(),
+                            )
+                        })
                 })
                 .collect()
         })

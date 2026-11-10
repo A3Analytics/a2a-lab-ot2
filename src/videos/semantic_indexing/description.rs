@@ -9,10 +9,11 @@ use a2a_lab_dev_kit::videos::{
     FrameDescriptionProviderConfig, FrameDescriptionRequest, KeyedFrameDescription,
     SemanticIndexingFailure, validate_description_batch,
 };
+use base64::Engine;
 use rig::bedrock::client::Client as BedrockClient;
 use rig::bedrock::completion::CompletionModel as BedrockCompletionModel;
 use rig::client::{CompletionClient, ProviderClient};
-use rig::completion::{AssistantContent, CompletionModel, Message};
+use rig::completion::{AssistantContent, CompletionModel, CompletionRequest, Message};
 use rig::message::{DocumentSourceKind, Image, ImageMediaType, UserContent};
 use rig::providers::openai::Client as OpenAiClient;
 use tokio::time::timeout;
@@ -187,23 +188,8 @@ async fn describe_with_model<M: CompletionModel + Clone>(
     model: &M,
     jpeg: Vec<u8>,
 ) -> Result<String, SemanticIndexingFailure> {
-    let image = Image {
-        data: DocumentSourceKind::Raw(jpeg),
-        media_type: Some(ImageMediaType::JPEG),
-        detail: None,
-        additional_params: None,
-    };
-    let request = model
-        .completion_request("Describe this lab video frame for search retrieval.")
-        .preamble(DESCRIPTION_PROMPT.to_owned())
-        .message(Message::User {
-            content: vec![
-                UserContent::Image(image),
-                UserContent::Text("Return only the description text.".to_owned().into()),
-            ],
-        })
-        .temperature(0.0)
-        .build();
+    let image = encoded_jpeg_image(&jpeg);
+    let request = build_description_request(model, image);
     let response = model
         .completion(request)
         .await
@@ -220,8 +206,59 @@ async fn describe_with_model<M: CompletionModel + Clone>(
     Ok(parts.join(" ").trim().to_owned())
 }
 
+fn build_description_request<M: CompletionModel + Clone>(
+    model: &M,
+    image: Image,
+) -> CompletionRequest {
+    model
+        .completion_request("Describe this lab video frame for search retrieval.")
+        .preamble(DESCRIPTION_PROMPT.to_owned())
+        .message(Message::User {
+            content: vec![
+                UserContent::Image(image),
+                UserContent::Text("Return only the description text.".to_owned().into()),
+            ],
+        })
+        .build()
+}
+
+fn encoded_jpeg_image(jpeg: &[u8]) -> Image {
+    Image {
+        data: DocumentSourceKind::Base64(base64::engine::general_purpose::STANDARD.encode(jpeg)),
+        media_type: Some(ImageMediaType::JPEG),
+        detail: None,
+        additional_params: None,
+    }
+}
+
 fn map_completion_error(error: &rig::completion::CompletionError) -> SemanticIndexingFailure {
     SemanticIndexingFailure::ProviderUnavailable {
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bedrock_image_uses_standard_base64_and_preserves_jpeg_media_type() {
+        let image = encoded_jpeg_image(&[0xff, 0xd8, 0x00, 0x01]);
+        assert_eq!(image.media_type, Some(ImageMediaType::JPEG));
+        assert_eq!(
+            image.data,
+            DocumentSourceKind::Base64("/9gAAQ==".to_owned())
+        );
+    }
+
+    #[test]
+    fn description_request_omits_unsupported_temperature() {
+        let model = rig::providers::openai::Client::builder()
+            .api_key("test")
+            .build()
+            .expect("test client")
+            .completion_model("test-model");
+        let request = build_description_request(&model, encoded_jpeg_image(b"jpeg"));
+        assert_eq!(request.temperature, None);
     }
 }

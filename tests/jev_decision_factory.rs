@@ -10,7 +10,7 @@ const SEMANTIC_LIMITS: &str = r#""limits":{"worker":{"max_batch_items":4,"max_co
 
 fn semantic_config() -> SemanticIndexingConfig {
     let document = format!(
-        r#"{{"schema_version":2,"semantic_indexing":{{"description":{{"provider":"bedrock"}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0","credentials":{{"env":"TYPESAFE_API_KEY"}}}}}}}}"#
+        r#"{{"schema_version":2,"semantic_indexing":{{"description":{{"provider":"bedrock"}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine"}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0","credentials":{{"env":"TYPESAFE_API_KEY"}}}}}}}}"#
     );
     A2aLabConfig::parse(&document)
         .unwrap()

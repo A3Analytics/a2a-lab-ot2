@@ -293,9 +293,11 @@ async fn provider_outage_records_failed_coverage_without_luna() {
     let config = pilot_evaluator_config();
     let mut pilot = pilot_targets();
     let targets = [pilot.remove(0)];
-    let request =
-        EnqueueDecisionEvaluationsRequest::on_demand_pilot_frames(config.clone(), vec![frame_id])
-            .unwrap();
+    let request = EnqueueDecisionEvaluationsRequest::on_demand_pilot_frames(
+        config.clone(),
+        vec![frame_id],
+    )
+    .unwrap();
     store
         .enqueue_decision_evaluation_jobs(&request)
         .await

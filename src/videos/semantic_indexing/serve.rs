@@ -61,6 +61,9 @@ pub async fn prepare_semantic_serve_bundle(
     dvr.set_indexed_source_filter(IndexedSourceFilter::allow_only(
         semantic.indexed_source_ids.clone(),
     ));
+    if let Some(embeddings) = semantic.config.embeddings.as_ref() {
+        let _ = dvr.sync_embedding_config(embeddings).await?;
+    }
 
     let search = if semantic.config.embeddings.is_none() {
         None

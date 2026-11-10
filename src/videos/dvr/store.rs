@@ -11,6 +11,7 @@ use a2a_lab_dev_kit::{
     UtcTimestamp, VideoCodec, VideoSourceId,
 };
 use futures_util::TryStreamExt;
+use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
 use sqlx::{Row, SqlitePool};
 use tokio::task;
@@ -37,6 +38,8 @@ const SCHEMA_DECISION_EVALUATION_JOBS: &str =
     include_str!("../../../migrations/011_frame_decision_evaluation_jobs.sql");
 const SCHEMA_SEMANTIC_STAGE_SCHEDULES: &str =
     include_str!("../../../migrations/012_semantic_stage_schedules.sql");
+const SCHEMA_EMBEDDING_CONFIG_IDENTITY: &str =
+    include_str!("../../../migrations/013_embedding_config_identity.sql");
 
 /// Default root directory for indexed video payloads and SQLite index.
 pub const DEFAULT_VIDEO_DVR_ROOT: &str = ".a2a-lab-ot2/video-dvr";
@@ -58,6 +61,73 @@ pub struct IndexedVideoDvr {
 }
 
 impl IndexedVideoDvr {
+    /// Persists the active embedding space and invalidates only stale vectors.
+    pub async fn sync_embedding_config(
+        &self,
+        config: &a2a_lab_dev_kit::SemanticEmbeddingsConfig,
+    ) -> Result<bool, A2aLabError> {
+        let space = config.space();
+        let identity = format!(
+            "{}|{}|{}|{:?}|{:?}",
+            config.provider(),
+            config.model(),
+            space.dimensions,
+            space.normalization,
+            space.metric
+        );
+        let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+        let prior: Option<String> = sqlx::query_scalar(
+            "SELECT config_digest FROM semantic_embedding_config_identity WHERE singleton_id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_error)?;
+        if prior.as_deref() == Some(digest.as_str()) {
+            return Ok(false);
+        }
+        let now_us = crate::time::now()?.as_micros();
+        let mut tx = self.pool.begin().await.map_err(db_error)?;
+        sqlx::query(
+            "INSERT INTO semantic_embedding_config_identity
+             (singleton_id, provider, model, dimensions, normalization, metric, config_digest, updated_at_us)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(singleton_id) DO UPDATE SET provider=excluded.provider,
+               model=excluded.model, dimensions=excluded.dimensions,
+               normalization=excluded.normalization, metric=excluded.metric,
+               config_digest=excluded.config_digest, updated_at_us=excluded.updated_at_us",
+        )
+        .bind(config.provider())
+        .bind(config.model())
+        .bind(i64::from(space.dimensions))
+        .bind(format!("{:?}", space.normalization))
+        .bind(format!("{:?}", space.metric))
+        .bind(&digest)
+        .bind(now_us)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_error)?;
+        if prior.is_some() {
+            sqlx::query(
+                "UPDATE semantic_frame_revisions
+                 SET embedding_checkpoint = 'pending'
+                 WHERE search_current = 1 AND retained_state = 'retained'",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
+            sqlx::query(
+                "UPDATE semantic_indexing_job_runtime
+                 SET job_state = 'pending', lease_owner = NULL, lease_expires_at_us = NULL
+                 WHERE job_state IN ('ready', 'described', 'vector_pending')",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
+        }
+        tx.commit().await.map_err(db_error)?;
+        Ok(prior.is_some())
+    }
+
     /// Opens or creates the store. Validates storage before capture starts.
     pub async fn open(root: impl AsRef<Path>, retain_secs: u64) -> Result<Self, A2aLabError> {
         if retain_secs == 0 {
@@ -110,6 +180,7 @@ impl IndexedVideoDvr {
             .chain(SCHEMA_INDEXING_JOB_LIFECYCLE.split(';'))
             .chain(SCHEMA_DECISION_EVALUATION_JOBS.split(';'))
             .chain(SCHEMA_SEMANTIC_STAGE_SCHEDULES.split(';'))
+            .chain(SCHEMA_EMBEDDING_CONFIG_IDENTITY.split(';'))
         {
             let statement = statement.trim();
             if statement.is_empty() {

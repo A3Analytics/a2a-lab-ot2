@@ -200,8 +200,7 @@ async fn cancelled_embedding_provider_reports_cancelled() {
         r#"{{"schema_version":2,"semantic_indexing":{{"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
     );
     let semantic = semantic_config(&document);
-    let embedding_config =
-        embedding_provider_config(semantic.embeddings.as_ref().unwrap()).unwrap();
+    let embedding_config = embedding_provider_config(semantic.embeddings.as_ref().unwrap()).unwrap();
     let provider = FakeTextEmbeddingProvider::new(
         embedding_config,
         TextEmbeddingLimits::pilot(),
