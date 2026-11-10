@@ -15,8 +15,9 @@ mod smoke;
 
 pub use bundle::SemanticIndexingProviders;
 pub use config::{
-    default_open_luna_description_provider, default_open_luna_embedding_provider,
-    description_provider_config, description_provider_config_for_model, embedding_provider_config,
+    DEFAULT_LOCAL_BGE_MODEL, default_open_luna_description_provider,
+    default_open_luna_embedding_provider, description_provider_config,
+    description_provider_config_for_model, embedding_provider_config,
     embedding_provider_config_for_model,
 };
 pub use credentials::redacted_credential_env;

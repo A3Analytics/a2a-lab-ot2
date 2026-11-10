@@ -1,12 +1,15 @@
 //! Builds dev-kit provider configs from v2 semantic indexing settings.
 
 use a2a_lab_dev_kit::{
-    A2aLabError, FrameDescriptionBackend, FrameDescriptionProviderConfig,
+    A2aLabError, EmbeddingMetric, FrameDescriptionBackend, FrameDescriptionProviderConfig,
     SemanticDescriptionConfig, SemanticEmbeddingsConfig, SemanticIndexingConfig,
-    TextEmbeddingProviderConfig,
+    TextEmbeddingProviderConfig, VectorNormalization,
 };
 
 use super::prompt::{description_preprocessing_digest, description_prompt_digest};
+
+/// Default local BGE model and its immutable retrieval-space contract.
+pub const DEFAULT_LOCAL_BGE_MODEL: &str = "BAAI/bge-small-en-v1.5";
 
 /// Resolved Luna description config independent from chat.
 pub fn description_provider_config(
@@ -43,6 +46,17 @@ pub fn embedding_provider_config_for_model(
 ) -> Result<TextEmbeddingProviderConfig, A2aLabError> {
     let model = model.unwrap_or_else(|| embeddings.model());
     let space = embeddings.space();
+    if embeddings.provider().eq_ignore_ascii_case("local_bge")
+        && (model != DEFAULT_LOCAL_BGE_MODEL
+            || space.dimensions != 384
+            || space.normalization != VectorNormalization::L2Unit
+            || space.metric != EmbeddingMetric::Cosine)
+    {
+        return Err(A2aLabError::invalid(
+            "semantic_indexing.embeddings.space",
+            "local_bge requires BAAI/bge-small-en-v1.5, 384 dimensions, l2_unit normalization, and cosine metric",
+        ));
+    }
     let identity = a2a_lab_dev_kit::ModelSpaceIdentity::new(
         embeddings.provider(),
         model,
