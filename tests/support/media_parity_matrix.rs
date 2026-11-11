@@ -814,7 +814,7 @@ pub async fn run() {
     lab.videos.shutdown();
 
     // Failure isolation and hardware-free failures
-    run_failure_matrix().await;
+    Box::pin(run_failure_matrix()).await;
 }
 
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]

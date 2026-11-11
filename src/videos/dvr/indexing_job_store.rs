@@ -130,6 +130,23 @@ pub struct IndexingWorkerQueueStats {
     pub backlog_over_limit: bool,
 }
 
+/// True when a ready DVR row exists at the manifest frame key (legacy segment or chunk frame).
+const RETAINED_DVR_PAYLOAD_EXISTS: &str = "\
+     EXISTS (
+       SELECT 1 FROM dvr_frames df
+       WHERE df.source_id = f.source_id
+         AND df.track_id = f.track_id
+         AND df.start_us = f.start_us
+         AND df.payload_ready = 1
+     )
+     OR EXISTS (
+       SELECT 1 FROM dvr_segments ds
+       WHERE ds.source_id = f.source_id
+         AND ds.track_id = f.track_id
+         AND ds.start_us = f.start_us
+         AND ds.payload_ready = 1
+     )";
+
 pub(crate) async fn ensure_job_runtime_tx(
     tx: &mut Transaction<'_, Sqlite>,
     job_id: &str,
@@ -260,7 +277,7 @@ impl IndexedVideoDvr {
         record_from_row(&row)
     }
 
-    /// Counts jobs that are not terminal, for backlog limits.
+    /// Counts jobs that are not terminal, for backlog telemetry.
     pub async fn count_active_indexing_jobs(&self) -> Result<u64, A2aLabError> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
@@ -309,6 +326,43 @@ impl IndexedVideoDvr {
     pub async fn clear_legacy_materialization_pause(&self) -> Result<(), A2aLabError> {
         self.set_worker_meta_flag("materialization_paused", false)
             .await
+    }
+
+    /// Marks claimable jobs whose retained manifest keys have no DVR media as expired.
+    pub async fn classify_expired_indexing_jobs_missing_retained_media(
+        &self,
+        now_us: i64,
+        batch: u32,
+    ) -> Result<u32, A2aLabError> {
+        let limit = i64::from(batch.max(1));
+        let result = sqlx::query(&format!(
+            "UPDATE semantic_indexing_job_runtime
+             SET job_state = 'expired',
+                 lease_owner = NULL,
+                 lease_expires_at_us = NULL,
+                 completed_at_us = ?1,
+                 last_retry_reason = 'frame_expired'
+             WHERE job_id IN (
+               SELECT r.job_id
+               FROM semantic_indexing_job_runtime r
+               JOIN semantic_indexing_jobs j ON j.job_id = r.job_id
+               JOIN semantic_frame_revisions f ON f.frame_id = j.frame_id
+               WHERE f.search_current = 1
+                 AND f.retained_state = 'retained'
+                 AND r.job_state IN ('pending', 'retryable_failed', 'described')
+                 AND (r.lease_expires_at_us IS NULL OR r.lease_expires_at_us < ?1)
+                 AND r.next_retry_at_us <= ?1
+                 AND NOT ({RETAINED_DVR_PAYLOAD_EXISTS})
+               ORDER BY j.created_at_us ASC, j.job_id ASC
+               LIMIT ?2
+             )"
+        ))
+        .bind(now_us)
+        .bind(limit)
+        .execute(self.sqlite_pool())
+        .await
+        .map_err(db_error)?;
+        Ok(u32::try_from(result.rows_affected()).unwrap_or(0))
     }
 
     /// Reclaims leases past their deadline back to a claimable state.
@@ -416,7 +470,7 @@ impl IndexedVideoDvr {
             return Ok(Vec::new());
         }
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        sqlx::query(
+        sqlx::query(&format!(
             "SELECT j.job_id, j.frame_id
              FROM semantic_indexing_jobs j
              JOIN semantic_indexing_job_runtime r ON r.job_id = j.job_id
@@ -441,9 +495,12 @@ impl IndexedVideoDvr {
                      AND length(emb.embedding_vector) > 0
                  )
                )
-             ORDER BY j.created_at_us ASC, j.job_id ASC
-             LIMIT ?2",
-        )
+             ORDER BY
+               CASE WHEN {RETAINED_DVR_PAYLOAD_EXISTS} THEN 0 ELSE 1 END ASC,
+               j.created_at_us ASC,
+               j.job_id ASC
+             LIMIT ?2"
+        ))
         .bind(now_us)
         .bind(limit)
         .bind(i64::from(enqueue_priority))

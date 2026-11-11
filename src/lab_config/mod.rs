@@ -24,14 +24,14 @@ use a2a_lab_dev_kit::{A2aLabError, LoadedLabConfig, LoggingGuard, init_logging_f
 pub struct LabConfigBootstrap {
     /// Merged chat and video settings from the selected file.
     pub resolved: ResolvedLabConfig,
-    _logging: Option<LoggingGuard>,
+    logging: Option<LoggingGuard>,
 }
 
 impl LabConfigBootstrap {
     /// Returns whether a dev-kit logging guard is held for this process.
     #[must_use]
     pub const fn logging_enabled(&self) -> bool {
-        self._logging.is_some()
+        self.logging.is_some()
     }
 }
 
@@ -45,14 +45,10 @@ pub fn bootstrap_lab_config(inputs: &LabConfigInputs) -> Result<LabConfigBootstr
     let loaded = LoadedLabConfig::load(&path)?;
     let resolved = resolve(inputs, Some(&loaded))?;
     let logging = init_logging_from_loaded(&loaded)?;
-    Ok(LabConfigBootstrap {
-        resolved,
-        _logging: logging,
-    })
+    Ok(LabConfigBootstrap { resolved, logging })
 }
 
 /// Uses a prior bootstrap result when present to avoid reloading the configuration file.
-#[must_use]
 pub fn resolved_lab_config(
     bootstrap: Option<&LabConfigBootstrap>,
     inputs: &LabConfigInputs,

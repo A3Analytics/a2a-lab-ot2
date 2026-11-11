@@ -17,7 +17,7 @@ use super::frame_manifest::{
     IndexingCheckpoint, ManifestRetainedState, MediaPayloadStatus, SemanticFrameManifestRecord,
 };
 use super::indexing_job_store::{IndexingJobRecord, IndexingJobState};
-use super::indexing_registration::IndexingWorkerLane;
+use super::indexing_registration::{DEFAULT_RECONCILE_BATCH, IndexingWorkerLane};
 use super::store::IndexedVideoDvr;
 use super::worker_faults::IndexingWorkerFaults;
 use crate::videos::semantic_indexing::{SemanticIndexingProviders, build_deterministic_providers};
@@ -231,6 +231,10 @@ where
                 .saturating_mul(1_000_000),
         );
         let claim_batch = indexing_claim_batch_size(&self.limits);
+        let classify_batch = claim_batch.saturating_mul(4).max(DEFAULT_RECONCILE_BATCH);
+        let _ = dvr
+            .classify_expired_indexing_jobs_missing_retained_media(now_us, classify_batch)
+            .await?;
         let claimed = dvr
             .claim_indexing_jobs_for_lane(&self.worker_id, claim_batch, deadline, now_us, self.lane)
             .await?;
@@ -426,6 +430,10 @@ where
                 .saturating_mul(1_000_000),
         );
         let claim_batch = indexing_claim_batch_size(&self.limits);
+        let classify_batch = claim_batch.saturating_mul(4).max(DEFAULT_RECONCILE_BATCH);
+        let _ = dvr
+            .classify_expired_indexing_jobs_missing_retained_media(now_us, classify_batch)
+            .await?;
         let claimed = dvr
             .claim_indexing_jobs_for_lane(
                 &self.worker_id,

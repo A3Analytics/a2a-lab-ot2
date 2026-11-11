@@ -468,7 +468,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lab = connect(&cli)?;
     match command {
         Command::Serve => {
-            Box::pin(serve(lab, &cli, &config_inputs, config_bootstrap.as_ref())).await?
+            Box::pin(serve(lab, &cli, &config_inputs, config_bootstrap.as_ref())).await?;
         }
         Command::ListTasks => list_tasks(&lab).await?,
         Command::ListLogSources => list_log_sources(&lab).await?,
