@@ -22,18 +22,25 @@ async fn record_once(
     )
     .await
     .expect("store");
-    let result = build_serve_lab_agent(inputs, legacy, "http://127.0.0.1:9/mcp", store, {
-        let hook = hook.clone();
-        move |provider, model, _url, _store| {
+    let result = build_serve_lab_agent(
+        inputs,
+        legacy,
+        "http://127.0.0.1:9/mcp",
+        store,
+        {
             let hook = hook.clone();
-            async move {
-                hook.record(provider, &model)?;
-                Err::<a2a_lab_ot2::LabAgent, _>(a2a_lab_dev_kit::A2aLabError::unavailable(
-                    "stop before paid provider",
-                ))
+            move |provider, model, _url, _store| {
+                let hook = hook.clone();
+                async move {
+                    hook.record(provider, &model)?;
+                    Err::<a2a_lab_ot2::LabAgent, _>(a2a_lab_dev_kit::A2aLabError::unavailable(
+                        "stop before paid provider",
+                    ))
+                }
             }
-        }
-    })
+        },
+        None,
+    )
     .await
     .map(|_pair: (a2a_lab_ot2::LabAgent, _)| ());
     (recorder, result)
@@ -46,7 +53,7 @@ async fn factory_records_legacy_no_file_chat_once() {
         model: None,
         bedrock_model: None,
     };
-    let expected = serve_chat_settings(&LabConfigInputs::default(), &legacy).unwrap();
+    let expected = serve_chat_settings(&LabConfigInputs::default(), &legacy, None).unwrap();
     let (recorder, result) = record_once(&LabConfigInputs::default(), &legacy).await;
     assert!(result.is_err());
     assert_eq!(
@@ -74,7 +81,7 @@ async fn factory_records_file_only_chat_once() {
         model: None,
         bedrock_model: None,
     };
-    let expected = serve_chat_settings(&inputs, &legacy).unwrap();
+    let expected = serve_chat_settings(&inputs, &legacy, None).unwrap();
     let (recorder, result) = record_once(&inputs, &legacy).await;
     assert!(result.is_err());
     assert_eq!(
@@ -94,7 +101,7 @@ async fn factory_records_explicit_override_once() {
         model: Some("override-model".to_owned()),
         bedrock_model: None,
     };
-    let expected = serve_chat_settings(&inputs, &legacy).unwrap();
+    let expected = serve_chat_settings(&inputs, &legacy, None).unwrap();
     assert_eq!(expected.model, "override-model");
     let (recorder, result) = record_once(&inputs, &legacy).await;
     assert!(result.is_err());

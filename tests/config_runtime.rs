@@ -213,6 +213,7 @@ async fn assert_factory_records_openai(inputs: &LabConfigInputs, dir: &Path) {
                 ))
             }
         },
+        None,
     )
     .await;
     assert!(built.is_err());
@@ -544,6 +545,7 @@ async fn malformed_file_fails_before_chat_or_capture_side_effects() {
                 Ok::<(), a2a_lab_dev_kit::A2aLabError>(())
             }
         },
+        None,
     )
     .await;
     assert!(built.is_err());

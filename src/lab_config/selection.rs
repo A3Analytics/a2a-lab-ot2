@@ -8,7 +8,7 @@ use a2a_lab_dev_kit::A2aLabError;
 use crate::agent::{ModelProvider, selected_model};
 
 use super::inputs::{ClapValueSource, LabConfigInputs};
-use super::resolve::ResolvedChatSettings;
+use super::resolve::{ResolvedChatSettings, ResolvedLabConfig};
 use super::resolve_lab_config;
 
 /// Whether serve should build video capture from [`super::resolve_lab_config`].
@@ -41,8 +41,12 @@ pub struct ServeChatLegacyInputs {
 pub fn serve_chat_settings(
     inputs: &LabConfigInputs,
     legacy: &ServeChatLegacyInputs,
+    preresolved: Option<&ResolvedLabConfig>,
 ) -> Result<ResolvedChatSettings, A2aLabError> {
     if uses_resolved_chat_configuration(inputs)? {
+        if let Some(resolved) = preresolved {
+            return Ok(resolved.chat.clone());
+        }
         return Ok(resolve_lab_config(inputs)?.chat);
     }
     let provider = legacy.model_provider;
@@ -61,12 +65,13 @@ pub async fn build_serve_lab_agent<F, Fut, A>(
     mcp_url: &str,
     store: crate::ConversationStore,
     factory: F,
+    preresolved: Option<&ResolvedLabConfig>,
 ) -> Result<(A, ResolvedChatSettings), A2aLabError>
 where
     F: FnOnce(ModelProvider, String, String, crate::ConversationStore) -> Fut,
     Fut: Future<Output = Result<A, A2aLabError>>,
 {
-    let chat = serve_chat_settings(inputs, legacy)?;
+    let chat = serve_chat_settings(inputs, legacy, preresolved)?;
     let built = factory(chat.provider, chat.model.clone(), mcp_url.to_owned(), store).await?;
     Ok((built, chat))
 }
@@ -155,7 +160,7 @@ mod tests {
             model: None,
             bedrock_model: Some("custom-bedrock".to_owned()),
         };
-        let chat = serve_chat_settings(&LabConfigInputs::default(), &legacy).unwrap();
+        let chat = serve_chat_settings(&LabConfigInputs::default(), &legacy, None).unwrap();
         assert_eq!(chat.provider, ModelProvider::Bedrock);
         assert_eq!(chat.model, "custom-bedrock");
     }
@@ -169,7 +174,7 @@ mod tests {
             model: None,
             bedrock_model: None,
         };
-        let expected = serve_chat_settings(&LabConfigInputs::default(), &legacy).unwrap();
+        let expected = serve_chat_settings(&LabConfigInputs::default(), &legacy, None).unwrap();
         let store = crate::ConversationStore::open(
             &std::env::temp_dir().join(format!("serve-chat-factory-{}", std::process::id())),
             1,
@@ -190,6 +195,7 @@ mod tests {
                     ))
                 }
             },
+            None,
         )
         .await;
         assert!(result.is_err());

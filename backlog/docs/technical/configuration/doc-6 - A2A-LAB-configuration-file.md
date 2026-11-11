@@ -12,7 +12,7 @@ created_date: "2026-11-06 03:21"
 
 Select chat and live video settings from one JSON file. The file is optional. With neither `--config` nor `A2ALAB_CONFIG`, serve keeps the existing command-line and environment behavior.
 
-Samples live in `.mise/examples/`. Each one passes `config validate` without cameras, a robot, or provider credentials.
+Samples live in `.mise/examples/`. Each one passes `config validate` without cameras, a robot, or provider credentials. Only samples that include a `logging` object opt in to application logging at serve startup.
 
 ## Select the file
 
@@ -71,6 +71,19 @@ Still images for `external-camera` and `camera` stay on the existing image histo
 ## Chat
 
 `chat` may be omitted. `provider` is `bedrock`, `openai`, or `anthropic`. `model` is optional. When present it must contain non-whitespace text. Credentials stay in the existing provider environment and profile chain (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and AWS settings). The file has no secret fields.
+
+## Application logging
+
+The dev kit reads an optional `logging` object. When the object is present, `a2a-lab-ot2` installs application logging once during startup and keeps the subscriber for the process lifetime. When `logging` is omitted, no subscriber is installed.
+
+Omitted `logging.format` uses human-readable stderr text. Set `"format": "json"` for structured JSON lines. Optional `logging.opentelemetry.endpoint` requires the dev kit `otel` feature at build time. The file must not contain credentials or payload samples.
+
+`.mise/examples/logging.json` shows a minimal enabled section. `config validate` does not install logging; only normal execution after configuration selection does.
+
+```bash
+export A2ALAB_CONFIG="$PWD/.mise/examples/logging.json"
+mise run start
+```
 
 ## Migration
 

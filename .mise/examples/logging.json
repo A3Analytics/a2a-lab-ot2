@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "logging": {
+    "level": "info",
+    "format": "text"
+  },
+  "chat": {
+    "provider": "anthropic"
+  },
+  "videos": {
+    "sources": []
+  }
+}

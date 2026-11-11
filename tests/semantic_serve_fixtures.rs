@@ -228,6 +228,7 @@ async fn decision_append_keeps_chat_factory_single_invocation() {
                 .await
             }
         },
+        None,
     )
     .await;
     let (dir, store) = {

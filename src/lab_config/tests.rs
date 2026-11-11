@@ -395,9 +395,9 @@ fn videos_only_file_leaves_legacy_serve_chat_unchanged() {
         model: None,
         bedrock_model: None,
     };
-    let chat = crate::lab_config::serve_chat_settings(&inputs, &legacy).unwrap();
+    let chat = crate::lab_config::serve_chat_settings(&inputs, &legacy, None).unwrap();
     let legacy_only =
-        crate::lab_config::serve_chat_settings(&LabConfigInputs::default(), &legacy).unwrap();
+        crate::lab_config::serve_chat_settings(&LabConfigInputs::default(), &legacy, None).unwrap();
     assert_eq!(chat, legacy_only);
     assert_eq!(chat.model, crate::DEFAULT_BEDROCK_MODEL);
 }
@@ -420,7 +420,43 @@ fn file_provider_without_model_uses_provider_default() {
         model: None,
         bedrock_model: None,
     };
-    let chat = crate::lab_config::serve_chat_settings(&inputs, &legacy).unwrap();
+    let chat = crate::lab_config::serve_chat_settings(&inputs, &legacy, None).unwrap();
     assert_eq!(chat.provider, ModelProvider::OpenAi);
     assert_eq!(chat.model, crate::DEFAULT_OPENAI_MODEL);
+}
+
+#[test]
+fn bootstrap_omits_logging_when_config_section_absent() {
+    use a2a_lab_dev_kit::reset_logging_installed_for_tests;
+
+    reset_logging_installed_for_tests();
+    let dir = std::env::temp_dir().join(format!("a2a-lab-ot2-log-off-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a2a-lab.json");
+    load_config_file(r#"{"schema_version":1}"#, &path);
+    let inputs = LabConfigInputs {
+        config_path: ExplicitSetting::cli(Some(path)),
+        ..LabConfigInputs::default()
+    };
+    let bootstrap = crate::lab_config::bootstrap_lab_config(&inputs).unwrap();
+    assert!(!bootstrap.logging_enabled());
+}
+
+#[test]
+fn bootstrap_installs_logging_when_section_present() {
+    use a2a_lab_dev_kit::{logging_installed, reset_logging_installed_for_tests};
+
+    reset_logging_installed_for_tests();
+    let dir = std::env::temp_dir().join(format!("a2a-lab-ot2-log-on-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a2a-lab.json");
+    load_config_file(r#"{"schema_version":1,"logging":{}}"#, &path);
+    let inputs = LabConfigInputs {
+        config_path: ExplicitSetting::cli(Some(path)),
+        ..LabConfigInputs::default()
+    };
+    let bootstrap = crate::lab_config::bootstrap_lab_config(&inputs).unwrap();
+    assert!(bootstrap.logging_enabled());
+    assert!(logging_installed());
+    drop(bootstrap);
 }

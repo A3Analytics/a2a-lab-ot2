@@ -23,13 +23,13 @@ use a2a_lab_ot2::{
     DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_IMAGE_RETENTION_PER_SOURCE, DEFAULT_SILA_PORT,
     DEFAULT_SILA_UUID, DEFAULT_SYNC_CHUNK_ROOT, DEFAULT_SYNC_DB, DEFAULT_VIDEO_DVR_ROOT,
     DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, ExplicitSetting, FixtureConfig, FixtureServer,
-    FixtureVariant, ImageHistoryMaintenance, ImageServeConfig, LabAgent, LabConfigCliValues,
-    LabConfigInputs, LiveImageCatalog, LiveVideoCatalog, LiveVideoInjections, ModelProvider,
-    OidcConfig, OpentronsLab, ServeChatLegacyInputs, SilaConfig, VideoServeConfig,
-    build_serve_lab_agent, image_catalog, open_image_catalog,
+    FixtureVariant, ImageHistoryMaintenance, ImageServeConfig, LabAgent, LabConfigBootstrap,
+    LabConfigCliValues, LabConfigInputs, LiveImageCatalog, LiveVideoCatalog, LiveVideoInjections,
+    ModelProvider, OidcConfig, OpentronsLab, ServeChatLegacyInputs, SilaConfig, VideoServeConfig,
+    bootstrap_lab_config, build_serve_lab_agent, image_catalog, open_image_catalog,
     open_resolved_video_catalog_with_semantic, open_video_catalog, prepare_sila,
-    resolve_lab_config, resolved_video_summary, selected_config_path, sila_server,
-    uses_resolved_video_configuration, with_oidc,
+    resolve_lab_config, resolved_lab_config, resolved_video_summary, selected_config_path,
+    sila_server, uses_resolved_video_configuration, with_oidc,
 };
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -439,9 +439,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return run_jev_decision_smoke(config, frame_id, evaluation_id, video_dvr_root).await;
     }
-    if selected_config_path(&config_inputs)?.is_some() {
-        resolve_lab_config(&config_inputs).map_err(config_error)?;
-    }
+    let config_bootstrap = if selected_config_path(&config_inputs)?.is_some() {
+        Some(bootstrap_lab_config(&config_inputs).map_err(config_error)?)
+    } else {
+        None
+    };
     if let Command::OrbbecSdkVersion = &command {
         return print_orbbec_sdk_version();
     }
@@ -465,7 +467,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let lab = connect(&cli)?;
     match command {
-        Command::Serve => Box::pin(serve(lab, &cli, &config_inputs)).await?,
+        Command::Serve => {
+            Box::pin(serve(lab, &cli, &config_inputs, config_bootstrap.as_ref())).await?
+        }
         Command::ListTasks => list_tasks(&lab).await?,
         Command::ListLogSources => list_log_sources(&lab).await?,
         Command::ListMetrics => list_metrics(&lab).await?,
@@ -741,16 +745,17 @@ fn config_error(error: A2aLabError) -> Box<dyn std::error::Error> {
 fn prepare_images(
     cli: &Cli,
     config_inputs: &LabConfigInputs,
+    bootstrap: Option<&LabConfigBootstrap>,
 ) -> Result<ImageServeConfig, Box<dyn std::error::Error>> {
     let mut images = image_config(cli)?;
     if uses_resolved_video_configuration(config_inputs)? {
-        let resolved = resolve_lab_config(config_inputs)?;
+        let resolved = resolved_lab_config(bootstrap, config_inputs)?;
         for source in &resolved.video.sources {
             images = images.with_source_label(&source.id, &source.name);
         }
     }
     println!("{}", images.summary());
-    println!("{}", video_startup_summary(cli, config_inputs)?);
+    println!("{}", video_startup_summary(cli, config_inputs, bootstrap)?);
     if images.orbbec_enabled() {
         println!(
             "frame sets   http://{}:{}/ot2/frame-sets/ui",
@@ -765,9 +770,12 @@ fn prepare_images(
 fn video_startup_summary(
     cli: &Cli,
     inputs: &LabConfigInputs,
+    bootstrap: Option<&LabConfigBootstrap>,
 ) -> Result<String, a2a_lab_dev_kit::A2aLabError> {
     if uses_resolved_video_configuration(inputs)? {
-        Ok(resolved_video_summary(&resolve_lab_config(inputs)?.video))
+        Ok(resolved_video_summary(
+            &resolved_lab_config(bootstrap, inputs)?.video,
+        ))
     } else {
         Ok(merged_video_config(cli)?.summary())
     }
@@ -807,6 +815,7 @@ async fn prepare_serve_images(
     lab: &OpentronsLab,
     cli: &Cli,
     config_inputs: &LabConfigInputs,
+    bootstrap: Option<&LabConfigBootstrap>,
 ) -> Result<
     (
         ImageServeConfig,
@@ -816,7 +825,7 @@ async fn prepare_serve_images(
     ),
     Box<dyn std::error::Error>,
 > {
-    let images = prepare_images(cli, config_inputs)?;
+    let images = prepare_images(cli, config_inputs, bootstrap)?;
     let opentrons = format!("opentrons robot-server at {}", cli.opentrons_url);
     lab.client()
         .health()
@@ -848,10 +857,11 @@ async fn serve(
     mut lab: OpentronsLab,
     cli: &Cli,
     config_inputs: &LabConfigInputs,
+    bootstrap: Option<&LabConfigBootstrap>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (images, catalog, _history_maintenance, capture_pump) =
-        prepare_serve_images(&lab, cli, config_inputs).await?;
-    let videos = prepare_serve_videos(cli, config_inputs).await?;
+        prepare_serve_images(&lab, cli, config_inputs, bootstrap).await?;
+    let videos = prepare_serve_videos(cli, config_inputs, bootstrap).await?;
     let frame_sets = open_frame_sets(
         &images,
         &catalog,
@@ -897,6 +907,7 @@ async fn serve(
         model: cli.model.clone(),
         bedrock_model: cli.bedrock_model.clone(),
     };
+    let preresolved = bootstrap.map(|loaded| &loaded.resolved);
     let (agent, chat) = build_serve_lab_agent(
         config_inputs,
         &legacy_chat,
@@ -905,6 +916,7 @@ async fn serve(
         |provider, model, mcp_url, store| async move {
             LabAgent::from_provider(provider, &model, &mcp_url, store).await
         },
+        preresolved,
     )
     .await
     .map_err(|error| startup_error("chat agent", error))?;
@@ -966,9 +978,10 @@ async fn serve(
 async fn prepare_serve_videos(
     cli: &Cli,
     inputs: &LabConfigInputs,
+    bootstrap: Option<&LabConfigBootstrap>,
 ) -> Result<Option<LiveVideoCatalog>, Box<dyn std::error::Error>> {
     if uses_resolved_video_configuration(inputs)? {
-        let resolved = resolve_lab_config(inputs)?;
+        let resolved = resolved_lab_config(bootstrap, inputs)?;
         return open_resolved_video_catalog_with_semantic(
             &resolved.video,
             LiveVideoInjections::none(),

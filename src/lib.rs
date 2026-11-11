@@ -35,11 +35,12 @@ pub use images::{
     ImageHistoryMaintenance, ImageServeConfig, LiveImageCatalog, image_catalog, open_image_catalog,
 };
 pub use lab_config::{
-    ClapValueSource, ExplicitSetting, LabConfigCliValues, LabConfigInputs, ResolvedChatSettings,
-    ResolvedDvrStorage, ResolvedLabConfig, ResolvedSemanticIndexing, ResolvedVideoSettings,
-    ServeChatLegacyInputs, SettingProvenance, build_serve_lab_agent, resolve_lab_config,
-    resolve_semantic_indexing, selected_config_path, serve_chat_settings,
-    uses_resolved_chat_configuration, uses_resolved_video_configuration,
+    ClapValueSource, ExplicitSetting, LabConfigBootstrap, LabConfigCliValues, LabConfigInputs,
+    ResolvedChatSettings, ResolvedDvrStorage, ResolvedLabConfig, ResolvedSemanticIndexing,
+    ResolvedVideoSettings, ServeChatLegacyInputs, SettingProvenance, bootstrap_lab_config,
+    build_serve_lab_agent, resolve_lab_config, resolve_semantic_indexing, resolved_lab_config,
+    selected_config_path, serve_chat_settings, uses_resolved_chat_configuration,
+    uses_resolved_video_configuration,
 };
 pub use memory::ConversationStore;
 pub use oidc::{OidcConfig, with_oidc};
