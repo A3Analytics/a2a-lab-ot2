@@ -13,8 +13,9 @@ use a2a_lab_dev_kit::{
     MemoryMetrics, MemoryTasks, MemoryVideos, PipetteChannelSubject, Sha256Digest, VideoSourceId,
 };
 use a2a_lab_ot2::videos::dvr::{
-    AnnotationQueueWorker, AnyIndexingAnnotationWorker, DEFAULT_SEMANTIC_STORE_NAMESPACE,
-    DeterministicIndexingWorker, DvrFrameDecisionLedger, IndexingWorkerFaults,
+    AnnotationQueueWorker, AnnotationQueueWorkerBundle, AnyIndexingAnnotationWorker,
+    DEFAULT_SEMANTIC_STORE_NAMESPACE, DeterministicIndexingWorker, DvrFrameDecisionLedger,
+    IndexingWorkerFaults, IndexingWorkerLane,
 };
 use a2a_lab_ot2::videos::semantic_indexing::{
     SemanticServeInjections, build_deterministic_providers, description_provider_config,
@@ -88,16 +89,33 @@ async fn enabled_semantic_registers_capabilities_for_configured_source() {
     let providers = build_deterministic_providers(&semantic.config)
         .await
         .unwrap();
-    let worker = DeterministicIndexingWorker::new(
+    let live = DeterministicIndexingWorker::new(
         providers,
         semantic.config.limits.worker.clone(),
-        "fixture-worker",
+        "fixture-worker-live",
         IndexingWorkerFaults::new(),
-    );
+    )
+    .with_lane(IndexingWorkerLane::Live);
+    let backfill_providers = build_deterministic_providers(&semantic.config)
+        .await
+        .unwrap();
+    let backfill = DeterministicIndexingWorker::new(
+        backfill_providers,
+        semantic.config.limits.worker.clone(),
+        "fixture-worker-backfill",
+        IndexingWorkerFaults::new(),
+    )
+    .with_lane(IndexingWorkerLane::Backfill);
     let injections = SemanticServeInjections {
-        worker: Some(AnnotationQueueWorker::new(
-            AnyIndexingAnnotationWorker::Deterministic(Arc::new(worker)),
-            semantic.config.clone(),
+        workers: Some(AnnotationQueueWorkerBundle::new(
+            AnnotationQueueWorker::new(
+                AnyIndexingAnnotationWorker::Deterministic(Arc::new(live)),
+                semantic.config.clone(),
+            ),
+            AnnotationQueueWorker::new(
+                AnyIndexingAnnotationWorker::Deterministic(Arc::new(backfill)),
+                semantic.config.clone(),
+            ),
         )),
         force_deterministic_worker: true,
         ..SemanticServeInjections::default()

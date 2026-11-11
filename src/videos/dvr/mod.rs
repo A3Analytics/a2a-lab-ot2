@@ -22,7 +22,8 @@ mod store;
 mod worker_faults;
 
 pub use annotation_queue::{
-    ANNOTATION_RECONCILE_INTERVAL, AnnotationQueueWorker, VideoDvrAnnotationQueue,
+    ANNOTATION_RECONCILE_INTERVAL, AnnotationQueueWorker, AnnotationQueueWorkerBundle,
+    VideoDvrAnnotationQueue,
 };
 pub use annotation_worker::{
     AnyIndexingAnnotationWorker, DeterministicDescriptionOnlyWorker, DeterministicIndexingWorker,
@@ -64,7 +65,7 @@ pub use frame_manifest::{
 pub use indexing_job_store::{IndexingJobRecord, IndexingJobState, IndexingWorkerQueueStats};
 pub use indexing_registration::{
     DEFAULT_RECONCILE_BATCH, INDEXING_PRIORITY_BACKFILL, INDEXING_PRIORITY_LIVE,
-    IndexingReconcileReport, SaveFaults, indexing_job_id,
+    IndexingReconcileReport, IndexingWorkerLane, SaveFaults, indexing_job_id,
 };
 pub use indexing_scope::IndexedSourceFilter;
 pub use inventory::{DvrTrackInventory, FramePayloadEvidence};

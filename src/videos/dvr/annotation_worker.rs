@@ -17,10 +17,14 @@ use super::frame_manifest::{
     IndexingCheckpoint, ManifestRetainedState, MediaPayloadStatus, SemanticFrameManifestRecord,
 };
 use super::indexing_job_store::{IndexingJobRecord, IndexingJobState};
+use super::indexing_registration::IndexingWorkerLane;
 use super::store::IndexedVideoDvr;
 use super::worker_faults::IndexingWorkerFaults;
 use crate::videos::semantic_indexing::{SemanticIndexingProviders, build_deterministic_providers};
-use crate::videos::semantic_indexing::{frame_description_limits, text_embedding_limits};
+use crate::videos::semantic_indexing::{
+    frame_description_limits, indexing_claim_batch_size, text_embedding_limits,
+};
+use futures_util::future::join_all;
 
 /// Outcome of one worker batch.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -30,7 +34,8 @@ pub struct IndexingWorkerBatchReport {
     descriptions_committed: u32,
     embeddings_committed: u32,
     failures: u32,
-    materialization_paused: bool,
+    backlog_over_limit: bool,
+    lane: IndexingWorkerLane,
 }
 
 impl IndexingWorkerBatchReport {
@@ -60,8 +65,13 @@ impl IndexingWorkerBatchReport {
     }
 
     #[must_use]
-    pub const fn materialization_paused(&self) -> bool {
-        self.materialization_paused
+    pub const fn backlog_over_limit(&self) -> bool {
+        self.backlog_over_limit
+    }
+
+    #[must_use]
+    pub const fn lane(&self) -> IndexingWorkerLane {
+        self.lane
     }
 }
 
@@ -71,6 +81,7 @@ pub struct IndexingAnnotationWorker<D, E> {
     source_providers: HashMap<String, SemanticIndexingProviders<D, E>>,
     limits: SemanticWorkerLimits,
     worker_id: String,
+    lane: IndexingWorkerLane,
     faults: Arc<IndexingWorkerFaults>,
 }
 
@@ -132,8 +143,16 @@ where
             source_providers: HashMap::new(),
             limits,
             worker_id: worker_id.into(),
+            lane: IndexingWorkerLane::Live,
             faults,
         }
+    }
+
+    /// Pins this worker to one durable enqueue-priority lane.
+    #[must_use]
+    pub const fn with_lane(mut self, lane: IndexingWorkerLane) -> Self {
+        self.lane = lane;
+        self
     }
 
     /// Adds a source-specific provider pair while retaining one queue.
@@ -154,6 +173,7 @@ pub struct DescriptionOnlyAnnotationWorker<D> {
     source_providers: HashMap<String, D>,
     limits: SemanticWorkerLimits,
     worker_id: String,
+    lane: IndexingWorkerLane,
     faults: Arc<IndexingWorkerFaults>,
 }
 
@@ -173,8 +193,15 @@ where
             source_providers: HashMap::new(),
             limits,
             worker_id: worker_id.into(),
+            lane: IndexingWorkerLane::Live,
             faults,
         }
+    }
+
+    #[must_use]
+    pub const fn with_lane(mut self, lane: IndexingWorkerLane) -> Self {
+        self.lane = lane;
+        self
     }
 
     #[must_use]
@@ -197,42 +224,46 @@ where
         let now_us = crate::time::now()?.as_micros();
         let reclaimed = dvr.reclaim_expired_indexing_leases(now_us).await?;
         let queue = dvr.indexing_worker_queue_stats(&self.limits).await?;
-        dvr.set_materialization_paused(queue.materialization_paused)
-            .await?;
+        dvr.clear_legacy_materialization_pause().await?;
         let deadline = now_us.saturating_add(
             i64::try_from(self.limits.job_deadline.as_secs())
                 .unwrap_or(i64::MAX)
                 .saturating_mul(1_000_000),
         );
+        let claim_batch = indexing_claim_batch_size(&self.limits);
         let claimed = dvr
-            .claim_indexing_jobs(
-                &self.worker_id,
-                self.limits.max_batch_items,
-                deadline,
-                now_us,
-            )
+            .claim_indexing_jobs_for_lane(&self.worker_id, claim_batch, deadline, now_us, self.lane)
             .await?;
         let mut report = IndexingWorkerBatchReport {
             reclaimed_leases: reclaimed,
             claimed: u32::try_from(claimed.len()).unwrap_or(u32::MAX),
-            materialization_paused: queue.materialization_paused,
+            backlog_over_limit: queue.backlog_over_limit,
+            lane: self.lane,
             ..Default::default()
         };
         let description_limits = frame_description_limits(&semantic.limits);
-        for job in claimed {
-            match self
-                .process_one(dvr, semantic, &job, now_us, description_limits)
-                .await
-            {
-                Ok(committed) => {
-                    if committed {
-                        report.descriptions_committed =
-                            report.descriptions_committed.saturating_add(1);
+        let concurrency = usize::try_from(self.limits.max_concurrency)
+            .unwrap_or(1)
+            .max(1);
+        for chunk in claimed.chunks(concurrency) {
+            let outcomes = join_all(
+                chunk
+                    .iter()
+                    .map(|job| self.process_one(dvr, semantic, job, now_us, description_limits)),
+            )
+            .await;
+            for outcome in outcomes {
+                match outcome {
+                    Ok(committed) => {
+                        if committed {
+                            report.descriptions_committed =
+                                report.descriptions_committed.saturating_add(1);
+                        }
                     }
-                }
-                Err(error) => {
-                    eprintln!("description worker {}: {error}", self.worker_id);
-                    report.failures = report.failures.saturating_add(1);
+                    Err(error) => {
+                        eprintln!("description worker {}: {error}", self.worker_id);
+                        report.failures = report.failures.saturating_add(1);
+                    }
                 }
             }
         }
@@ -332,13 +363,23 @@ impl DeterministicIndexingWorker {
         worker_id: impl Into<String>,
         faults: Arc<IndexingWorkerFaults>,
     ) -> Result<Self, A2aLabError> {
+        Self::deterministic_lane(semantic, worker_id, faults, IndexingWorkerLane::Live).await
+    }
+
+    pub async fn deterministic_lane(
+        semantic: &SemanticIndexingConfig,
+        worker_id: impl Into<String>,
+        faults: Arc<IndexingWorkerFaults>,
+        lane: IndexingWorkerLane,
+    ) -> Result<Self, A2aLabError> {
         let providers = build_deterministic_providers(semantic).await?;
         Ok(IndexingAnnotationWorker::new(
             providers,
             semantic.limits.worker.clone(),
             worker_id,
             faults,
-        ))
+        )
+        .with_lane(lane))
     }
 }
 
@@ -378,54 +419,62 @@ where
         let now_us = now.as_micros();
         let reclaimed = dvr.reclaim_expired_indexing_leases(now_us).await?;
         let queue = dvr.indexing_worker_queue_stats(&self.limits).await?;
-        dvr.set_materialization_paused(queue.materialization_paused)
-            .await?;
+        dvr.clear_legacy_materialization_pause().await?;
         let lease_deadline_us = now_us.saturating_add(
             i64::try_from(self.limits.job_deadline.as_secs())
                 .unwrap_or(i64::MAX)
                 .saturating_mul(1_000_000),
         );
+        let claim_batch = indexing_claim_batch_size(&self.limits);
         let claimed = dvr
-            .claim_indexing_jobs(
+            .claim_indexing_jobs_for_lane(
                 &self.worker_id,
-                self.limits.max_batch_items,
+                claim_batch,
                 lease_deadline_us,
                 now_us,
+                self.lane,
             )
             .await?;
         let mut report = IndexingWorkerBatchReport {
             reclaimed_leases: reclaimed,
             claimed: u32::try_from(claimed.len()).unwrap_or(u32::MAX),
-            materialization_paused: queue.materialization_paused,
+            backlog_over_limit: queue.backlog_over_limit,
+            lane: self.lane,
             ..IndexingWorkerBatchReport::default()
         };
         let description_limits = frame_description_limits(&semantic.limits);
         let embedding_limits = text_embedding_limits(&semantic.limits);
-
-        for job in claimed {
-            match self
-                .process_one_job(
+        let concurrency = usize::try_from(self.limits.max_concurrency)
+            .unwrap_or(1)
+            .max(1);
+        for chunk in claimed.chunks(concurrency) {
+            let outcomes = join_all(chunk.iter().map(|job| {
+                self.process_one_job(
                     dvr,
                     semantic,
-                    &job,
+                    job,
                     now_us,
                     description_limits,
                     embedding_limits,
                 )
-                .await
-            {
-                Ok(outcome) => {
-                    if outcome.description_committed {
-                        report.descriptions_committed =
-                            report.descriptions_committed.saturating_add(1);
+            }))
+            .await;
+            for outcome in outcomes {
+                match outcome {
+                    Ok(job_outcome) => {
+                        if job_outcome.description_committed {
+                            report.descriptions_committed =
+                                report.descriptions_committed.saturating_add(1);
+                        }
+                        if job_outcome.embedding_committed {
+                            report.embeddings_committed =
+                                report.embeddings_committed.saturating_add(1);
+                        }
                     }
-                    if outcome.embedding_committed {
-                        report.embeddings_committed = report.embeddings_committed.saturating_add(1);
+                    Err(error) => {
+                        eprintln!("indexing worker {}: {error}", self.worker_id);
+                        report.failures = report.failures.saturating_add(1);
                     }
-                }
-                Err(error) => {
-                    eprintln!("indexing worker {}: {error}", self.worker_id);
-                    report.failures = report.failures.saturating_add(1);
                 }
             }
         }

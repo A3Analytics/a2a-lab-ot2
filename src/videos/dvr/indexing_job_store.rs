@@ -126,7 +126,8 @@ impl IndexingJobRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexingWorkerQueueStats {
     pub active_jobs: u64,
-    pub materialization_paused: bool,
+    /// Advisory only: queue depth exceeded `max_queue_backlog`; workers must keep processing.
+    pub backlog_over_limit: bool,
 }
 
 pub(crate) async fn ensure_job_runtime_tx(
@@ -295,18 +296,18 @@ impl IndexedVideoDvr {
         limits: &SemanticWorkerLimits,
     ) -> Result<IndexingWorkerQueueStats, A2aLabError> {
         let active = self.count_active_indexing_jobs().await?;
-        let paused = self.worker_meta_flag("materialization_paused").await?;
         let backlog = u64::from(limits.max_queue_backlog);
-        let materialization_paused =
-            paused || active >= backlog.saturating_add(u64::from(limits.max_batch_items));
+        let backlog_over_limit =
+            active >= backlog.saturating_add(u64::from(limits.max_batch_items));
         Ok(IndexingWorkerQueueStats {
             active_jobs: active,
-            materialization_paused,
+            backlog_over_limit,
         })
     }
 
-    pub async fn set_materialization_paused(&self, paused: bool) -> Result<(), A2aLabError> {
-        self.set_worker_meta_flag("materialization_paused", paused)
+    /// Clears legacy `materialization_paused` worker meta left from pre-TASK-77 backpressure.
+    pub async fn clear_legacy_materialization_pause(&self) -> Result<(), A2aLabError> {
+        self.set_worker_meta_flag("materialization_paused", false)
             .await
     }
 
@@ -333,7 +334,32 @@ impl IndexedVideoDvr {
         Ok(u32::try_from(result.rows_affected()).unwrap_or(0))
     }
 
-    /// Claims up to `batch` jobs for one worker id.
+    /// Claims up to `batch` jobs from one enqueue-priority lane.
+    pub async fn claim_indexing_jobs_for_lane(
+        &self,
+        worker_id: &str,
+        batch: u32,
+        lease_deadline_us: i64,
+        now_us: i64,
+        lane: super::indexing_registration::IndexingWorkerLane,
+    ) -> Result<Vec<IndexingJobRecord>, A2aLabError> {
+        let batch_usize = usize::try_from(batch.max(1)).unwrap_or(1);
+        let candidates = self
+            .indexing_job_claim_candidates(lane.enqueue_priority(), batch_usize, now_us)
+            .await?;
+        let mut claimed = Vec::new();
+        for (job_id, frame_id) in candidates {
+            if let Some(record) = self
+                .try_claim_one_job(&job_id, &frame_id, worker_id, lease_deadline_us, now_us)
+                .await?
+            {
+                claimed.push(record);
+            }
+        }
+        Ok(claimed)
+    }
+
+    /// Claims up to `batch` jobs for one worker id, preferring live with one backfill slot.
     pub async fn claim_indexing_jobs(
         &self,
         worker_id: &str,
@@ -631,17 +657,6 @@ impl IndexedVideoDvr {
         Ok(())
     }
 
-    async fn worker_meta_flag(&self, key: &str) -> Result<bool, A2aLabError> {
-        let value: Option<String> = sqlx::query_scalar(
-            "SELECT meta_value FROM semantic_indexing_worker_meta WHERE meta_key = ?1",
-        )
-        .bind(key)
-        .fetch_optional(self.sqlite_pool())
-        .await
-        .map_err(db_error)?;
-        Ok(matches!(value.as_deref(), Some("1" | "true")))
-    }
-
     async fn set_worker_meta_flag(&self, key: &str, enabled: bool) -> Result<(), A2aLabError> {
         let value = if enabled { "true" } else { "false" };
         sqlx::query(
@@ -668,7 +683,7 @@ impl IndexedVideoDvr {
             .await
     }
 
-    /// Last reconcile cursor for deferred discovery when materialization is paused.
+    /// Last reconcile cursor for bounded historical discovery batches.
     pub async fn reconcile_cursor(&self) -> Result<Option<(String, String, i64)>, A2aLabError> {
         let value = self.worker_meta_string("reconcile_cursor").await?;
         let Some(value) = value else {

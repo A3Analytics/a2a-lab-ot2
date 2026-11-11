@@ -36,7 +36,7 @@ pub use jev::{
     build_live_decision_worker, jev_api_base, jev_live_worker_enabled, jev_smoke_enabled,
     live_jev_allowed, map_decision_worker_failure, run_jev_smoke,
 };
-pub use limits::{frame_description_limits, text_embedding_limits};
+pub use limits::{frame_description_limits, indexing_claim_batch_size, text_embedding_limits};
 pub use media::{EvidenceJpegMedia, FrameDescriptionMedia, InjectedDescriptionMedia};
 pub use prompt::{
     DESCRIPTION_PREPROCESSING_LABEL, DESCRIPTION_PROMPT, description_preprocessing_digest,

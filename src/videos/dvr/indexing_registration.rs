@@ -23,6 +23,34 @@ pub const INDEXING_PRIORITY_LIVE: i32 = 0;
 /// Drained after live capture jobs; `created_at_us` is the frame capture instant.
 pub const INDEXING_PRIORITY_BACKFILL: i32 = 1;
 
+/// Durable queue lane processed by one dedicated annotation worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndexingWorkerLane {
+    /// Newly committed capture frames (`INDEXING_PRIORITY_LIVE`).
+    #[default]
+    Live,
+    /// Historical retained discovery jobs (`INDEXING_PRIORITY_BACKFILL`).
+    Backfill,
+}
+
+impl IndexingWorkerLane {
+    #[must_use]
+    pub const fn enqueue_priority(self) -> i32 {
+        match self {
+            Self::Live => INDEXING_PRIORITY_LIVE,
+            Self::Backfill => INDEXING_PRIORITY_BACKFILL,
+        }
+    }
+
+    #[must_use]
+    pub const fn id_suffix(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Backfill => "backfill",
+        }
+    }
+}
+
 /// Test-only faults injected on the DVR save path.
 #[derive(Debug, Default)]
 pub struct SaveFaults {

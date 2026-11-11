@@ -336,7 +336,7 @@ async fn jev_append_never_populates_luna_description_metadata() {
 }
 
 #[tokio::test]
-async fn materialization_pauses_when_backlog_at_limit() {
+async fn worker_processes_jobs_when_backlog_over_limit() {
     let (_dir, store) = open_store("backlog").await;
     for tag in 0..8u8 {
         let source = VideoSourceId::new("camera").unwrap();
@@ -355,11 +355,55 @@ async fn materialization_pauses_when_backlog_at_limit() {
         .indexing_worker_queue_stats(&semantic.limits.worker)
         .await
         .unwrap();
-    assert!(stats.materialization_paused);
-    store.set_materialization_paused(true).await.unwrap();
-    worker.run_batch(&store, &semantic).await.unwrap();
-    assert!(
-        store.reconcile_cursor().await.unwrap().is_some()
-            || store.count_indexing_jobs().await.unwrap() > 0
-    );
+    assert!(stats.backlog_over_limit);
+    sqlx::query(
+        "INSERT INTO semantic_indexing_worker_meta (meta_key, meta_value)
+         VALUES ('materialization_paused', 'true')
+         ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value",
+    )
+    .execute(store.sqlite_pool())
+    .await
+    .unwrap();
+    let report = worker.run_batch(&store, &semantic).await.unwrap();
+    assert!(report.backlog_over_limit());
+    assert!(report.claimed() > 0);
+    assert!(report.descriptions_committed() > 0 || report.embeddings_committed() > 0);
+    let legacy: String = sqlx::query_scalar(
+        "SELECT meta_value FROM semantic_indexing_worker_meta WHERE meta_key = 'materialization_paused'",
+    )
+    .fetch_one(store.sqlite_pool())
+    .await
+    .unwrap();
+    assert_eq!(legacy, "false");
+}
+
+#[tokio::test]
+async fn capture_commit_nonblocking_when_queue_over_backlog_limit() {
+    let (_dir, store) = open_store("capture-backlog").await;
+    let source = VideoSourceId::new("camera").unwrap();
+    for tag in 0..6u8 {
+        let capture = a2a_lab_ot2::time::now()
+            .unwrap()
+            .saturating_add_micros(i64::from(tag) * 1_000_000);
+        store
+            .append_mjpeg_frame(&source, capture, 1_000_000, &jpeg(tag))
+            .await
+            .unwrap();
+    }
+    let mut semantic = semantic_config();
+    semantic.limits.worker.max_queue_backlog = 2;
+    let stats = store
+        .indexing_worker_queue_stats(&semantic.limits.worker)
+        .await
+        .unwrap();
+    assert!(stats.backlog_over_limit);
+    let before = store.count_indexing_jobs().await.unwrap();
+    let capture = a2a_lab_ot2::time::now()
+        .unwrap()
+        .saturating_add_micros(9_000_000);
+    store
+        .append_mjpeg_frame(&source, capture, 1_000_000, &jpeg(9))
+        .await
+        .unwrap();
+    assert!(store.count_indexing_jobs().await.unwrap() > before);
 }

@@ -2,7 +2,18 @@
 
 use std::time::Duration;
 
-use a2a_lab_dev_kit::{FrameDescriptionLimits, SemanticIndexingLimits, TextEmbeddingLimits};
+use a2a_lab_dev_kit::{
+    FrameDescriptionLimits, SemanticIndexingLimits, SemanticWorkerLimits, TextEmbeddingLimits,
+};
+
+/// Durable claim width: one batch may fill up to `max_batch_items × max_concurrency` leases.
+#[must_use]
+pub fn indexing_claim_batch_size(limits: &SemanticWorkerLimits) -> u32 {
+    limits
+        .max_batch_items
+        .saturating_mul(limits.max_concurrency)
+        .max(limits.max_batch_items)
+}
 
 /// Frame-description limits from validated v2 semantic configuration.
 #[must_use]

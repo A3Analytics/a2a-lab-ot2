@@ -227,7 +227,7 @@ pub async fn start_live_video_catalog_with_semantic(
         }
         None => SemanticServeBundle::empty(),
     };
-    let annotation_worker = semantic_bundle.worker.clone();
+    let annotation_workers = semantic_bundle.workers.clone();
     let decision_worker = semantic_bundle.decision_worker.clone();
     let inner = VideoDvrCatalog::open(live, dvr, Duration::from_secs(60))?;
     for source in sources {
@@ -249,7 +249,7 @@ pub async fn start_live_video_catalog_with_semantic(
         Some(inner.maintain_disk())
     };
     let (stop, rx) = watch::channel(false);
-    let annotation = inner.maintain_annotation_jobs(rx.clone(), annotation_worker);
+    let annotation = inner.maintain_annotation_jobs(rx.clone(), annotation_workers);
     if let Some((coverage, reason)) = semantic_bundle.decision_unavailable {
         let now_us = crate::time::now()?.as_micros();
         let closed = inner
