@@ -97,47 +97,14 @@ impl IndexedVideoDvr {
         track_id: &DvrTrackId,
         start_us: i64,
     ) -> Result<FramePayloadEvidence, A2aLabError> {
-        let row = sqlx::query(
-            "SELECT chunk_relpath, payload_offset, payload_length, payload_crc32
-             FROM dvr_frames
-             WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3 AND payload_ready = 1",
-        )
-        .bind(source_id.as_str())
-        .bind(track_id.as_str())
-        .bind(start_us)
-        .fetch_optional(self.sqlite_pool())
-        .await
-        .map_err(super::store::db_error)?;
-        let Some(row) = row else {
-            return Err(A2aLabError::not_found(
-                "dvr frame",
-                format!("{}:{}@{start_us}", source_id.as_str(), track_id.as_str()),
-            ));
-        };
-        let chunk_relpath: String = row
-            .try_get("chunk_relpath")
-            .map_err(super::store::db_error)?;
-        let offset: i64 = row
-            .try_get("payload_offset")
-            .map_err(super::store::db_error)?;
-        let length: i64 = row
-            .try_get("payload_length")
-            .map_err(super::store::db_error)?;
-        let crc32: i64 = row
-            .try_get("payload_crc32")
-            .map_err(super::store::db_error)?;
-        let bytes = self
-            .load_chunk_payload(
-                &chunk_relpath,
-                u64::try_from(offset.max(0)).unwrap_or(0),
-                u64::try_from(length.max(0)).unwrap_or(0),
-                u32::try_from(crc32.max(0)).unwrap_or(0),
-            )
+        let at = crate::time::from_unix_microseconds(start_us)?;
+        let (bytes, crc32, _) = self
+            .load_retained_payload_at_key(source_id, track_id, at)
             .await?;
         let digest = Sha256::digest(&bytes);
         Ok(FramePayloadEvidence {
             payload_length: u64::try_from(bytes.len()).unwrap_or(0),
-            payload_crc32: u32::try_from(crc32.max(0)).unwrap_or(0),
+            payload_crc32: crc32,
             payload_sha256: hex_digest(&digest),
         })
     }

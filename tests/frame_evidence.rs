@@ -259,6 +259,31 @@ async fn h264_non_keyframe_annex_fixture_decodes_when_supported() {
 }
 
 #[tokio::test]
+async fn legacy_per_file_segment_resolves_evidence_digest() {
+    let store = open_store("legacy-segment").await;
+    let source = VideoSourceId::new("camera").unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    let capture = a2a_lab_ot2::time::now().unwrap();
+    let jpeg = encode_jpeg(8, 8, 120);
+    store
+        .write_legacy_segment(&source, &track, capture, 1_000_000, true, &jpeg)
+        .await
+        .unwrap();
+    let (frame, _, _) = store
+        .ensure_indexing_at_dvr_key(&store_ns(), &source, &track, capture)
+        .await
+        .unwrap();
+    let evidence = store
+        .read_bounded_frame_evidence(
+            FrameEvidenceRequest::new(&frame, None),
+            FrameEvidenceLimits::standard(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(evidence.verified_digest(), frame.payload_digest());
+}
+
+#[tokio::test]
 async fn unsupported_h265_reports_codec_failure() {
     let (store, frame) = saved_mjpeg(3).await;
     sqlx::query("UPDATE dvr_tracks SET codec = 'h265' WHERE source_id = ?1 AND track_id = ?2")

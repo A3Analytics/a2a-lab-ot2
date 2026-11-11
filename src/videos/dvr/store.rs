@@ -1002,62 +1002,104 @@ impl IndexedVideoDvr {
     }
 
     /// Loads verified bytes for one retained DVR key (chunk frames or legacy per-file segments).
+    ///
+    /// When both `dvr_segments` and `dvr_frames` rows exist at the same key, legacy per-file
+    /// bytes are attempted first—the same tie-break [`Self::containing_frame`] uses for Browse.
     pub(crate) async fn load_retained_payload_at_key(
         &self,
         source_id: &VideoSourceId,
         track_id: &DvrTrackId,
         start_us: UtcTimestamp,
     ) -> Result<(Vec<u8>, u32, UtcTimestamp), A2aLabError> {
-        let row = sqlx::query(
-            "SELECT end_us, chunk_relpath, payload_offset, payload_length, payload_crc32
-             FROM dvr_frames
-             WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3 AND payload_ready = 1",
-        )
-        .bind(source_id.as_str())
-        .bind(track_id.as_str())
-        .bind(start_us.as_micros())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(db_error)?;
-        if let Some(row) = row {
-            let end_us: i64 = row.try_get("end_us").map_err(db_error)?;
-            let chunk_relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
-            let offset: i64 = row.try_get("payload_offset").map_err(db_error)?;
-            let length: i64 = row.try_get("payload_length").map_err(db_error)?;
-            let expected_crc: i64 = row.try_get("payload_crc32").map_err(db_error)?;
-            let bytes = self
-                .load_chunk_payload(
-                    &chunk_relpath,
-                    u64::try_from(offset.max(0)).unwrap_or(0),
-                    u64::try_from(length.max(0)).unwrap_or(0),
-                    u32::try_from(expected_crc.max(0)).unwrap_or(0),
-                )
-                .await?;
-            let crc = super::chunk::crc32(&bytes);
-            return Ok((bytes, crc, crate::time::from_unix_microseconds(end_us)?));
-        }
+        let key = start_us.as_micros();
         let segment = sqlx::query(
-            "SELECT end_us, payload_relpath
+            "SELECT end_us, payload_relpath, '' AS chunk_relpath, NULL AS payload_offset,
+                    NULL AS payload_length, NULL AS payload_crc32
              FROM dvr_segments
              WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3 AND payload_ready = 1",
         )
         .bind(source_id.as_str())
         .bind(track_id.as_str())
-        .bind(start_us.as_micros())
+        .bind(key)
         .fetch_optional(&self.pool)
         .await
         .map_err(db_error)?;
-        let Some(segment) = segment else {
+        let frame = sqlx::query(
+            "SELECT end_us, '' AS payload_relpath, chunk_relpath, payload_offset, payload_length,
+                    payload_crc32
+             FROM dvr_frames
+             WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3 AND payload_ready = 1",
+        )
+        .bind(source_id.as_str())
+        .bind(track_id.as_str())
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_error)?;
+        let mut candidates = Vec::with_capacity(2);
+        if segment.is_some() {
+            candidates.push(RetainedStorageKind::LegacySegment);
+        }
+        if frame.is_some() {
+            candidates.push(RetainedStorageKind::ChunkFrame);
+        }
+        if candidates.is_empty() {
             return Err(A2aLabError::not_found(
                 "DVR frame",
-                format!("{source_id}/{track_id}/{}", start_us.as_micros()),
+                format!("{source_id}/{track_id}/{key}"),
             ));
-        };
-        let end_us: i64 = segment.try_get("end_us").map_err(db_error)?;
-        let relpath: String = segment.try_get("payload_relpath").map_err(db_error)?;
-        let bytes = self.load_payload(&relpath).await?;
+        }
+        let mut last_err: Option<A2aLabError> = None;
+        for kind in candidates {
+            let row = match kind {
+                RetainedStorageKind::LegacySegment => segment.as_ref(),
+                RetainedStorageKind::ChunkFrame => frame.as_ref(),
+            };
+            let Some(row) = row else {
+                continue;
+            };
+            match self.payload_tuple_from_retained_row(row).await {
+                Ok(tuple) => return Ok(tuple),
+                Err(error) if retained_payload_fallback_allowed(&error) => {
+                    last_err = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            A2aLabError::not_found("DVR frame", format!("{source_id}/{track_id}/{key}"))
+        }))
+    }
+
+    async fn payload_tuple_from_retained_row(
+        &self,
+        row: &SqliteRow,
+    ) -> Result<(Vec<u8>, u32, UtcTimestamp), A2aLabError> {
+        let end_us: i64 = row.try_get("end_us").map_err(db_error)?;
+        let bytes = self.load_payload_bytes_from_retained_row(row).await?;
         let crc = super::chunk::crc32(&bytes);
         Ok((bytes, crc, crate::time::from_unix_microseconds(end_us)?))
+    }
+
+    async fn load_payload_bytes_from_retained_row(
+        &self,
+        row: &SqliteRow,
+    ) -> Result<Vec<u8>, A2aLabError> {
+        let chunk_relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
+        if chunk_relpath.is_empty() {
+            let relpath: String = row.try_get("payload_relpath").map_err(db_error)?;
+            return self.load_payload(&relpath).await;
+        }
+        let offset: i64 = row.try_get("payload_offset").map_err(db_error)?;
+        let length: i64 = row.try_get("payload_length").map_err(db_error)?;
+        let crc32: i64 = row.try_get("payload_crc32").map_err(db_error)?;
+        self.load_chunk_payload(
+            &chunk_relpath,
+            u64::try_from(offset.max(0)).unwrap_or(0),
+            u64::try_from(length.max(0)).unwrap_or(0),
+            u32::try_from(crc32.max(0)).unwrap_or(0),
+        )
+        .await
     }
 
     async fn load_payload(&self, relpath: &str) -> Result<Vec<u8>, A2aLabError> {
@@ -1474,23 +1516,7 @@ async fn segment_from_row(
     let end = crate::time::from_unix_microseconds(row.try_get("end_us").map_err(db_error)?)?;
     let keyframe: i64 = row.try_get("keyframe").map_err(db_error)?;
     let codec = parse_codec(&row.try_get::<String, _>("codec").map_err(db_error)?)?;
-    let chunk_relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
-    let bytes = if chunk_relpath.is_empty() {
-        let relpath: String = row.try_get("payload_relpath").map_err(db_error)?;
-        store.load_payload(&relpath).await?
-    } else {
-        let offset: i64 = row.try_get("payload_offset").map_err(db_error)?;
-        let length: i64 = row.try_get("payload_length").map_err(db_error)?;
-        let crc32: i64 = row.try_get("payload_crc32").map_err(db_error)?;
-        store
-            .load_chunk_payload(
-                &chunk_relpath,
-                u64::try_from(offset.max(0)).unwrap_or(0),
-                u64::try_from(length.max(0)).unwrap_or(0),
-                u32::try_from(crc32.max(0)).unwrap_or(0),
-            )
-            .await?
-    };
+    let bytes = store.load_payload_bytes_from_retained_row(row).await?;
     let payload = match codec {
         VideoCodec::Mjpeg => DvrMediaPayload::MjpegFrame(bytes),
         VideoCodec::H264 | VideoCodec::H265 => DvrMediaPayload::EncodedSample { codec, bytes },
@@ -1544,6 +1570,21 @@ fn walk_tmp_files(
 }
 
 fn walk_incomplete_index(_root: &Path, _stale: &mut Vec<(String, String, i64)>) {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedStorageKind {
+    LegacySegment,
+    ChunkFrame,
+}
+
+fn retained_payload_fallback_allowed(error: &A2aLabError) -> bool {
+    let message = error.to_string();
+    message.contains("checksum mismatch")
+        || message.contains("not found")
+        || message.contains("read ")
+        || message.contains("open ")
+        || message.contains("seek ")
+}
 
 pub(crate) fn db_error(error: impl std::fmt::Display) -> A2aLabError {
     A2aLabError::unavailable(format!("video DVR database: {error}"))
