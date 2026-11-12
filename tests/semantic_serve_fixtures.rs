@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use a2a_lab_dev_kit::SemanticSearchCapabilities;
 use a2a_lab_dev_kit::{
     A2aLabCommand, A2aLabResult, A2aLabService, AppendFrameDecisionRequest, DecisionOutcome,
     DecisionSubject, FrameDecisionEvaluationOwnership, FrameDecisionEvaluatorLimits,
@@ -23,8 +24,9 @@ use a2a_lab_ot2::videos::semantic_indexing::{
 };
 use a2a_lab_ot2::{
     ConversationStore, ExplicitSetting, LabConfigInputs, LiveVideoInjections, ModelProvider,
-    RecordingServeAgentFactory, ServeChatLegacyInputs, build_serve_lab_agent,
-    open_resolved_video_catalog_with_semantic, resolve_lab_config, resolve_semantic_indexing,
+    RecordingServeAgentFactory, ResolvedSemanticIndexing, ServeChatLegacyInputs,
+    build_serve_lab_agent, open_resolved_video_catalog_with_semantic, resolve_lab_config,
+    resolve_semantic_indexing,
 };
 
 const SEMANTIC_LIMITS: &str = r#""limits":{"worker":{"max_batch_items":4,"max_concurrency":2,"max_queue_backlog":64,"max_retry_attempts":3,"job_deadline":"30s","retry_backoff":"1s"},"search":{"top_k":10,"candidate_limit":1000,"max_neighbor_frames":5,"query_window":"2h"},"roi":{"min_edge_pixels":280,"max_edge_pixels":1568,"max_rois_per_frame":8},"storage":{"vector_index_path":"./state/semantic-index","max_disk_bytes":1073741824},"decisions":{"max_batch_items":8,"max_concurrency":2,"job_deadline":"45s","coverage_policy":"on_demand"}}"#;
@@ -43,6 +45,12 @@ fn write_config(dir: &PathBuf, body: &str) -> PathBuf {
     path
 }
 
+fn semantic_document_local_bge() -> String {
+    format!(
+        r#"{{"schema_version":2,"chat":{{"provider":"openai","model":"chat-only"}},"videos":{{"sources":[{{"id":"camera","device_index":0,"format":"mjpeg"}}]}},"semantic_indexing":{{"description":{{"provider":"bedrock","model":"custom-luna"}},"embeddings":{{"provider":"local_bge","model":"BAAI/bge-small-en-v1.5","space":{{"dimensions":384,"normalization":"l2_unit","metric":"cosine"}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
+    )
+}
+
 fn semantic_document(description_model: Option<&str>) -> String {
     let model = description_model
         .map(|value| format!(r#","model":"{value}""#))
@@ -57,6 +65,85 @@ fn inputs_with_config(path: PathBuf) -> LabConfigInputs {
         config_path: ExplicitSetting::cli(Some(path)),
         ..LabConfigInputs::default()
     }
+}
+
+async fn deterministic_semantic_injections(
+    semantic: &ResolvedSemanticIndexing,
+) -> SemanticServeInjections {
+    let providers = build_deterministic_providers(&semantic.config)
+        .await
+        .unwrap();
+    let live = DeterministicIndexingWorker::new(
+        providers.clone(),
+        semantic.config.limits.worker.clone(),
+        "fixture-worker-live",
+        IndexingWorkerFaults::new(),
+    )
+    .with_lane(IndexingWorkerLane::Live);
+    let backfill = DeterministicIndexingWorker::new(
+        providers,
+        semantic.config.limits.worker.clone(),
+        "fixture-worker-backfill",
+        IndexingWorkerFaults::new(),
+    )
+    .with_lane(IndexingWorkerLane::Backfill);
+    SemanticServeInjections {
+        workers: Some(AnnotationQueueWorkerBundle::new(
+            AnnotationQueueWorker::new(
+                AnyIndexingAnnotationWorker::Deterministic(Arc::new(live)),
+                semantic.config.clone(),
+            ),
+            AnnotationQueueWorker::new(
+                AnyIndexingAnnotationWorker::Deterministic(Arc::new(backfill)),
+                semantic.config.clone(),
+            ),
+        )),
+        force_deterministic_worker: true,
+        ..SemanticServeInjections::default()
+    }
+}
+
+async fn search_capabilities_for_config(
+    temp_name: &str,
+    config_body: &str,
+) -> SemanticSearchCapabilities {
+    let dir = temp_root(temp_name);
+    let path = write_config(&dir, config_body);
+    let inputs = inputs_with_config(path);
+    let resolved = resolve_lab_config(&inputs).unwrap();
+    let semantic = resolve_semantic_indexing(&inputs, &resolved.video)
+        .unwrap()
+        .expect("semantic");
+    let injections = deterministic_semantic_injections(&semantic).await;
+    let catalog = open_resolved_video_catalog_with_semantic(
+        &resolved.video,
+        LiveVideoInjections::none(),
+        Some(&inputs),
+        Some(injections),
+    )
+    .await
+    .unwrap()
+    .expect("catalog");
+    let search = catalog.semantic_bundle().search.clone().expect("search");
+    let lab = A2aLabService::new(
+        MemoryLogs::default(),
+        MemoryMetrics::default(),
+        MemoryTasks::default(),
+    )
+    .with_videos(catalog.provider())
+    .with_semantic_search(search);
+    let caps = lab
+        .execute(A2aLabCommand::GetSemanticSearchCapabilities(
+            GetSemanticSearchCapabilitiesRequest::new(),
+        ))
+        .await
+        .unwrap()
+        .task
+        .result;
+    let A2aLabResult::GetSemanticSearchCapabilities(caps) = caps else {
+        panic!("capabilities");
+    };
+    caps
 }
 
 #[test]
@@ -86,40 +173,7 @@ async fn enabled_semantic_registers_capabilities_for_configured_source() {
     let semantic = resolve_semantic_indexing(&inputs, &resolved.video)
         .unwrap()
         .expect("semantic");
-    let providers = build_deterministic_providers(&semantic.config)
-        .await
-        .unwrap();
-    let live = DeterministicIndexingWorker::new(
-        providers,
-        semantic.config.limits.worker.clone(),
-        "fixture-worker-live",
-        IndexingWorkerFaults::new(),
-    )
-    .with_lane(IndexingWorkerLane::Live);
-    let backfill_providers = build_deterministic_providers(&semantic.config)
-        .await
-        .unwrap();
-    let backfill = DeterministicIndexingWorker::new(
-        backfill_providers,
-        semantic.config.limits.worker.clone(),
-        "fixture-worker-backfill",
-        IndexingWorkerFaults::new(),
-    )
-    .with_lane(IndexingWorkerLane::Backfill);
-    let injections = SemanticServeInjections {
-        workers: Some(AnnotationQueueWorkerBundle::new(
-            AnnotationQueueWorker::new(
-                AnyIndexingAnnotationWorker::Deterministic(Arc::new(live)),
-                semantic.config.clone(),
-            ),
-            AnnotationQueueWorker::new(
-                AnyIndexingAnnotationWorker::Deterministic(Arc::new(backfill)),
-                semantic.config.clone(),
-            ),
-        )),
-        force_deterministic_worker: true,
-        ..SemanticServeInjections::default()
-    };
+    let injections = deterministic_semantic_injections(&semantic).await;
     let catalog = open_resolved_video_catalog_with_semantic(
         &resolved.video,
         LiveVideoInjections::none(),
@@ -165,6 +219,10 @@ async fn enabled_semantic_registers_capabilities_for_configured_source() {
         panic!("capabilities");
     };
     assert!(caps.is_registered());
+    let active = caps.active_provenance().expect("active provenance");
+    assert_eq!(active.model_space().provider(), "bedrock");
+    assert_eq!(active.model_space().model(), "text-embed-v1");
+    assert_eq!(active.description_generation().get(), 1);
     let decision_caps = lab
         .execute(A2aLabCommand::GetFrameDecisionCapabilities(
             GetFrameDecisionCapabilitiesRequest::new(),
@@ -177,6 +235,15 @@ async fn enabled_semantic_registers_capabilities_for_configured_source() {
         panic!("frame decision capabilities");
     };
     assert!(decision_caps.is_registered());
+}
+
+#[tokio::test]
+async fn enabled_semantic_advertises_local_bge_active_provenance() {
+    let caps = search_capabilities_for_config("local-bge", &semantic_document_local_bge()).await;
+    let active = caps.active_provenance().expect("active provenance");
+    assert_eq!(active.model_space().provider(), "local_bge");
+    assert_eq!(active.model_space().model(), "BAAI/bge-small-en-v1.5");
+    assert_eq!(active.model_space().dimensions(), 384);
 }
 
 #[tokio::test]

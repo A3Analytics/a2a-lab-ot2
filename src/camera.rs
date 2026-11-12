@@ -1,8 +1,9 @@
-//! Native external-camera capture through Nokhwa.
+//! Native camera capture through Nokhwa.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use a2a_lab_dev_kit::{A2aLabError, ImageSource, ImageSourceId, ImageTransportConfig, JsonObject};
@@ -80,6 +81,15 @@ pub trait CameraCapture: Send + Sync {
         format: ExternalCameraFormat,
         frames: u32,
     ) -> Result<Vec<u8>, CameraCaptureError>;
+
+    /// Negotiated MJPEG when an exact [`Self::capture`] profile is unavailable.
+    fn capture_relaxed_mjpeg(
+        &self,
+        _index: u32,
+        _frames: u32,
+    ) -> Option<Result<Vec<u8>, CameraCaptureError>> {
+        None
+    }
 }
 
 /// Nokhwa automatic native-backend capture.
@@ -88,7 +98,47 @@ pub struct NativeCameraCapture {
     pub(crate) max_bytes: u64,
 }
 
+impl NativeCameraCapture {
+    fn capture_mjpeg_stream(
+        index: u32,
+        request: RequestedFormat<'_>,
+        frames: u32,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, CameraCaptureError> {
+        let mut camera = Camera::new(CameraIndex::Index(index), request)
+            .map_err(|error| CameraCaptureError::ExactFormatUnavailable(error.to_string()))?;
+        camera
+            .open_stream()
+            .map_err(|error| CameraCaptureError::Backend(error.to_string()))?;
+        let mut kept = None;
+        for frame_number in 1..=frames {
+            let frame = camera
+                .frame_raw()
+                .map_err(|error| CameraCaptureError::Backend(error.to_string()))?;
+            if frame_number == frames {
+                kept = Some(owned_mjpeg(&frame, max_bytes)?);
+            }
+        }
+        kept.ok_or(CameraCaptureError::Empty)
+    }
+}
+
 impl CameraCapture for NativeCameraCapture {
+    fn capture_relaxed_mjpeg(
+        &self,
+        index: u32,
+        frames: u32,
+    ) -> Option<Result<Vec<u8>, CameraCaptureError>> {
+        let request =
+            RequestedFormat::with_formats(RequestedFormatType::None, &[FrameFormat::MJPEG]);
+        Some(Self::capture_mjpeg_stream(
+            index,
+            request,
+            frames,
+            self.max_bytes,
+        ))
+    }
+
     fn capture(
         &self,
         index: u32,
@@ -122,35 +172,51 @@ impl CameraCapture for NativeCameraCapture {
     }
 }
 
-static LATEST_EXTERNAL_JPEG: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+static LATEST_STILL_BY_SOURCE: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Stores the newest live JPEG so still capture can reuse the video session.
-pub fn remember_external_frame(bytes: Vec<u8>) {
-    if let Ok(mut slot) = LATEST_EXTERNAL_JPEG.lock() {
-        *slot = Some(bytes);
+/// Stores the newest live JPEG for `source_id` so still capture can reuse the video session.
+pub fn remember_live_still(source_id: &str, bytes: Vec<u8>) {
+    if let Ok(mut slots) = LATEST_STILL_BY_SOURCE.lock() {
+        slots.insert(source_id.to_owned(), bytes);
     }
 }
 
-fn latest_external_frame() -> Option<Vec<u8>> {
-    LATEST_EXTERNAL_JPEG
+/// Returns the JPEG last stored for `source_id` by the live video pump.
+#[must_use]
+pub fn latest_live_still(source_id: &str) -> Option<Vec<u8>> {
+    LATEST_STILL_BY_SOURCE
         .lock()
         .ok()
-        .and_then(|slot| slot.clone())
+        .and_then(|slots| slots.get(source_id).cloned())
 }
 
-static LATEST_CAMERA_JPEG: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
-
-/// Stores the newest JPEG from the `camera` video pump.
-pub fn remember_camera_frame(bytes: Vec<u8>) {
-    if let Ok(mut slot) = LATEST_CAMERA_JPEG.lock() {
-        *slot = Some(bytes);
+/// Drops remembered still data for one configured source. Tests use this between cases.
+pub fn clear_live_still(source_id: &str) {
+    if let Ok(mut slots) = LATEST_STILL_BY_SOURCE.lock() {
+        slots.remove(source_id);
     }
 }
 
-/// Drops a remembered `camera` JPEG. Tests use this between cases.
+/// Stores the newest live JPEG for the legacy `external-camera` id.
+pub fn remember_external_frame(bytes: Vec<u8>) {
+    remember_live_still(EXTERNAL_CAMERA_SOURCE_ID, bytes);
+}
+
+/// Stores the newest live JPEG for the legacy `camera` id.
+pub fn remember_camera_frame(bytes: Vec<u8>) {
+    remember_live_still(CAMERA_SOURCE_ID, bytes);
+}
+
+/// Drops remembered still data for the legacy `camera` id.
 pub fn clear_camera_frame() {
-    if let Ok(mut slot) = LATEST_CAMERA_JPEG.lock() {
-        *slot = None;
+    clear_live_still(CAMERA_SOURCE_ID);
+}
+
+/// Clears every remembered live still buffer. Integration tests call this for isolation.
+pub fn clear_all_live_stills() {
+    if let Ok(mut slots) = LATEST_STILL_BY_SOURCE.lock() {
+        slots.clear();
     }
 }
 
@@ -163,8 +229,17 @@ fn displayed_name(name: &str, fallback: &str) -> String {
     }
 }
 
-fn latest_camera_frame() -> Option<Vec<u8>> {
-    LATEST_CAMERA_JPEG.lock().ok().and_then(|slot| slot.clone())
+/// Builds an [`ImageSource`] from a resolved live video descriptor.
+pub fn configured_still_image_source(
+    descriptor: &crate::videos::LiveVideoSourceDescriptor,
+) -> Result<ImageSource, A2aLabError> {
+    Ok(ImageSource {
+        id: ImageSourceId::new(&descriptor.id)?,
+        name: descriptor.name.clone(),
+        description: descriptor.description.clone(),
+        asset_id: None,
+        semantic_id: None,
+    })
 }
 
 /// Source descriptor for the optional second webcam.
@@ -184,38 +259,52 @@ pub fn camera_source_named(name: &str) -> Result<ImageSource, A2aLabError> {
     })
 }
 
-/// Still capture for source `camera`.
+/// Still capture for one configured source id.
 ///
 /// Reads the JPEG stored by the live video pump. This does not open a device.
-pub struct CameraStill {
+pub struct PumpLinkedStill {
+    source_id: String,
+    label: String,
     transport: ImageTransportConfig,
 }
 
-impl CameraStill {
+impl PumpLinkedStill {
     /// Rejects an invalid payload limit. No device is opened.
-    pub fn new(max_image_bytes: u64) -> Result<Self, A2aLabError> {
+    pub fn new(
+        source_id: impl Into<String>,
+        label: impl Into<String>,
+        max_image_bytes: u64,
+    ) -> Result<Self, A2aLabError> {
         Ok(Self {
+            source_id: source_id.into(),
+            label: label.into(),
             transport: ImageTransportConfig::new(max_image_bytes)?,
         })
     }
 
     fn take_frame(&self) -> Result<CapturedFrame, A2aLabError> {
-        let Some(body) = latest_camera_frame() else {
-            return Err(A2aLabError::unavailable("camera has no frame yet"));
+        let source = self.source_id.as_str();
+        let Some(body) = latest_live_still(source) else {
+            return Err(A2aLabError::unavailable(format!(
+                "{source} has no frame yet"
+            )));
         };
         if body.is_empty() {
             return Err(A2aLabError::invalid(
-                "camera",
-                "camera returned an empty frame",
+                "source_id",
+                format!("{source} returned an empty frame"),
             ));
         }
         let (width, height) = jpeg_dimensions(&body).map_err(|_| {
-            A2aLabError::invalid("camera", "camera returned a malformed MJPEG frame")
+            A2aLabError::invalid(
+                "source_id",
+                format!("{source} returned a malformed MJPEG frame"),
+            )
         })?;
         self.transport.check_payload(&body).map_err(|_| {
             A2aLabError::invalid(
-                "camera",
-                "camera returned a frame larger than the configured maximum",
+                "source_id",
+                format!("{source} returned a frame larger than the configured maximum"),
             )
         })?;
         Ok(CapturedFrame::new(
@@ -223,10 +312,160 @@ impl CameraStill {
             "image/jpeg",
             width,
             height,
-            Some("Camera".to_owned()),
+            Some(self.label.clone()),
             JsonObject::empty(),
             body,
         ))
+    }
+}
+
+impl ImageCapture for PumpLinkedStill {
+    fn capture(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<CapturedFrame, A2aLabError>> + Send + '_>> {
+        Box::pin(async move { self.take_frame() })
+    }
+}
+
+/// Still capture for one configured live video source.
+///
+/// Reuses the live video JPEG when present, otherwise opens the configured device index.
+pub struct ConfiguredNativeStill {
+    descriptor: crate::videos::LiveVideoSourceDescriptor,
+    format: ExternalCameraFormat,
+    timeout: Duration,
+    transport: ImageTransportConfig,
+    capture: Arc<dyn CameraCapture>,
+}
+
+impl ConfiguredNativeStill {
+    /// Builds still capture from a resolved live video descriptor.
+    pub fn from_descriptor(
+        descriptor: &crate::videos::LiveVideoSourceDescriptor,
+        timeout: Duration,
+        max_image_bytes: u64,
+        capture: Option<Arc<dyn CameraCapture>>,
+    ) -> Result<Self, A2aLabError> {
+        if timeout.is_zero() {
+            return Err(A2aLabError::invalid("timeout", "must be greater than zero"));
+        }
+        let capture = capture.unwrap_or_else(|| {
+            Arc::new(NativeCameraCapture {
+                max_bytes: max_image_bytes,
+            })
+        });
+        Ok(Self {
+            descriptor: descriptor.clone(),
+            format: ExternalCameraFormat {
+                width: descriptor.width,
+                height: descriptor.height,
+                fps: EXTERNAL_CAMERA_FPS,
+            },
+            timeout,
+            transport: ImageTransportConfig::new(max_image_bytes)?,
+            capture,
+        })
+    }
+
+    async fn take_frame(&self) -> Result<CapturedFrame, A2aLabError> {
+        let body = self.read_frame().await?;
+        if body.is_empty() {
+            return Err(self.invalid("returned an empty frame"));
+        }
+        let (width, height) =
+            jpeg_dimensions(&body).map_err(|_| self.invalid("returned a malformed MJPEG frame"))?;
+        self.transport
+            .check_payload(&body)
+            .map_err(|_| self.invalid("returned a frame larger than the configured maximum"))?;
+        Ok(CapturedFrame::new(
+            now()?,
+            "image/jpeg",
+            width,
+            height,
+            Some(self.descriptor.name.clone()),
+            JsonObject::empty(),
+            body,
+        ))
+    }
+
+    async fn read_frame(&self) -> Result<Vec<u8>, A2aLabError> {
+        if let Some(bytes) = latest_live_still(self.descriptor.id.as_str()) {
+            return Ok(bytes);
+        }
+        let capture = Arc::clone(&self.capture);
+        let format = self.format;
+        let descriptor = self.descriptor.clone();
+        let source_id = descriptor.id.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            capture.capture(
+                descriptor.device_index,
+                format,
+                EXTERNAL_CAMERA_SETTLING_FRAMES,
+            )
+        });
+        match tokio::time::timeout(self.timeout, task).await {
+            Ok(Ok(Ok(bytes))) => Ok(bytes),
+            Ok(Ok(Err(error))) => Err(self.capture_error(error)),
+            Ok(Err(error)) => Err(self.unavailable(&format!("capture task failed: {error}"))),
+            Err(_) => Err(self.unavailable(&format!(
+                "{source_id} timed out before the live pump or device produced a frame"
+            ))),
+        }
+    }
+
+    fn capture_error(&self, error: CameraCaptureError) -> A2aLabError {
+        match error {
+            CameraCaptureError::ExactFormatUnavailable(detail) => self.unavailable(&format!(
+                "exact MJPEG {}x{} at {} fps is unavailable ({detail})",
+                self.format.width, self.format.height, self.format.fps
+            )),
+            CameraCaptureError::Backend(detail) => {
+                self.unavailable(&format!("native backend capture failed ({detail})"))
+            }
+            CameraCaptureError::Empty => self.invalid("returned an empty frame"),
+            CameraCaptureError::Oversize => {
+                self.invalid("returned a frame larger than the configured maximum")
+            }
+        }
+    }
+
+    fn unavailable(&self, reason: &str) -> A2aLabError {
+        A2aLabError::unavailable(format!(
+            "{} (device index {}): {reason}",
+            self.descriptor.id, self.descriptor.device_index
+        ))
+    }
+
+    fn invalid(&self, reason: &str) -> A2aLabError {
+        A2aLabError::invalid(
+            "source_id",
+            format!(
+                "{} (device index {}): {reason}",
+                self.descriptor.id, self.descriptor.device_index
+            ),
+        )
+    }
+}
+
+impl ImageCapture for ConfiguredNativeStill {
+    fn capture(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<CapturedFrame, A2aLabError>> + Send + '_>> {
+        Box::pin(async move { self.take_frame().await })
+    }
+}
+
+/// Legacy still capture for schema-default source `camera`.
+pub struct CameraStill(PumpLinkedStill);
+
+impl CameraStill {
+    /// Rejects an invalid payload limit. No device is opened.
+    pub fn new(max_image_bytes: u64) -> Result<Self, A2aLabError> {
+        Ok(Self(PumpLinkedStill::new(
+            CAMERA_SOURCE_ID,
+            "Camera",
+            max_image_bytes,
+        )?))
     }
 }
 
@@ -234,7 +473,7 @@ impl ImageCapture for CameraStill {
     fn capture(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<CapturedFrame, A2aLabError>> + Send + '_>> {
-        Box::pin(async move { self.take_frame() })
+        self.0.capture()
     }
 }
 
@@ -270,6 +509,7 @@ pub fn external_camera_source_named(
 /// Live capture of a platform-native external camera.
 pub struct ExternalCamera {
     index: u32,
+    still_source_id: String,
     timeout: Duration,
     transport: ImageTransportConfig,
     capture: Arc<dyn CameraCapture>,
@@ -305,11 +545,29 @@ impl ExternalCamera {
         max_image_bytes: u64,
         capture: Arc<dyn CameraCapture>,
     ) -> Result<Self, A2aLabError> {
+        Self::with_shared_capture_for_source(
+            index,
+            EXTERNAL_CAMERA_SOURCE_ID,
+            timeout,
+            max_image_bytes,
+            capture,
+        )
+    }
+
+    /// Captures through a shared injected backend keyed to `still_source_id`.
+    pub fn with_shared_capture_for_source(
+        index: u32,
+        still_source_id: impl Into<String>,
+        timeout: Duration,
+        max_image_bytes: u64,
+        capture: Arc<dyn CameraCapture>,
+    ) -> Result<Self, A2aLabError> {
         if timeout.is_zero() {
             return Err(A2aLabError::invalid("timeout", "must be greater than zero"));
         }
         Ok(Self {
             index,
+            still_source_id: still_source_id.into(),
             timeout,
             transport: ImageTransportConfig::new(max_image_bytes)?,
             capture,
@@ -353,7 +611,7 @@ impl ExternalCamera {
     }
 
     async fn read_frame(&self) -> Result<Vec<u8>, A2aLabError> {
-        if let Some(bytes) = latest_external_frame() {
+        if let Some(bytes) = latest_live_still(&self.still_source_id) {
             return Ok(bytes);
         }
         let capture = Arc::clone(&self.capture);

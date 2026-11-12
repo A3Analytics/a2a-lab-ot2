@@ -90,8 +90,14 @@ def post(path, payload):
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"HTTP {error.code} for {path}: {detail or error.reason}"
+        ) from error
 
 
 def a2a_results(body, operation):
@@ -340,6 +346,10 @@ fi
 media_smoke_report_policy
 
 if [[ "$native_mode" == 1 ]]; then
+  if [[ -n "${A2ALAB_NATIVE_AGENT_LOG:-}" && -f "${A2ALAB_NATIVE_AGENT_LOG}" ]]; then
+    printf 'native serve agent log tail:\n' >&2
+    tail -n 40 "$A2ALAB_NATIVE_AGENT_LOG" >&2 || true
+  fi
   printf 'agent media smoke ok (native serve)\n'
   exit 0
 fi

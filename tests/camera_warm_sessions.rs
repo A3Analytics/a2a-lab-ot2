@@ -12,9 +12,16 @@ use a2a_lab_dev_kit::{
 use a2a_lab_dev_kit::{ImageSource, ImageSourceId};
 use a2a_lab_ot2::camera::{
     CAMERA_SOURCE_ID, CameraCapture, CameraCaptureError, CameraStill, EXTERNAL_CAMERA_SOURCE_ID,
-    ExternalCamera, ExternalCameraFormat, clear_camera_frame, remember_camera_frame,
-    remember_external_frame,
+    ExternalCamera, ExternalCameraFormat, clear_all_live_stills, clear_camera_frame,
+    remember_camera_frame, remember_external_frame,
 };
+
+static STILL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn reset_stills() {
+    let _guard = STILL_TEST_LOCK.lock().unwrap();
+    clear_all_live_stills();
+}
 use a2a_lab_ot2::{
     ExternalVideoConfig, ImageCatalogConfig, LiveImageCatalog, LiveJpegSource, LiveVideoInjections,
     VideoServeConfig, WebcamVideoConfig, image_catalog, start_live_videos,
@@ -161,6 +168,7 @@ async fn wait_for_follow(provider: &impl VideoProvider, source: &str) {
 
 #[tokio::test]
 async fn external_live_session_pumps_multiple_frames_before_shutdown() {
+    reset_stills();
     let frame = jpeg(4, 4, 1);
     let reads = Arc::new(AtomicUsize::new(0));
     let catalog = start_live_videos(
@@ -174,14 +182,13 @@ async fn external_live_session_pumps_multiple_frames_before_shutdown() {
         86_400,
         &temp_dvr(),
         1024,
-        LiveVideoInjections {
-            external: Some(Box::new(RepeatJpeg {
+        LiveVideoInjections::legacy_jpeg(
+            Some(Box::new(RepeatJpeg {
                 bytes: frame,
                 reads: Arc::clone(&reads),
             })),
-            webcam: None,
-            ..Default::default()
-        },
+            None,
+        ),
     )
     .await
     .unwrap();
@@ -195,6 +202,7 @@ async fn external_live_session_pumps_multiple_frames_before_shutdown() {
 
 #[tokio::test]
 async fn external_still_reuses_live_session_without_second_open() {
+    reset_stills();
     let live_bytes = jpeg(6, 4, 42);
     let catalog = start_live_videos(
         Some(ExternalVideoConfig {
@@ -207,13 +215,12 @@ async fn external_still_reuses_live_session_without_second_open() {
         86_400,
         &temp_dvr(),
         1024,
-        LiveVideoInjections {
-            external: Some(Box::new(RememberingExternal {
+        LiveVideoInjections::legacy_jpeg(
+            Some(Box::new(RememberingExternal {
                 bytes: live_bytes.clone(),
             })),
-            webcam: None,
-            ..Default::default()
-        },
+            None,
+        ),
     )
     .await
     .unwrap();
@@ -244,6 +251,7 @@ async fn external_still_reuses_live_session_without_second_open() {
 
 #[tokio::test]
 async fn camera_still_reuses_remembered_live_frame_without_opening_a_device() {
+    reset_stills();
     let live_bytes = jpeg(8, 6, 7);
     remember_camera_frame(live_bytes.clone());
     let images = LiveImageCatalog::new(
@@ -265,6 +273,7 @@ async fn camera_still_reuses_remembered_live_frame_without_opening_a_device() {
 
 #[tokio::test]
 async fn external_live_reconnects_after_transient_disconnect() {
+    reset_stills();
     let bytes = jpeg(3, 3, 5);
     let catalog = start_live_videos(
         Some(ExternalVideoConfig {
@@ -277,15 +286,14 @@ async fn external_live_reconnects_after_transient_disconnect() {
         86_400,
         &temp_dvr(),
         1024,
-        LiveVideoInjections {
-            external: Some(Box::new(FlakyExternal {
+        LiveVideoInjections::legacy_jpeg(
+            Some(Box::new(FlakyExternal {
                 bytes: bytes.clone(),
                 failures: Mutex::new(2),
                 reads: AtomicUsize::new(0),
             })),
-            webcam: None,
-            ..Default::default()
-        },
+            None,
+        ),
     )
     .await
     .unwrap();
@@ -295,6 +303,7 @@ async fn external_live_reconnects_after_transient_disconnect() {
 
 #[tokio::test]
 async fn shutdown_stops_live_capture_without_leaking_threads() {
+    reset_stills();
     let catalog = start_live_videos(
         Some(ExternalVideoConfig {
             index: 1,
@@ -306,13 +315,12 @@ async fn shutdown_stops_live_capture_without_leaking_threads() {
         86_400,
         &temp_dvr(),
         1024,
-        LiveVideoInjections {
-            external: Some(Box::new(RememberingExternal {
+        LiveVideoInjections::legacy_jpeg(
+            Some(Box::new(RememberingExternal {
                 bytes: jpeg(2, 2, 1),
             })),
-            webcam: None,
-            ..Default::default()
-        },
+            None,
+        ),
     )
     .await
     .unwrap();
@@ -323,6 +331,7 @@ async fn shutdown_stops_live_capture_without_leaking_threads() {
 
 #[tokio::test]
 async fn camera_live_survives_external_failure() {
+    reset_stills();
     let camera_bytes = jpeg(5, 5, 9);
     let catalog = start_live_videos(
         Some(ExternalVideoConfig {
@@ -335,13 +344,12 @@ async fn camera_live_survives_external_failure() {
         86_400,
         &temp_dvr(),
         1024,
-        LiveVideoInjections {
-            external: Some(Box::new(FailExternal)),
-            webcam: Some(Box::new(RememberingWebcam {
+        LiveVideoInjections::legacy_jpeg(
+            Some(Box::new(FailExternal)),
+            Some(Box::new(RememberingWebcam {
                 bytes: camera_bytes.clone(),
             })),
-            ..Default::default()
-        },
+        ),
     )
     .await
     .unwrap();
@@ -357,6 +365,7 @@ async fn camera_live_survives_external_failure() {
 
 #[tokio::test]
 async fn camera_without_a_frame_does_not_break_external_still_path() {
+    reset_stills();
     clear_camera_frame();
     let external_bytes = jpeg(4, 2, 3);
     let external_capture = CaptureScript::ok(external_bytes.clone());
@@ -389,6 +398,7 @@ async fn camera_without_a_frame_does_not_break_external_still_path() {
 
 #[test]
 fn video_config_summary_lists_camera_when_enabled() {
+    reset_stills();
     let config = VideoServeConfig::new(Some(4), None, 4, 120, 1024)
         .unwrap()
         .with_camera_index(7);
@@ -399,6 +409,7 @@ fn video_config_summary_lists_camera_when_enabled() {
 
 #[tokio::test]
 async fn camera_live_and_still_share_exact_bytes_from_the_pump() {
+    reset_stills();
     let shared = jpeg(10, 8, 44);
     let catalog = start_live_videos(
         None,
@@ -408,13 +419,12 @@ async fn camera_live_and_still_share_exact_bytes_from_the_pump() {
         86_400,
         &temp_dvr(),
         1024,
-        LiveVideoInjections {
-            external: None,
-            webcam: Some(Box::new(RememberingWebcam {
+        LiveVideoInjections::legacy_jpeg(
+            None,
+            Some(Box::new(RememberingWebcam {
                 bytes: shared.clone(),
             })),
-            ..Default::default()
-        },
+        ),
     )
     .await
     .unwrap();

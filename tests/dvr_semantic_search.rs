@@ -3,14 +3,16 @@
 use std::collections::HashSet;
 
 use a2a_lab_dev_kit::{
-    A2aLabConfig, DecisionHistoryPolicy, DecisionOutcome, DecisionSearchFilter, DecisionSubject,
+    A2aLabConfig, DecisionEvaluationCoverage, DecisionEvidenceItem, DecisionHistoryPolicy,
+    DecisionIdempotencyKey, DecisionOutcome, DecisionSearchFilter, DecisionSubject,
     DvrStoreNamespace, EmbeddingMetric, FakeEmbeddingBehavior, FakeTextEmbeddingProvider,
-    FrameDescriptionProvenance, FrameEmbeddingVector, FrameRoiTransform, JevProducerIdentity,
-    LabPredicate, MemoryVideos, ModelSpaceIdentity, PageRequest, ProvenanceGeneration,
-    SavedFrameRef, SearchSemanticFramesRequest, SemanticIndexingConfig, SemanticProvenanceSelector,
-    SemanticSearchLimits, SemanticSearchQuery, SemanticSearchScope, SemanticVideoSearchProvider,
-    Sha256Digest, TextEmbeddingLimits, TextEmbeddingProvenance, TimeRange, UtcTimestamp,
-    VectorNormalization, VideoSourceId,
+    FrameDecisionRecord, FrameDescriptionProvenance, FrameEmbeddingVector, FrameRoiTransform,
+    JevEvaluationId, JevEvaluationProvenance, JevProducerIdentity, JevStructuredOutput,
+    LabPredicate, MemoryVideos, ModelSpaceIdentity, PageRequest, PipetteChannelSubject,
+    ProvenanceGeneration, SavedFrameRef, SearchSemanticFramesRequest, SemanticIndexingConfig,
+    SemanticProvenanceSelector, SemanticSearchLimits, SemanticSearchQuery, SemanticSearchScope,
+    SemanticVideoSearchProvider, Sha256Digest, TextEmbeddingLimits, TextEmbeddingProvenance,
+    TimeRange, UtcTimestamp, VectorNormalization, VideoSourceId,
 };
 use a2a_lab_ot2::IndexedVideoDvr;
 use a2a_lab_ot2::lab_config::ResolvedSemanticIndexing;
@@ -610,5 +612,90 @@ async fn decision_filter_is_not_applied_by_provider() {
     .unwrap();
     let result = provider.search_semantic_frames(request).await.unwrap();
     assert_eq!(result.hits().items().len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn tip_record(saved: &SavedFrameRef) -> FrameDecisionRecord {
+    FrameDecisionRecord::new(
+        DecisionIdempotencyKey::new("jev-dvr-001:lab.pipette_tip_attached:left-1").unwrap(),
+        saved.clone(),
+        LabPredicate::pipette_tip_attached_v1(),
+        DecisionSubject::PipetteChannel(PipetteChannelSubject::new("left", "ch1", None).unwrap()),
+        vec![
+            DecisionEvidenceItem::saved_frame_revision(
+                saved.frame_id().clone(),
+                FrameRoiTransform::new([0.0, 0.0, 1.0, 1.0]).unwrap(),
+            )
+            .unwrap(),
+        ],
+        DecisionOutcome::Present,
+        JevStructuredOutput::empty(),
+        JevEvaluationProvenance::new(
+            saved.captured_at(),
+            saved.captured_at(),
+            JevProducerIdentity::default_production(),
+            JevEvaluationId::new("jev-dvr-001").unwrap(),
+            Sha256Digest::hash_bytes(b"config-v1"),
+            Sha256Digest::hash_bytes(b"prompt-v1"),
+            Sha256Digest::hash_bytes(b"criteria-v1"),
+            Sha256Digest::hash_bytes(b"threshold-v1"),
+            FrameRoiTransform::new([0.0, 0.0, 1.0, 1.0]).unwrap(),
+            Sha256Digest::hash_bytes(b"jev-response"),
+            DecisionEvaluationCoverage::Evaluated,
+            Option::<&str>::None,
+        )
+        .unwrap(),
+        None,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn search_hit_carries_bounded_frame_assessments() {
+    let (dir, store) = open_store("hit-assessments").await;
+    let source = VideoSourceId::new("cam-a").unwrap();
+    let provider = provider(&store, "cam-a");
+    let frame = index_frame(
+        &store,
+        &source,
+        120_000_000,
+        96,
+        "tip with assessments",
+        FrameEmbeddingVector::new(vec![1.0, 0.0, 0.0, 0.0], 4).unwrap(),
+    )
+    .await;
+    let scope = scope_for(
+        &source,
+        frame.captured_at(),
+        frame.captured_at().saturating_add_micros(5_000_000),
+    );
+    let request = |text: &str| {
+        search_request(
+            scope.clone(),
+            SemanticSearchQuery::Text {
+                text: text.to_owned(),
+            },
+            SemanticSearchLimits::pilot(),
+            PageRequest::new(None, 10).unwrap(),
+        )
+    };
+    let before = provider
+        .search_semantic_frames(request("assessments"))
+        .await
+        .unwrap();
+    let empty = before.hits().items().first().expect("hit");
+    let attached = empty.authorized_assessments().expect("attached empty");
+    assert!(attached.entries().is_empty());
+
+    store
+        .append_frame_decision(tip_record(&frame))
+        .await
+        .unwrap();
+    let after = provider
+        .search_semantic_frames(request("assessments"))
+        .await
+        .unwrap();
+    let hit = after.hits().items().first().expect("hit");
+    assert_eq!(hit.authorized_assessments().unwrap().entries().len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }

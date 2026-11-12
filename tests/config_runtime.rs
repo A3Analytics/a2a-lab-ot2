@@ -244,9 +244,9 @@ async fn three_file_sources_reach_injected_cameras_and_the_chat_factory() {
     let path = write_config(
         &dir,
         r#"{"schema_version":1,"chat":{"provider":"openai","model":"gpt-test"},"videos":{"sources":[
-            {"id":"deck.mjpeg","name":"Deck MJPEG","description":"Encoded input","format":"mjpeg","device_index":0},
-            {"id":"deck.yuy2","name":"Deck YUY2","description":"Packed input","format":"yuy2","device_index":1},
-            {"id":"deck.alias","name":"Deck alias","description":"YUYV alias","format":"yuyv","device_index":2}
+            {"id":"deck.mjpeg","name":"Deck MJPEG","description":"Encoded input","format":"mjpeg","width":1280,"height":720,"device_index":0},
+            {"id":"deck.yuy2","name":"Deck YUY2","description":"Packed input","format":"yuy2","width":1280,"height":720,"device_index":1},
+            {"id":"deck.alias","name":"Deck alias","description":"YUYV alias","format":"yuyv","width":1280,"height":720,"device_index":2}
         ],"fps":5,"live_retention":"5s","dvr":{"retention":"1d","storage_path":"./dvr"}}}"#,
     );
     let inputs = cli_file(path);
@@ -310,7 +310,7 @@ async fn precedence_retention_and_empty_sources_match_runtime() {
     let path = write_config(
         &dir,
         r#"{"schema_version":1,"videos":{"sources":[
-            {"id":"overview","format":"mjpeg","device_index":3}
+            {"id":"overview","format":"mjpeg","width":1280,"height":720,"device_index":3}
         ],"fps":7,"live_retention":"5m","dvr":{"retention":"1h30m","storage_path":"./from-file"}}}"#,
     );
     let inputs = LabConfigInputs {
@@ -389,9 +389,9 @@ async fn mismatched_input_does_not_fall_back_and_isolates_failure() {
     let path = write_config(
         &dir,
         r#"{"schema_version":1,"videos":{"sources":[
-            {"id":"good","format":"mjpeg","device_index":4},
-            {"id":"wrong-mode","format":"yuy2","device_index":5},
-            {"id":"short-yuy2","format":"yuy2","device_index":6}
+            {"id":"good","format":"mjpeg","width":1280,"height":720,"device_index":4},
+            {"id":"wrong-mode","format":"yuy2","width":1280,"height":720,"device_index":5},
+            {"id":"short-yuy2","format":"yuy2","width":1280,"height":720,"device_index":6}
         ],"dvr":{"storage_path":"./dvr"}}}"#,
     );
     let resolved = resolve_lab_config(&cli_file(path)).unwrap();
@@ -477,7 +477,7 @@ async fn restart_reuses_dvr_for_the_same_source_id() {
     let path = write_config(
         &dir,
         r#"{"schema_version":1,"videos":{"sources":[
-            {"id":"persist","name":"Persist","description":"Kept","format":"mjpeg","device_index":8}
+            {"id":"persist","name":"Persist","description":"Kept","format":"mjpeg","width":1280,"height":720,"device_index":8}
         ],"dvr":{"storage_path":"./kept-dvr"}}}"#,
     );
     let inputs = cli_file(path);
@@ -574,7 +574,7 @@ fn config_validate_succeeds_without_provider_credentials() {
     let path = write_config(
         &dir,
         r#"{"schema_version":1,"chat":{"provider":"anthropic","model":"claude-test"},"videos":{"sources":[
-            {"id":"deck.alias","format":"yuyv","device_index":0}
+            {"id":"deck.alias","format":"yuyv","width":1280,"height":720,"device_index":0}
         ],"live_retention":"5m","dvr":{"retention":"3d","storage_path":"./video-dvr"}}}"#,
     );
     let output = Command::new(env!("CARGO_BIN_EXE_a2a-lab-ot2"))

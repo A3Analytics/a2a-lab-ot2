@@ -107,8 +107,8 @@ async fn videos_only_file_controls_sources_and_timing() {
     let path = dir.join("a2a-lab.json");
     let loaded = load_config(
         r#"{"schema_version":1,"videos":{"sources":[
-            {"id":"bench","name":"Bench","description":"Overview","format":"yuyv","device_index":4},
-            {"id":"detail","name":"Detail","description":"Close-up","format":"mjpeg","device_index":6}
+            {"id":"bench","name":"Bench","description":"Overview","format":"yuyv","width":1280,"height":720,"device_index":4},
+            {"id":"detail","name":"Detail","description":"Close-up","format":"mjpeg","width":1280,"height":720,"device_index":6}
         ],"fps":7,"live_retention":"11s","dvr":{"retention":"2d","storage_path":"./dvr-store"}}}"#,
         &path,
     );
@@ -238,7 +238,7 @@ async fn restart_keeps_timeline_for_same_ids_and_dvr_root() {
     load_config(
         &format!(
             r#"{{"schema_version":1,"videos":{{"sources":[
-                {{"id":"persist","name":"Persist","description":"DVR","format":"mjpeg","device_index":2}}
+                {{"id":"persist","name":"Persist","description":"DVR","format":"mjpeg","width":1280,"height":720,"device_index":2}}
             ],"dvr":{{"storage_path":{storage}}}}}}}"#
         ),
         &path,

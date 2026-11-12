@@ -750,9 +750,7 @@ fn prepare_images(
     let mut images = image_config(cli)?;
     if uses_resolved_video_configuration(config_inputs)? {
         let resolved = resolved_lab_config(bootstrap, config_inputs)?;
-        for source in &resolved.video.sources {
-            images = images.with_source_label(&source.id, &source.name);
-        }
+        images = images.with_native_video_sources(&resolved.video.sources);
     }
     println!("{}", images.summary());
     println!("{}", video_startup_summary(cli, config_inputs, bootstrap)?);

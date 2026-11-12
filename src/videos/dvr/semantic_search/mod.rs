@@ -35,6 +35,7 @@ fn candidate_micros_bounds(range: Option<TimeRange>) -> (i64, i64) {
 pub struct DvrSemanticSearchProvider {
     dvr: IndexedVideoDvr,
     model_space: ModelSpaceIdentity,
+    active_provenance: SemanticProvenanceSelector,
     source_filter: IndexedSourceFilter,
     embedder: DvrSearchEmbedder,
 }
@@ -54,6 +55,7 @@ impl DvrSemanticSearchProvider {
         Ok(Self {
             dvr,
             model_space: embeddings.model_space_identity()?,
+            active_provenance: semantic.config.active_search_provenance()?,
             source_filter: IndexedSourceFilter::allow_only(semantic.indexed_source_ids.clone()),
             embedder,
         })
@@ -126,6 +128,10 @@ impl SemanticVideoSearchProvider for DvrSemanticSearchProvider {
             freshness,
             scope_complete,
         ))
+    }
+
+    fn active_provenance(&self) -> Result<SemanticProvenanceSelector, A2aLabError> {
+        Ok(self.active_provenance.clone())
     }
 }
 

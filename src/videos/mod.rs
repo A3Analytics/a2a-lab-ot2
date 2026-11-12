@@ -1,5 +1,6 @@
 //! Live video catalog plus a cancellable capture pump.
 
+pub(crate) mod capture_open;
 mod catalog;
 pub mod dvr;
 mod external;
@@ -27,5 +28,6 @@ pub use serve::{
     open_video_catalog, resolve_serve_semantic_indexing, resolved_video_summary,
 };
 pub use source::{
-    LiveCameraInputFormat, LiveVideoDelivery, LiveVideoSourceDescriptor, validate_live_sources,
+    LiveCameraInputFormat, LiveVideoDelivery, LiveVideoSourceDescriptor,
+    native_capture_profile_candidates, validate_live_sources,
 };

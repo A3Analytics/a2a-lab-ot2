@@ -94,15 +94,22 @@ impl LiveVideoSourceDescriptor {
         )
     }
 
+    /// Returns true for configuration-defined ids (not legacy schema defaults).
     #[must_use]
-    pub fn remembers_external_still(&self) -> bool {
-        self.id == EXTERNAL_CAMERA_SOURCE_ID
+    pub fn is_configured_identity(&self) -> bool {
+        !matches!(
+            self.id.as_str(),
+            CAMERA_SOURCE_ID | EXTERNAL_CAMERA_SOURCE_ID
+        )
     }
+}
 
-    #[must_use]
-    pub fn remembers_camera_still(&self) -> bool {
-        self.id == CAMERA_SOURCE_ID
-    }
+/// Single explicit capture profile request for this source.
+pub fn native_capture_profile_candidates(
+    descriptor: &LiveVideoSourceDescriptor,
+    output_fps: u32,
+) -> Result<Vec<CaptureProfileRequest>, A2aLabError> {
+    Ok(vec![descriptor.capture_request(output_fps)?])
 }
 
 /// Rejects duplicate ids or device indices before any producer starts.

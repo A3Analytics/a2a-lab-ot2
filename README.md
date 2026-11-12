@@ -154,13 +154,16 @@ A2ALAB_EXTERNAL_CAMERA_INDEX=4 \
 A2ALAB_EXTERNAL_VIDEO_DEVICES=/dev/video4 \
 mise run agent-media-smoke
 
-# Native serve on the host (external-camera only on macOS):
+# Native serve on the host (macOS; configuration-driven source ids):
 A2ALAB_MEDIA_SMOKE=1 A2ALAB_MEDIA_SMOKE_NATIVE=1 \
-A2ALAB_EXTERNAL_CAMERA_INDEX=0 \
+A2ALAB_MAC_BUILTIN_DEVICE_INDEX=0 \
+A2ALAB_USB_WEBCAM_DEVICE_INDEX=1 \
 mise run agent-media-smoke-native
 ```
 
-The smoke check verifies advancing live MJPEG on `/media/video-live/`, confirms `get_image` matches `get_current_image` for each verified source, restarts the agent to prove indexed DVR history survives, and prints retention policy values (5 s live memory, 259200 s disk video, 30 d still history). Each source failure is reported independently.
+The native path loads `fixtures/native-macos-media-smoke-v1.json`, which advertises `mac-built-in` (not legacy `camera` / `external-camera`) and sets indexed disk video retention to **3 hours (10800 s)** for that local run only. Container and production defaults stay at 3 days (`259200` s).
+
+The smoke check verifies advancing live MJPEG on `/media/video-live/`, confirms `get_image` matches `get_current_image` for each verified source, restarts the agent to prove indexed DVR history survives, and prints retention policy values (5 s live memory on container smoke; 10800 s disk video on native macOS smoke; 30 d still history). Each source failure is reported independently.
 
 ## Choose an external camera
 

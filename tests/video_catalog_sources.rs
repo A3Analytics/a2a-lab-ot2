@@ -339,7 +339,7 @@ async fn one_failing_source_does_not_remove_healthy_sources() {
 
 #[tokio::test]
 async fn color_camera_rejects_wrong_negotiated_format() {
-    let sources = [descriptor("mjpeg-only", 3, LiveCameraInputFormat::Mjpeg)];
+    let sources = [LiveVideoSourceDescriptor::legacy_camera(3)];
     let camera = ScriptCamera {
         formats: vec![profile(CaptureFormat::Yuy2, 4, 4, 5)],
         raw: yuy2_sample(4, 4, 8, 1),
@@ -356,12 +356,12 @@ async fn color_camera_rejects_wrong_negotiated_format() {
         86_400,
         &temp_dvr("wrong-fmt"),
         1024,
-        LiveVideoInjections::none().with_color_camera("mjpeg-only", Box::new(camera)),
+        LiveVideoInjections::none().with_color_camera("camera", Box::new(camera)),
     )
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let source = VideoSourceId::new("mjpeg-only").unwrap();
+    let source = VideoSourceId::new("camera").unwrap();
     assert!(
         catalog
             .provider()

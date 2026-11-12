@@ -154,6 +154,16 @@ persistent state mount: /var/lib/a2a-lab-ot2 (images.sqlite, video-dvr/, frame-s
 EOF
 }
 
+agent_native_media_smoke_retention_summary() {
+  cat <<'EOF'
+live video memory retention: 5 seconds per enabled source (native macOS smoke fixture live_retention)
+indexed disk video retention: 10800 seconds (3 hours) for host-native macOS media smoke only (fixtures/native-macos-media-smoke-v1.json videos.dvr.retention)
+still-image age retention: 30 days with per-source count cap (A2ALAB_IMAGE_RETENTION default; unchanged)
+persistent state mount: A2ALAB_STATE_DIR (default .a2a-lab-ot2-native-smoke)
+video source ids: mac-built-in (configuration-driven; override smoke list with A2ALAB_MEDIA_SMOKE_SOURCES)
+EOF
+}
+
 print_agent_rollback_instructions() {
   local state="${1:-$(agent_default_state_dir)}"
   cat <<EOF

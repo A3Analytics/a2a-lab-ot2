@@ -35,4 +35,16 @@ policy="$(agent_retention_policy_summary)"
 [[ "$policy" == *"259200"* ]] || fail "disk retention policy"
 [[ "$policy" == *"30 days"* ]] || fail "still age policy"
 
+native_policy="$(agent_native_media_smoke_retention_summary)"
+[[ "$native_policy" == *"10800"* ]] || fail "native disk retention policy"
+[[ "$native_policy" == *"mac-built-in"* ]] || fail "native custom source id"
+
+fixture="$root/fixtures/native-macos-media-smoke-v1.json"
+[[ -f "$fixture" ]] || fail "native macOS smoke fixture"
+grep -q '"retention": "3h"' "$fixture" || fail "native fixture dvr retention"
+grep -q '"id": "mac-built-in"' "$fixture" || fail "native fixture built-in source"
+if grep -q '"id": "usb-webcam"' "$fixture"; then
+  fail "native fixture must not open the usb webcam"
+fi
+
 printf 'agent media smoke self-test ok\n'

@@ -5,10 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use a2a_lab_dev_kit::videos::{
-    CaptureClock, CaptureFormat, CaptureFormatPreference, CaptureIdentity, CaptureSession,
-    CaptureTiming, ColorCamera, ColorMatrix, ColorProperties, ColorRange,
-};
+use a2a_lab_dev_kit::videos::{CaptureSession, ColorCamera};
 use a2a_lab_dev_kit::{
     A2aLabError, FrameDecisionLedgerProvider, MJPEG_MEDIA_TYPE, MemoryVideos, VideoSource,
     VideoSourceId,
@@ -16,9 +13,12 @@ use a2a_lab_dev_kit::{
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 
-use crate::camera::{remember_camera_frame, remember_external_frame};
+use crate::camera::remember_live_still;
 use crate::images::jpeg_dimensions;
 use crate::lab_config::ResolvedSemanticIndexing;
+use crate::videos::capture_open::{
+    open_configured_session, open_native_session, read_session_jpeg,
+};
 use crate::videos::dvr::{
     DvrFrameDecisionLedger, IndexedVideoDvr, VideoDvrAnnotationQueue, VideoDvrCatalog,
     VideoDvrDecisionEvaluationQueue, VideoDvrMaintenance,
@@ -26,13 +26,10 @@ use crate::videos::dvr::{
 use crate::videos::external::{LiveJpegSource, frame_budget};
 use crate::videos::h264::H264Encoder;
 use crate::videos::nokhwa_camera::NokhwaColorCamera;
-use crate::videos::raw_jpeg::captured_frame_jpeg;
 use crate::videos::semantic_indexing::{
     SemanticServeBundle, SemanticServeInjections, prepare_semantic_serve_bundle,
 };
-use crate::videos::source::{
-    LiveCameraInputFormat, LiveVideoDelivery, LiveVideoSourceDescriptor, validate_live_sources,
-};
+use crate::videos::source::{LiveVideoDelivery, LiveVideoSourceDescriptor, validate_live_sources};
 
 /// Live video catalog and the capture threads that fill it.
 pub struct LiveVideoCatalog {
@@ -90,10 +87,8 @@ impl Drop for LiveVideoCatalog {
 /// Injectable producers for hardware-free tests.
 #[derive(Default)]
 pub struct LiveVideoInjections {
-    /// Replaces legacy `external-camera` when set.
-    pub external: Option<Box<dyn LiveJpegSource>>,
-    /// Replaces legacy `camera` when set.
-    pub webcam: Option<Box<dyn LiveJpegSource>>,
+    /// Injected MJPEG pumps keyed by configured source id.
+    pub jpeg_sources: HashMap<String, Box<dyn LiveJpegSource>>,
     /// Injected [`ColorCamera`] backends keyed by stable source id.
     pub cameras: HashMap<String, Box<dyn ColorCamera + Send>>,
 }
@@ -105,17 +100,35 @@ impl LiveVideoInjections {
         Self::default()
     }
 
-    /// Legacy JPEG pump overrides for `external-camera` and `camera`.
+    /// Schema-default JPEG pump overrides for legacy serve configuration only.
     #[must_use]
     pub fn legacy_jpeg(
         external: Option<Box<dyn LiveJpegSource>>,
         webcam: Option<Box<dyn LiveJpegSource>>,
     ) -> Self {
+        use crate::camera::{CAMERA_SOURCE_ID, EXTERNAL_CAMERA_SOURCE_ID};
+        let mut jpeg_sources = HashMap::new();
+        if let Some(source) = external {
+            jpeg_sources.insert(EXTERNAL_CAMERA_SOURCE_ID.to_owned(), source);
+        }
+        if let Some(source) = webcam {
+            jpeg_sources.insert(CAMERA_SOURCE_ID.to_owned(), source);
+        }
         Self {
-            external,
-            webcam,
+            jpeg_sources,
             cameras: HashMap::new(),
         }
+    }
+
+    /// Registers an injected MJPEG producer for `id`.
+    #[must_use]
+    pub fn with_jpeg_source(
+        mut self,
+        id: impl Into<String>,
+        source: Box<dyn LiveJpegSource>,
+    ) -> Self {
+        self.jpeg_sources.insert(id.into(), source);
+        self
     }
 
     /// Registers an injected camera for `id`.
@@ -358,13 +371,10 @@ fn take_injection(
     if let Some(camera) = injections.cameras.remove(&source.id) {
         return Some(SourceInjection::Camera(camera));
     }
-    if source.remembers_external_still() {
-        return injections.external.take().map(SourceInjection::Jpeg);
-    }
-    if source.remembers_camera_still() {
-        return injections.webcam.take().map(SourceInjection::Jpeg);
-    }
-    None
+    injections
+        .jpeg_sources
+        .remove(&source.id)
+        .map(SourceInjection::Jpeg)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -488,15 +498,10 @@ fn pump(
         if jpeg_dimensions(&jpeg).is_err() {
             continue;
         }
-        if descriptor.remembers_camera_still() {
-            remember_camera_frame(jpeg.clone());
-        }
-        if descriptor.remembers_external_still() {
-            remember_external_frame(jpeg.clone());
-        }
+        remember_live_still(&descriptor.id, jpeg.clone());
         let published = if encode_h264 {
             if encoder.is_none() {
-                match H264Encoder::spawn() {
+                match H264Encoder::spawn(fps) {
                     Ok(opened) => encoder = Some(opened),
                     Err(error) => {
                         eprintln!("{} h264: {error}", descriptor.id);
@@ -612,68 +617,7 @@ fn open_injected_session(
     fps: u32,
     camera: Box<dyn ColorCamera + Send>,
 ) -> Result<CaptureSession<DynColorCamera>, A2aLabError> {
-    let request = descriptor.capture_request(fps)?;
-    let mut session = CaptureSession::new(DynColorCamera(camera), request);
-    session.open()?;
-    Ok(session)
-}
-
-fn open_native_session(
-    descriptor: &LiveVideoSourceDescriptor,
-    fps: u32,
-) -> Result<CaptureSession<NokhwaColorCamera>, A2aLabError> {
-    let request = descriptor.capture_request(fps)?;
-    let mut session = CaptureSession::new(
-        NokhwaColorCamera::open_index(descriptor.device_index)?,
-        request,
-    );
-    session.open()?;
-    Ok(session)
-}
-
-fn read_session_jpeg(
-    session: &mut CaptureSession<impl ColorCamera>,
-    source_id: &VideoSourceId,
-    sequence: &mut u64,
-    max_bytes: u64,
-    descriptor: &LiveVideoSourceDescriptor,
-) -> Result<Vec<u8>, A2aLabError> {
-    let captured_at = crate::time::now()?;
-    let identity = CaptureIdentity::new(source_id.clone(), *sequence);
-    *sequence = sequence.saturating_add(1);
-    let timing = CaptureTiming::new(captured_at, CaptureClock::monotonic(0));
-    let color = match descriptor.input {
-        LiveCameraInputFormat::Yuy2 => {
-            ColorProperties::new(ColorMatrix::Bt601, ColorRange::Limited)
-        }
-        LiveCameraInputFormat::Mjpeg => {
-            ColorProperties::new(ColorMatrix::Unknown, ColorRange::Unknown)
-        }
-    };
-    let frame = session.read(identity, timing, color)?;
-    let selected = session.selected().ok_or_else(|| {
-        A2aLabError::invalid("camera", "capture session has no negotiated profile")
-    })?;
-    let negotiated = selected.mode().format();
-    let expected = descriptor.input.capture_preference();
-    let matches = match expected {
-        CaptureFormatPreference::Mjpeg => negotiated == CaptureFormat::Mjpeg,
-        CaptureFormatPreference::Yuy2 => negotiated == CaptureFormat::Yuy2,
-        CaptureFormatPreference::Auto => true,
-    };
-    if !matches {
-        return Err(A2aLabError::invalid(
-            "format",
-            "negotiated raw layout does not match the configured input format",
-        ));
-    }
-    if frame.format() != negotiated {
-        return Err(A2aLabError::invalid(
-            "format",
-            "raw sample layout does not match the negotiated input format",
-        ));
-    }
-    captured_frame_jpeg(&frame, max_bytes)
+    open_configured_session(DynColorCamera(camera), descriptor, fps)
 }
 
 async fn insert_source(

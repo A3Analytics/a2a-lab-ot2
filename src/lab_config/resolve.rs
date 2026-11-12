@@ -134,7 +134,7 @@ fn resolve_video(
         .max_image_bytes
         .explicit_or(None, || a2a_lab_dev_kit::DEFAULT_MAX_IMAGE_BYTES);
 
-    let mut sources = file_sources(loaded.and_then(|loaded| loaded.config.videos.clone()));
+    let mut sources = file_sources(loaded.and_then(|loaded| loaded.config.videos.clone()))?;
     apply_legacy_source_upserts(inputs, &mut sources)?;
     apply_description_override(inputs, &mut sources)?;
     validate_live_sources(&sources)?;
@@ -184,9 +184,11 @@ fn resolve_dvr_storage(
     })
 }
 
-fn file_sources(videos: Option<a2a_lab_dev_kit::VideoConfig>) -> Vec<LiveVideoSourceDescriptor> {
+fn file_sources(
+    videos: Option<a2a_lab_dev_kit::VideoConfig>,
+) -> Result<Vec<LiveVideoSourceDescriptor>, A2aLabError> {
     let Some(videos) = videos else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     videos
         .sources
@@ -195,11 +197,13 @@ fn file_sources(videos: Option<a2a_lab_dev_kit::VideoConfig>) -> Vec<LiveVideoSo
         .collect()
 }
 
-fn descriptor_from_file_source(source: &VideoSourceConfig) -> LiveVideoSourceDescriptor {
+fn descriptor_from_file_source(
+    source: &VideoSourceConfig,
+) -> Result<LiveVideoSourceDescriptor, A2aLabError> {
     let input = input_format(source.format);
     let id = source.id.as_str();
     match id {
-        EXTERNAL_CAMERA_SOURCE_ID => LiveVideoSourceDescriptor {
+        EXTERNAL_CAMERA_SOURCE_ID => Ok(LiveVideoSourceDescriptor {
             id: EXTERNAL_CAMERA_SOURCE_ID.to_owned(),
             name: source.display_name().to_owned(),
             description: source.display_description().to_owned(),
@@ -208,8 +212,8 @@ fn descriptor_from_file_source(source: &VideoSourceConfig) -> LiveVideoSourceDes
             width: EXTERNAL_CAMERA_WIDTH,
             height: EXTERNAL_CAMERA_HEIGHT,
             delivery: LiveVideoDelivery::H264,
-        },
-        CAMERA_SOURCE_ID => LiveVideoSourceDescriptor {
+        }),
+        CAMERA_SOURCE_ID => Ok(LiveVideoSourceDescriptor {
             id: CAMERA_SOURCE_ID.to_owned(),
             name: source.display_name().to_owned(),
             description: source.display_description().to_owned(),
@@ -218,17 +222,31 @@ fn descriptor_from_file_source(source: &VideoSourceConfig) -> LiveVideoSourceDes
             width: 1280,
             height: 720,
             delivery: LiveVideoDelivery::H264,
-        },
-        _ => LiveVideoSourceDescriptor {
-            id: id.to_owned(),
-            name: source.display_name().to_owned(),
-            description: source.display_description().to_owned(),
-            device_index: source.device_index,
-            input,
-            width: 1280,
-            height: 720,
-            delivery: LiveVideoDelivery::H264,
-        },
+        }),
+        _ => {
+            let width = source.width.ok_or_else(|| {
+                A2aLabError::invalid(
+                    "videos.sources.width",
+                    format!("source `{id}` requires explicit width"),
+                )
+            })?;
+            let height = source.height.ok_or_else(|| {
+                A2aLabError::invalid(
+                    "videos.sources.height",
+                    format!("source `{id}` requires explicit height"),
+                )
+            })?;
+            Ok(LiveVideoSourceDescriptor {
+                id: id.to_owned(),
+                name: source.display_name().to_owned(),
+                description: source.display_description().to_owned(),
+                device_index: source.device_index,
+                input,
+                width,
+                height,
+                delivery: LiveVideoDelivery::H264,
+            })
+        }
     }
 }
 

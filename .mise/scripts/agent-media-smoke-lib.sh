@@ -33,7 +33,11 @@ PY
 }
 
 media_smoke_report_policy() {
-  agent_retention_policy_summary
+  if [[ "${A2ALAB_MEDIA_SMOKE_NATIVE:-}" == 1 ]]; then
+    agent_native_media_smoke_retention_summary
+  else
+    agent_retention_policy_summary
+  fi
 }
 
 media_smoke_diagnose() {

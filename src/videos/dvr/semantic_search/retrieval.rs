@@ -3,10 +3,12 @@
 use sqlx::Row;
 
 use a2a_lab_dev_kit::{
-    A2aLabError, EmbeddingMetric, FrameEmbeddingVector, FrameVectorIndexAttachment, Page,
-    PageRequest, SavedFrameRef, SearchSemanticFramesRequest, SemanticFrameHit,
-    SemanticFrameIndexState, SemanticFrameMediaAvailability, SemanticFramePlaybackNeighbors,
-    SemanticRetrievalScore, SemanticSearchQuery, TimeRange,
+    A2aLabError, DecisionHistoryPolicy, EmbeddingMetric, FrameDecisionReadLimits,
+    FrameDecisionReadScope, FrameEmbeddingVector, FrameVectorIndexAttachment, Page, PageRequest,
+    ReadFrameDecisionHistoryRequest, SavedFrameRef, SearchSemanticFramesRequest, SemanticFrameHit,
+    SemanticFrameHitAssessments, SemanticFrameIndexState, SemanticFrameMediaAvailability,
+    SemanticFramePlaybackNeighbors, SemanticRetrievalScore, SemanticSearchQuery, TimeRange,
+    decision_history_fingerprint,
 };
 
 use super::embedder::DvrSearchEmbedder;
@@ -142,6 +144,7 @@ async fn build_hit(
     let index_state = semantic_index_state(record);
     let media = media_availability(record);
     let neighbors = playback_neighbors(dvr, record.frame(), request, record.end_us()).await?;
+    let authorized_assessments = frame_assessments(dvr, request, record.frame()).await?;
     SemanticFrameHit::new(
         record.frame().clone(),
         description.text(),
@@ -150,7 +153,45 @@ async fn build_hit(
         index_state,
         media,
         neighbors,
+        authorized_assessments,
     )
+}
+
+async fn frame_assessments(
+    dvr: &IndexedVideoDvr,
+    request: &SearchSemanticFramesRequest,
+    frame: &SavedFrameRef,
+) -> Result<Option<SemanticFrameHitAssessments>, A2aLabError> {
+    let max_rows = request.limits().max_assessment_rows_per_hit();
+    let captured = frame.captured_at();
+    let range = TimeRange::new(captured, captured.saturating_add_micros(1))?;
+    let scope = FrameDecisionReadScope::new(frame.source_id().clone(), range, Some(frame.clone()))?;
+    let history_request = ReadFrameDecisionHistoryRequest::new(
+        scope,
+        None,
+        None,
+        None,
+        DecisionHistoryPolicy::FullHistory,
+        FrameDecisionReadLimits::new(max_rows)?,
+        PageRequest::new(None, max_rows)?,
+        Vec::new(),
+    )?;
+    let history = dvr.read_frame_decision_history(&history_request).await?;
+    let records: Vec<_> = history
+        .entries()
+        .items()
+        .iter()
+        .map(|entry| entry.record().clone())
+        .collect();
+    let truncated = history.entries().next_cursor().is_some();
+    Ok(Some(SemanticFrameHitAssessments::new(
+        frame.clone(),
+        DecisionHistoryPolicy::FullHistory,
+        history.entries().items().to_vec(),
+        decision_history_fingerprint(&records),
+        truncated,
+        max_rows,
+    )?))
 }
 
 fn semantic_index_state(record: &SemanticFrameManifestRecord) -> SemanticFrameIndexState {

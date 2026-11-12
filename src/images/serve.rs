@@ -7,8 +7,9 @@ use std::time::Duration;
 use a2a_lab_dev_kit::{A2aLabError, ImageSource, ImageSourceId, ImageTransportConfig};
 
 use crate::camera::{
-    CAMERA_SOURCE_ID, CameraCapture, CameraStill, DEFAULT_EXTERNAL_CAMERA_DESCRIPTION,
-    EXTERNAL_CAMERA_SOURCE_ID, ExternalCamera, camera_source_named, external_camera_source_named,
+    CAMERA_SOURCE_ID, CameraCapture, CameraStill, ConfiguredNativeStill,
+    DEFAULT_EXTERNAL_CAMERA_DESCRIPTION, EXTERNAL_CAMERA_SOURCE_ID, ExternalCamera,
+    camera_source_named, configured_still_image_source, external_camera_source_named,
 };
 use crate::images::{
     DEFAULT_IMAGE_HISTORY_DB, IMAGE_HISTORY_MAX_AGE, ImageCapture, ImageCatalogConfig,
@@ -19,6 +20,7 @@ use crate::orbbec::{
     ORBBEC_CAMERA_SOURCE_ID, ORBBEC_FIRST_FRAME_WAIT, OrbbecCamera, OrbbecCapture,
     SdkOrbbecCapture, orbbec_camera_source,
 };
+use crate::videos::LiveVideoSourceDescriptor;
 
 /// Default still-capture budget for both cameras.
 pub const DEFAULT_CAPTURE_TIMEOUT_MS: u64 = 10_000;
@@ -34,6 +36,7 @@ pub struct ImageServeConfig {
     external_name: String,
     webcam_index: Option<u32>,
     webcam_name: String,
+    native_video_sources: Vec<LiveVideoSourceDescriptor>,
     orbbec: Option<OrbbecSelection>,
     transport: ImageTransportConfig,
     capture_timeout: Duration,
@@ -73,11 +76,25 @@ impl ImageServeConfig {
             external_name: "External camera".to_owned(),
             webcam_index: None,
             webcam_name: "Camera".to_owned(),
+            native_video_sources: Vec::new(),
             orbbec: None,
             transport,
             capture_timeout,
             retention_per_source,
         })
+    }
+
+    /// Registers still sources from resolved live video configuration.
+    #[must_use]
+    pub fn with_native_video_sources(mut self, sources: &[LiveVideoSourceDescriptor]) -> Self {
+        self.native_video_sources = sources.to_vec();
+        self
+    }
+
+    /// Whether still/image sources come from resolved video configuration.
+    #[must_use]
+    pub fn uses_resolved_native_sources(&self) -> bool {
+        !self.native_video_sources.is_empty()
     }
 
     /// Enables `orbbec-camera` without opening a device.
@@ -94,7 +111,7 @@ impl ImageServeConfig {
         Ok(self)
     }
 
-    /// Uses a configured display name for `camera` or `external-camera`.
+    /// Uses a configured display name for legacy schema-default ids only.
     #[must_use]
     pub fn with_source_label(mut self, id: &str, name: &str) -> Self {
         match id {
@@ -170,21 +187,44 @@ impl ImageServeConfig {
         self.transport
     }
 
-    /// One startup line naming the on-board camera, the extra camera, and the limits.
+    /// One startup line naming configured sources and limits.
     #[must_use]
     pub fn summary(&self) -> String {
-        let external = match self.camera_index {
-            Some(index) => {
-                format!(
-                    "external-camera index {index} description {}",
-                    self.description
-                )
-            }
-            None => "external-camera off".to_owned(),
-        };
-        let camera = match self.webcam_index {
-            Some(index) => format!("camera index {index}"),
-            None => "camera off".to_owned(),
+        let native = if self.uses_resolved_native_sources() {
+            self.native_video_sources
+                .iter()
+                .map(|source| {
+                    if source.id == EXTERNAL_CAMERA_SOURCE_ID {
+                        format!(
+                            "{} index {} description {}",
+                            source.id, source.device_index, source.description
+                        )
+                    } else if source.id == CAMERA_SOURCE_ID {
+                        format!("{} index {}", source.id, source.device_index)
+                    } else {
+                        format!(
+                            "{} index {} ({})",
+                            source.id, source.device_index, source.name
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        } else {
+            let external = match self.camera_index {
+                Some(index) => {
+                    format!(
+                        "external-camera index {index} description {}",
+                        self.description
+                    )
+                }
+                None => "external-camera off".to_owned(),
+            };
+            let camera = match self.webcam_index {
+                Some(index) => format!("camera index {index}"),
+                None => "camera off".to_owned(),
+            };
+            format!("{external}; {camera}")
         };
         let orbbec = match &self.orbbec {
             None => "orbbec-camera off".to_owned(),
@@ -194,7 +234,7 @@ impl ImageServeConfig {
             }) => format!("orbbec-camera serial {serial}"),
         };
         format!(
-            "images       opentrons-camera asset opentrons-ot2; {external}; {camera}; {orbbec} timeout {}ms retention {} max-bytes {} history {DEFAULT_IMAGE_HISTORY_DB} age {}d",
+            "images       opentrons-camera asset opentrons-ot2; {native}; {orbbec} timeout {}ms retention {} max-bytes {} history {DEFAULT_IMAGE_HISTORY_DB} age {}d",
             self.capture_timeout.as_millis(),
             self.retention_per_source,
             self.max_image_bytes(),
@@ -204,11 +244,6 @@ impl ImageServeConfig {
 }
 
 /// Live cameras for this process. `external_capture` replaces native capture in tests.
-///
-/// The on-board camera is always registered. The external camera is registered only
-/// when [`ImageServeConfig::camera_index`] is set. Source `camera` is registered
-/// only when a webcam index is set. No camera is opened here. Still capture for
-/// `camera` reads the JPEG stored by the video pump.
 pub fn image_catalog(
     opentrons_url: &str,
     config: &ImageServeConfig,
@@ -222,26 +257,42 @@ pub fn image_catalog(
     )?;
     let mut sources: Vec<(ImageSource, Arc<dyn ImageCapture>)> =
         vec![(opentrons_camera_source()?, Arc::new(opentrons))];
-    if let Some(index) = config.camera_index() {
-        let external = match external_capture {
-            Some(capture) => ExternalCamera::with_shared_capture(
-                index,
-                config.capture_timeout,
-                config.max_image_bytes(),
-                capture,
-            )?,
-            None => ExternalCamera::new(index, config.capture_timeout, config.max_image_bytes())?,
-        };
-        sources.push((
-            external_camera_source_named(&config.description, &config.external_name)?,
-            Arc::new(external),
-        ));
-    }
-    if config.camera_enabled() {
-        sources.push((
-            camera_source_named(&config.webcam_name)?,
-            Arc::new(CameraStill::new(config.max_image_bytes())?),
-        ));
+    if config.uses_resolved_native_sources() {
+        for descriptor in &config.native_video_sources {
+            sources.push((
+                configured_still_image_source(descriptor)?,
+                Arc::new(ConfiguredNativeStill::from_descriptor(
+                    descriptor,
+                    config.capture_timeout(),
+                    config.max_image_bytes(),
+                    external_capture.clone(),
+                )?),
+            ));
+        }
+    } else {
+        if let Some(index) = config.camera_index() {
+            let external = match external_capture {
+                Some(capture) => ExternalCamera::with_shared_capture(
+                    index,
+                    config.capture_timeout,
+                    config.max_image_bytes(),
+                    capture,
+                )?,
+                None => {
+                    ExternalCamera::new(index, config.capture_timeout, config.max_image_bytes())?
+                }
+            };
+            sources.push((
+                external_camera_source_named(&config.description, &config.external_name)?,
+                Arc::new(external),
+            ));
+        }
+        if config.camera_enabled() {
+            sources.push((
+                camera_source_named(&config.webcam_name)?,
+                Arc::new(CameraStill::new(config.max_image_bytes())?),
+            ));
+        }
     }
     if config.orbbec_enabled() {
         let (capture, timeout) = match orbbec_capture {
@@ -266,8 +317,6 @@ pub fn image_catalog(
 }
 
 /// Builds the serve catalog and opens history for every configured camera.
-///
-/// Restoring history does not open a camera.
 pub async fn open_image_catalog(
     opentrons_url: &str,
     config: &ImageServeConfig,
@@ -276,11 +325,17 @@ pub async fn open_image_catalog(
 ) -> Result<LiveImageCatalog, A2aLabError> {
     let catalog = image_catalog(opentrons_url, config, external_capture, orbbec_capture)?;
     let mut sources = vec![ImageSourceId::new(OPENTRONS_CAMERA_SOURCE_ID)?];
-    if config.camera_index().is_some() {
-        sources.push(ImageSourceId::new(EXTERNAL_CAMERA_SOURCE_ID)?);
-    }
-    if config.camera_enabled() {
-        sources.push(ImageSourceId::new(CAMERA_SOURCE_ID)?);
+    if config.uses_resolved_native_sources() {
+        for descriptor in &config.native_video_sources {
+            sources.push(ImageSourceId::new(&descriptor.id)?);
+        }
+    } else {
+        if config.camera_index().is_some() {
+            sources.push(ImageSourceId::new(EXTERNAL_CAMERA_SOURCE_ID)?);
+        }
+        if config.camera_enabled() {
+            sources.push(ImageSourceId::new(CAMERA_SOURCE_ID)?);
+        }
     }
     if config.orbbec_enabled() {
         sources.push(ImageSourceId::new(ORBBEC_CAMERA_SOURCE_ID)?);

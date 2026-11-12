@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "videos": {
+    "sources": [
+      {
+        "id": "mac-built-in",
+        "name": "Mac built-in",
+        "description": "Built-in FaceTime HD camera",
+        "format": "yuy2",
+        "width": 1280,
+        "height": 720,
+        "device_index": 0
+      }
+    ],
+    "fps": 5,
+    "live_retention": "5s",
+    "dvr": {
+      "retention": "3h",
+      "storage_path": "./video-dvr"
+    }
+  }
+}

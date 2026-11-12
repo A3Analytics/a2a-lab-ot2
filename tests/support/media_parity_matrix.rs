@@ -208,13 +208,15 @@ async fn wait_for_follow(provider: &impl VideoProvider, source: &str) {
     panic!("live follow never became available for {source}");
 }
 
-async fn open_lab(dvr_root: &Path, injections: LiveVideoInjections) -> Lab {
+async fn open_lab(dvr_root: &Path, mut injections: LiveVideoInjections) -> Lab {
     let _ = std::fs::remove_dir_all(dvr_root);
     let video_config =
         VideoServeConfig::with_disk(Some(4), None, 8, 5, 86_400, dvr_root.to_path_buf(), 1024)
             .unwrap()
             .with_camera_index(1);
-    let videos = open_video_catalog(&video_config, injections.external, injections.webcam)
+    let external = injections.jpeg_sources.remove(EXTERNAL_CAMERA_SOURCE_ID);
+    let webcam = injections.jpeg_sources.remove(CAMERA_SOURCE_ID);
+    let videos = open_video_catalog(&video_config, external, webcam)
         .await
         .unwrap()
         .expect("videos on");
@@ -535,17 +537,16 @@ pub async fn run() {
     let orb_live = jpeg(8, 6, 21);
     let lab = open_lab(
         &dvr,
-        LiveVideoInjections {
-            external: Some(Box::new(Remembering {
+        LiveVideoInjections::legacy_jpeg(
+            Some(Box::new(Remembering {
                 bytes: ext_live.clone(),
                 side: Side::External,
             })),
-            webcam: Some(Box::new(Remembering {
+            Some(Box::new(Remembering {
                 bytes: orb_live.clone(),
                 side: Side::Webcam,
             })),
-            ..Default::default()
-        },
+        ),
     )
     .await;
 
@@ -582,17 +583,16 @@ pub async fn run() {
     let dvr_adv = temp_dvr("advancing");
     let advancing = open_lab(
         &dvr_adv,
-        LiveVideoInjections {
-            external: Some(Box::new(Advancing {
+        LiveVideoInjections::legacy_jpeg(
+            Some(Box::new(Advancing {
                 step: AtomicUsize::new(0),
                 side: Side::External,
             })),
-            webcam: Some(Box::new(Advancing {
+            Some(Box::new(Advancing {
                 step: AtomicUsize::new(0),
                 side: Side::Webcam,
             })),
-            ..Default::default()
-        },
+        ),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -626,17 +626,16 @@ pub async fn run() {
     let dvr_live = temp_dvr("live-window");
     let live_lab = open_lab(
         &dvr_live,
-        LiveVideoInjections {
-            external: Some(Box::new(Remembering {
+        LiveVideoInjections::legacy_jpeg(
+            Some(Box::new(Remembering {
                 bytes: jpeg(2, 2, 30),
                 side: Side::External,
             })),
-            webcam: Some(Box::new(Remembering {
+            Some(Box::new(Remembering {
                 bytes: jpeg(2, 2, 31),
                 side: Side::Webcam,
             })),
-            ..Default::default()
-        },
+        ),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(5_500)).await;
@@ -653,17 +652,16 @@ pub async fn run() {
     {
         let first = open_lab(
             &dvr_restart,
-            LiveVideoInjections {
-                external: Some(Box::new(Remembering {
+            LiveVideoInjections::legacy_jpeg(
+                Some(Box::new(Remembering {
                     bytes: jpeg(3, 3, 40),
                     side: Side::External,
                 })),
-                webcam: Some(Box::new(Remembering {
+                Some(Box::new(Remembering {
                     bytes: jpeg(3, 3, 41),
                     side: Side::Webcam,
                 })),
-                ..Default::default()
-            },
+            ),
         )
         .await;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -671,17 +669,16 @@ pub async fn run() {
     }
     let second = open_lab(
         &dvr_restart,
-        LiveVideoInjections {
-            external: Some(Box::new(Remembering {
+        LiveVideoInjections::legacy_jpeg(
+            Some(Box::new(Remembering {
                 bytes: jpeg(3, 3, 42),
                 side: Side::External,
             })),
-            webcam: Some(Box::new(Remembering {
+            Some(Box::new(Remembering {
                 bytes: jpeg(3, 3, 43),
                 side: Side::Webcam,
             })),
-            ..Default::default()
-        },
+        ),
     )
     .await;
     compare_sources(
@@ -696,17 +693,16 @@ pub async fn run() {
     let dvr_gap = temp_dvr("gap");
     let gap_lab = open_lab(
         &dvr_gap,
-        LiveVideoInjections {
-            external: Some(Box::new(Remembering {
+        LiveVideoInjections::legacy_jpeg(
+            Some(Box::new(Remembering {
                 bytes: jpeg(2, 2, 50),
                 side: Side::External,
             })),
-            webcam: Some(Box::new(Remembering {
+            Some(Box::new(Remembering {
                 bytes: jpeg(2, 2, 51),
                 side: Side::Webcam,
             })),
-            ..Default::default()
-        },
+        ),
     )
     .await;
     let store = gap_lab.videos.dvr();
