@@ -86,9 +86,8 @@ Run these after enabling Orbbec on a host or in the agent image. Hardware-free s
 | **Restart recovery**                 | Indexes and chunks survive stop/start; partial writes are cleaned                                               | `tests/video_dvr.rs`, `tests/support/media_parity_matrix.rs` restart section; on device, restart `serve` or the agent container and confirm DVR timeline plus `sync-*` frame-set list entries still resolve |
 | **Synchronized eviction**            | Oldest minute disappears as a unit when quota or free-space reserve triggers                                    | `src/orbbec_sync/store_tests.rs` (`eviction_drops_all_channels_in_oldest_minute`); on device, lower quota only in a scratch environment                                                                     |
 | **External three-day cleanup**       | Only `external-camera` DVR rows older than retention expire                                                     | `tests/video_dvr.rs` retention and cleanup tests                                                                                                                                                            |
-| **Dual-source soak**                 | External and Orbbec sources together: still/live reuse, live gateway, restart evidence                          | `A2ALAB_MEDIA_SMOKE=1 mise run agent-media-smoke` (container) or `A2ALAB_MEDIA_SMOKE=1 A2ALAB_MEDIA_SMOKE_NATIVE=1 mise run agent-media-smoke-native` when USB passthrough is unavailable                   |
 
-Additional hardware-free wiring checks: `tests/orbbec_wiring.rs` (no duplicate Orbbec MJPEG under `video-dvr`), `tests/media_parity.rs` (five-second live window and restart timeline parity), `tests/agent_image.rs` (media-smoke helpers).
+Additional hardware-free wiring checks: `tests/orbbec_wiring.rs` (no duplicate Orbbec MJPEG under `video-dvr`), `tests/media_parity.rs` (five-second live window and restart timeline parity), `tests/agent_image.rs`.
 
 Opt-in live capture: `A2ALAB_ORBBEC_LIVE=1 mise run agent-orbbec-live` with `A2ALAB_ORBBEC_USB_DEVICES` set.
 

@@ -15,30 +15,26 @@ use a2a_lab_dev_kit::videos::{
 
 /// Indexed native camera opened through Nokhwa.
 pub struct NokhwaColorCamera {
+    index: u32,
     camera: Camera,
 }
 
 impl NokhwaColorCamera {
     /// Opens `index` for profile negotiation. The stream stays closed until [`ColorCamera::open`].
     ///
-    /// The configured mode is applied while the device is created. Changing it
-    /// later makes AVFoundation abort on some Mac cameras.
-    pub fn open_index(
-        index: u32,
-        format: FrameFormat,
-        width: u32,
-        height: u32,
-        fps: u32,
-    ) -> Result<Self, A2aLabError> {
+    /// Listing uses a probe handle. [`ColorCamera::open`] recreates the device
+    /// with `RequestedFormatType::Exact` because `AVFoundation` aborts when the
+    /// mode is changed after `Camera::new`.
+    pub fn open_index(index: u32, format: FrameFormat) -> Result<Self, A2aLabError> {
         Ok(Self {
-            camera: open_camera(index, format, width, height, fps)?,
+            index,
+            camera: probe_camera(index, format)?,
         })
     }
 }
 
 impl ColorCamera for NokhwaColorCamera {
     fn advertised(&mut self) -> Result<Vec<AdvertisedCaptureProfile>, A2aLabError> {
-        let active = self.camera.camera_format();
         let formats = self
             .camera
             .compatible_camera_formats()
@@ -68,10 +64,7 @@ impl ColorCamera for NokhwaColorCamera {
         } else {
             profiles_from_nokhwa(&formats)
         };
-        // AVFoundation's list includes range minimums that `set_all` rejects.
-        // Keep the rate the device is already running so a slower save rate
-        // does not reconfigure the sensor.
-        Ok(rates_for_open_mode(profiles, active))
+        Ok(profiles)
     }
 
     fn open(
@@ -79,19 +72,7 @@ impl ColorCamera for NokhwaColorCamera {
         profile: &SelectedCaptureProfile,
     ) -> Result<SelectedCaptureProfile, A2aLabError> {
         let format = camera_format(profile)?;
-        let active = self.camera.camera_format();
-        let already = active.format() == format.format()
-            && active.width() == format.width()
-            && active.height() == format.height()
-            && active.frame_rate() == format.frame_rate();
-        if !already {
-            let fourcc = [format.format()];
-            let requested =
-                RequestedFormat::with_formats(RequestedFormatType::Exact(format), &fourcc);
-            self.camera
-                .set_camera_requset(requested)
-                .map_err(camera_error)?;
-        }
+        self.camera = open_exact_camera(self.index, format)?;
         self.camera.open_stream().map_err(camera_error)?;
         let actual = self.camera.camera_format();
         negotiated_profile(profile, actual)
@@ -154,113 +135,23 @@ fn sample_from_nokhwa(
     ))
 }
 
-fn open_camera(
-    index: u32,
-    format: FrameFormat,
-    width: u32,
-    height: u32,
-    fps: u32,
-) -> Result<Camera, A2aLabError> {
+fn probe_camera(index: u32, format: FrameFormat) -> Result<Camera, A2aLabError> {
     nokhwa_initialize(|_granted| {});
-    // `fps` is the save rate. This camera's sensor only accepts a range
-    // maximum (30 for 1280x720), so a slower save rate retries that same
-    // size and format at the next settable rate.
     let mut last = None;
-    for rate in sensor_rate_attempts(fps) {
-        match open_exact(index, format, width, height, rate) {
+    for (width, height, fps) in [(1920, 1080, 30), (1280, 720, 30), (640, 480, 30)] {
+        match open_exact_camera(index, CameraFormat::new_from(width, height, format, fps)) {
             Ok(camera) => return Ok(camera),
             Err(error) => last = Some(error),
         }
     }
-    Err(last.unwrap_or_else(|| A2aLabError::invalid("camera", "no sensor rate opened")))
+    Err(last.unwrap_or_else(|| camera_error("probe could not open a 1080p-or-smaller mode")))
 }
 
-fn sensor_rate_attempts(save_fps: u32) -> Vec<u32> {
-    // Rates under 15 are range minimums on this camera: `set_all` rejects them.
-    // The catalog still saves at `save_fps`; the sensor stays on a settable maximum.
-    let mut rates = if save_fps >= 15 {
-        vec![save_fps, 30, 60, 24, 25, 20, 15]
-    } else {
-        vec![30, 60, 24, 25, 20, 15, 10]
-    };
-    let mut seen = Vec::new();
-    rates.retain(|rate| {
-        if seen.contains(rate) {
-            false
-        } else {
-            seen.push(*rate);
-            true
-        }
-    });
-    rates
-}
-
-fn open_exact(
-    index: u32,
-    format: FrameFormat,
-    width: u32,
-    height: u32,
-    fps: u32,
-) -> Result<Camera, A2aLabError> {
-    let configured = CameraFormat::new_from(width, height, format, fps);
-    let formats = [format];
-    let exact = RequestedFormat::with_formats(RequestedFormatType::Exact(configured), &formats);
-    Camera::new(CameraIndex::Index(index), exact).map_err(camera_error)
-}
-
-fn rates_for_open_mode(
-    profiles: Vec<AdvertisedCaptureProfile>,
-    active: CameraFormat,
-) -> Vec<AdvertisedCaptureProfile> {
-    let Some(capture) = capture_format(active.format()) else {
-        return profiles;
-    };
-    let matches = |profile: &AdvertisedCaptureProfile| {
-        profile.mode().format() == capture
-            && profile.mode().width() == active.width()
-            && profile.mode().height() == active.height()
-    };
-    let active_listed = profiles.iter().any(|profile| {
-        matches(profile) && whole_fps(profile.sensor_rate()) == Some(active.frame_rate())
-    });
-    if active_listed {
-        return profiles
-            .into_iter()
-            .filter(|profile| {
-                !matches(profile) || whole_fps(profile.sensor_rate()) == Some(active.frame_rate())
-            })
-            .collect();
-    }
-    let Some(fastest) = profiles
-        .iter()
-        .filter(|profile| matches(profile))
-        .max_by(|left, right| rate_ord(left.sensor_rate(), right.sensor_rate()))
-        .map(|profile| profile.sensor_rate())
-    else {
-        return profiles;
-    };
-    profiles
-        .into_iter()
-        .filter(|profile| !matches(profile) || profile.sensor_rate() == fastest)
-        .collect()
-}
-
-fn capture_format(format: FrameFormat) -> Option<CaptureFormat> {
-    match format {
-        FrameFormat::MJPEG => Some(CaptureFormat::Mjpeg),
-        FrameFormat::YUYV => Some(CaptureFormat::Yuy2),
-        _ => None,
-    }
-}
-
-fn whole_fps(rate: CaptureRate) -> Option<u32> {
-    (rate.denominator() == 1).then_some(rate.numerator())
-}
-
-fn rate_ord(left: CaptureRate, right: CaptureRate) -> std::cmp::Ordering {
-    let left_value = u64::from(left.numerator()) * u64::from(right.denominator());
-    let right_value = u64::from(right.numerator()) * u64::from(left.denominator());
-    left_value.cmp(&right_value)
+fn open_exact_camera(index: u32, format: CameraFormat) -> Result<Camera, A2aLabError> {
+    nokhwa_initialize(|_granted| {});
+    let formats = [format.format()];
+    let requested = RequestedFormat::with_formats(RequestedFormatType::Exact(format), &formats);
+    Camera::new(CameraIndex::Index(index), requested).map_err(camera_error)
 }
 
 fn profiles_for_fourcc(
@@ -315,7 +206,7 @@ fn camera_format(profile: &SelectedCaptureProfile) -> Result<CameraFormat, A2aLa
         CaptureFormat::Mjpeg => FrameFormat::MJPEG,
         CaptureFormat::Yuy2 => FrameFormat::YUYV,
     };
-    if profile.sensor_rate().denominator() != 1 {
+    if profile.capture_rate().denominator() != 1 {
         return Err(A2aLabError::invalid(
             "rate",
             "Nokhwa advertises whole-number frame rates",
@@ -325,7 +216,7 @@ fn camera_format(profile: &SelectedCaptureProfile) -> Result<CameraFormat, A2aLa
         profile.mode().width(),
         profile.mode().height(),
         format,
-        profile.sensor_rate().numerator(),
+        profile.capture_rate().numerator(),
     ))
 }
 
@@ -341,9 +232,19 @@ fn negotiated_profile(
     };
     Ok(SelectedCaptureProfile::negotiated(
         profile.mode(),
-        profile.sensor_rate(),
+        profile.capture_rate(),
         requested.output_rate(),
     ))
+}
+
+#[cfg(test)]
+fn configured_camera_format(
+    format: FrameFormat,
+    width: u32,
+    height: u32,
+    capture_rate: u32,
+) -> CameraFormat {
+    CameraFormat::new_from(width, height, format, capture_rate)
 }
 
 fn camera_error(error: impl std::fmt::Display) -> A2aLabError {
@@ -352,9 +253,9 @@ fn camera_error(error: impl std::fmt::Display) -> A2aLabError {
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_yuy2, profiles_for_fourcc, rates_for_open_mode, sensor_rate_attempts};
+    use super::{bounded_yuy2, configured_camera_format, profiles_for_fourcc};
     use a2a_lab_dev_kit::videos::{CaptureFormat, CaptureRate};
-    use nokhwa::utils::{CameraFormat, FrameFormat, Resolution};
+    use nokhwa::utils::{FrameFormat, Resolution};
     use std::collections::HashMap;
 
     #[test]
@@ -371,29 +272,22 @@ mod tests {
         assert!(
             profiles
                 .iter()
-                .any(|profile| profile.sensor_rate() == CaptureRate::fps(30).unwrap())
+                .any(|profile| profile.capture_rate() == CaptureRate::fps(30).unwrap())
         );
         assert!(
             profiles
                 .iter()
-                .any(|profile| profile.sensor_rate() == CaptureRate::fps(15).unwrap())
+                .any(|profile| profile.capture_rate() == CaptureRate::fps(15).unwrap())
         );
     }
 
     #[test]
-    fn save_rate_below_fifteen_still_opens_the_thirty_fps_sensor() {
-        assert_eq!(sensor_rate_attempts(5), vec![30, 60, 24, 25, 20, 15, 10]);
-    }
-
-    #[test]
-    fn open_mode_keeps_the_active_sensor_rate() {
-        let mut listed = HashMap::new();
-        listed.insert(Resolution::new(1280, 720), vec![15, 30]);
-        let profiles = profiles_for_fourcc(FrameFormat::YUYV, &listed);
-        let active = CameraFormat::new_from(1280, 720, FrameFormat::YUYV, 30);
-        let kept = rates_for_open_mode(profiles, active);
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].sensor_rate(), CaptureRate::fps(30).unwrap());
+    fn exact_open_request_keeps_configured_mode() {
+        let format = configured_camera_format(FrameFormat::YUYV, 640, 480, 15);
+        assert_eq!(format.width(), 640);
+        assert_eq!(format.height(), 480);
+        assert_eq!(format.format(), FrameFormat::YUYV);
+        assert_eq!(format.frame_rate(), 15);
     }
 
     #[test]

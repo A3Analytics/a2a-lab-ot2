@@ -22,6 +22,7 @@ use super::chunk::{
 };
 use super::coverage::IntervalFold;
 use super::frame_manifest::DEFAULT_SEMANTIC_STORE_NAMESPACE;
+use super::h264_epoch;
 use super::indexing_registration::{INDEXING_PRIORITY_LIVE, SaveFaults, commit_indexing_job_tx};
 use super::indexing_scope::IndexedSourceFilter;
 
@@ -345,14 +346,20 @@ impl IndexedVideoDvr {
             save_faults: Arc::new(SaveFaults::default()),
             indexing_sources: Arc::new(RwLock::new(IndexedSourceFilter::all_sources())),
         };
-        store.migrate_semantic_embedding_vectors().await?;
-        store.migrate_indexing_job_priority().await?;
-        store.migrate_embedding_config_generation().await?;
-        store.backfill_indexing_job_runtime().await?;
-        store.recover_partials().await?;
-        store.cleanup_at(crate::time::now()?).await?;
-        store.reconcile_frame_decision_tombstones().await?;
+        store.finish_opening().await?;
         Ok(store)
+    }
+
+    async fn finish_opening(&self) -> Result<(), A2aLabError> {
+        self.migrate_semantic_embedding_vectors().await?;
+        self.migrate_indexing_job_priority().await?;
+        self.migrate_embedding_config_generation().await?;
+        self.backfill_indexing_job_runtime().await?;
+        h264_epoch::migrate_h264_epochs(self).await?;
+        self.recover_partials().await?;
+        self.cleanup_at(crate::time::now()?).await?;
+        let _ = self.reconcile_frame_decision_tombstones().await?;
+        Ok(())
     }
 
     async fn migrate_semantic_embedding_vectors(&self) -> Result<(), A2aLabError> {
@@ -461,6 +468,7 @@ impl IndexedVideoDvr {
             frame_period_us,
             true,
             jpeg,
+            None,
         )
         .await
     }
@@ -476,24 +484,10 @@ impl IndexedVideoDvr {
         sample: &[u8],
     ) -> Result<(), A2aLabError> {
         let track_id = DvrTrackId::new("h264")?;
-        self.ensure_track(
-            source_id,
-            &track_id,
-            VideoCodec::H264,
-            codec_init,
-            frame_period_us,
-        )
-        .await?;
-        sqlx::query(
-            "UPDATE dvr_tracks SET codec_init = ?3
-             WHERE source_id = ?1 AND track_id = ?2 AND codec_init != ?3",
-        )
-        .bind(source_id.as_str())
-        .bind(track_id.as_str())
-        .bind(codec_init)
-        .execute(&self.pool)
-        .await
-        .map_err(db_error)?;
+        self.ensure_track(source_id, &track_id, VideoCodec::H264, &[], frame_period_us)
+            .await?;
+        let epoch_id =
+            h264_epoch::resolve_epoch_id(&self.pool, source_id, codec_init, captured_at).await?;
         self.write_chunk_frame(
             source_id,
             &track_id,
@@ -501,6 +495,7 @@ impl IndexedVideoDvr {
             frame_period_us,
             keyframe,
             sample,
+            Some(epoch_id),
         )
         .await
     }
@@ -564,6 +559,7 @@ impl IndexedVideoDvr {
         frame_period_us: u64,
         keyframe: bool,
         payload: &[u8],
+        h264_epoch_id: Option<i64>,
     ) -> Result<(), A2aLabError> {
         if self.save_faults.fail_payload_append() {
             return Err(A2aLabError::unavailable(
@@ -605,8 +601,8 @@ impl IndexedVideoDvr {
         sqlx::query(
             "INSERT INTO dvr_frames
                 (source_id, track_id, start_us, end_us, keyframe, minute_start_us, chunk_relpath,
-                 payload_offset, payload_length, payload_crc32, payload_ready)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
+                 payload_offset, payload_length, payload_crc32, payload_ready, h264_epoch_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11)
              ON CONFLICT(source_id, track_id, start_us) DO UPDATE SET
                 end_us = excluded.end_us,
                 keyframe = excluded.keyframe,
@@ -615,7 +611,8 @@ impl IndexedVideoDvr {
                 payload_offset = excluded.payload_offset,
                 payload_length = excluded.payload_length,
                 payload_crc32 = excluded.payload_crc32,
-                payload_ready = 1",
+                payload_ready = 1,
+                h264_epoch_id = excluded.h264_epoch_id",
         )
         .bind(source_id.as_str())
         .bind(track_id.as_str())
@@ -627,6 +624,7 @@ impl IndexedVideoDvr {
         .bind(i64::try_from(offset).unwrap_or(i64::MAX))
         .bind(i64::try_from(payload.len()).unwrap_or(i64::MAX))
         .bind(i64::from(checksum))
+        .bind(h264_epoch_id)
         .execute(&mut *tx)
         .await
         .map_err(db_error)?;
@@ -898,6 +896,7 @@ impl IndexedVideoDvr {
             let relpath: String = row.try_get("chunk_relpath").map_err(db_error)?;
             self.remove_chunk_if_empty(relpath).await?;
         }
+        h264_epoch::prune_empty_epochs(&self.pool, source_id).await?;
         Ok(())
     }
 
@@ -1192,12 +1191,12 @@ impl DvrMediaStore for IndexedVideoDvr {
                 SELECT source_id, track_id, start_us, end_us, codec, codec_init
                 FROM dvr_segments
                 JOIN dvr_tracks USING (source_id, track_id)
-                WHERE source_id = ?1 AND payload_ready = 1
+                WHERE source_id = ?1 AND payload_ready = 1 AND track_id != 'h264'
                 UNION ALL
                 SELECT source_id, track_id, start_us, end_us, codec, codec_init
                 FROM dvr_frames
                 JOIN dvr_tracks USING (source_id, track_id)
-                WHERE source_id = ?1 AND payload_ready = 1
+                WHERE source_id = ?1 AND payload_ready = 1 AND track_id != 'h264'
              )
              GROUP BY track_id, codec, codec_init",
         )
@@ -1205,9 +1204,13 @@ impl DvrMediaStore for IndexedVideoDvr {
         .fetch_all(&self.pool)
         .await
         .map_err(db_error)?;
-        rows.into_iter()
+        let mut tracks: Vec<DvrMediaTrack> = rows
+            .into_iter()
             .map(|row| track_from_row(&row, source_id))
-            .collect()
+            .collect::<Result<_, _>>()?;
+        tracks.extend(h264_epoch::list_h264_epoch_tracks(&self.pool, source_id).await?);
+        tracks.sort_by_key(|track| track.bounds().start());
+        Ok(tracks)
     }
 
     async fn read_media_window(
@@ -1215,6 +1218,9 @@ impl DvrMediaStore for IndexedVideoDvr {
         request: ReadDvrMediaWindowRequest,
     ) -> Result<Page<DvrMediaSegment>, A2aLabError> {
         self.require_source(request.source_id()).await?;
+        if let Some(epoch_id) = h264_epoch::epoch_id_from_track(request.track_id()) {
+            return self.read_h264_epoch_window(request, epoch_id, false).await;
+        }
         let window = request.window();
         let page = request.page();
         page.check()?;
@@ -1275,6 +1281,9 @@ impl DvrMediaStore for IndexedVideoDvr {
         request: ReadDvrMediaWindowRequest,
     ) -> Result<Page<DvrMediaSegment>, A2aLabError> {
         self.require_source(request.source_id()).await?;
+        if let Some(epoch_id) = h264_epoch::epoch_id_from_track(request.track_id()) {
+            return self.read_h264_epoch_window(request, epoch_id, true).await;
+        }
         let window = request.window();
         let page = request.page();
         page.check()?;
@@ -1348,6 +1357,64 @@ impl DvrMediaStore for IndexedVideoDvr {
 }
 
 impl IndexedVideoDvr {
+    async fn read_h264_epoch_window(
+        &self,
+        request: ReadDvrMediaWindowRequest,
+        epoch_id: i64,
+        spans_only: bool,
+    ) -> Result<Page<DvrMediaSegment>, A2aLabError> {
+        let window = request.window();
+        let page = request.page();
+        page.check()?;
+        let offset = match page.cursor() {
+            None => 0_i64,
+            Some(cursor) => cursor
+                .parse::<i64>()
+                .map_err(|_| A2aLabError::invalid("cursor", "is not a valid page cursor"))?,
+        };
+        let limit = i64::from(page.limit());
+        let select = if spans_only {
+            "SELECT ?7 AS track_id, start_us, end_us, keyframe, codec"
+        } else {
+            "SELECT ?7 AS track_id, start_us, end_us, keyframe, '' AS payload_relpath, chunk_relpath,
+                    payload_offset, payload_length, payload_crc32, codec"
+        };
+        let rows = sqlx::query(&format!(
+            "{select}
+             FROM dvr_frames
+             JOIN dvr_tracks USING (source_id, track_id)
+             WHERE source_id = ?1 AND track_id = 'h264' AND h264_epoch_id = ?2
+               AND start_us < ?4 AND end_us > ?3
+               AND payload_ready = 1
+             ORDER BY start_us
+             LIMIT ?5 OFFSET ?6"
+        ))
+        .bind(request.source_id().as_str())
+        .bind(epoch_id)
+        .bind(window.start().as_micros())
+        .bind(window.end().as_micros())
+        .bind(limit + 1)
+        .bind(offset)
+        .bind(request.track_id().as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_error)?;
+        let mut items = Vec::new();
+        for row in rows
+            .iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+        {
+            items.push(if spans_only {
+                span_from_row(row)?
+            } else {
+                segment_from_row(self, row).await?
+            });
+        }
+        let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
+        let next_cursor = (rows.len() > limit_usize).then(|| (offset + limit).to_string());
+        Ok(Page::new(items, next_cursor))
+    }
+
     async fn containing_frame(
         &self,
         source_id: &VideoSourceId,
@@ -1590,7 +1657,7 @@ pub(crate) fn db_error(error: impl std::fmt::Display) -> A2aLabError {
     A2aLabError::unavailable(format!("video DVR database: {error}"))
 }
 
-fn join_error(error: impl std::fmt::Display) -> A2aLabError {
+pub(crate) fn join_error(error: impl std::fmt::Display) -> A2aLabError {
     A2aLabError::unavailable(format!("video DVR task: {error}"))
 }
 

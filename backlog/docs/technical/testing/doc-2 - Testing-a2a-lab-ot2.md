@@ -110,22 +110,22 @@ This section records how the main application checkout was merged with the
 frame-set reference worktree before TASK-42 source edits landed. The current
 tree uses generic V4L source `camera` and does not load a vendor camera SDK.
 
-| Path | Role |
-| ---- | ---- |
-| `/Users/dylangustaveson/code/a2a-lab-ot2` | Main checkout on `main` at `98c0cc7` before TASK-42; carries external live video, `src/opentrons/stream.rs`, and robot-server stream regression tests. |
-| `/Users/dylangustaveson/code/a2a-lab-ot2-deploy` | Linked worktree at `a0f032a` plus local edits; carried portable synchronized frame sets, agent-image scripts, and frame-set service wiring. |
+| Path                                             | Role                                                                                                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/Users/dylangustaveson/code/a2a-lab-ot2`        | Main checkout on `main` at `98c0cc7` before TASK-42; carries external live video, `src/opentrons/stream.rs`, and robot-server stream regression tests. |
+| `/Users/dylangustaveson/code/a2a-lab-ot2-deploy` | Linked worktree at `a0f032a` plus local edits; carried portable synchronized frame sets, agent-image scripts, and frame-set service wiring.            |
 
 ### Overlapping areas
 
-| Area | Main (`98c0cc7`) | Deploy (`a0f032a` + local) | Retained behavior |
-| ---- | ---------------- | -------------------------- | ----------------- |
-| Live video (`src/videos/`, CLI `--video-*`) | External Nokhwa MJPEG catalog, dev-kit `MemoryVideos` wiring, `tests/external_video.rs` | Older or absent in branch tip; local tree reintroduces video flags without stream tests | **Main:** external live video path, 5 s live memory and 3-day disk retention defaults, no `POST /camera/picture` polling for video |
-| OT-2 stream contract (`src/opentrons/stream.rs`, `tests/opentrons_camera_stream.rs`) | Documents and tests pinned v10.0.0 `GET /camera/stream` as non-ingestible metadata | Branch removes stream module and stream tests | **Main:** stream fixtures, rejection helper, and hardware-free stream tests |
-| Still images (`src/images/`, `src/camera.rs`) | Opentrons + external V4L2 sources, 30-day still retention | Adds optional source `camera` and frame-set history | **Both:** main image catalog **plus** source `camera` (`--camera-index`) and frame-set SQLite (`migrations/003_frame_sets.sql`) |
-| Serve binary (`src/bin/a2a-lab-ot2.rs`, `src/fixture.rs`, `src/lib.rs`) | Video serve hooks | Frame-set service and `--camera-index` | **Both:** video catalog from main, frame-set service stays available, listener stays off without a capture backend |
-| Docs (`doc-2`, `doc-3`, `doc-1`, `README`) | Video and stream notes | Frame-set and agent-image test rows | **Both:** combined tables and boundaries without dropping stream or external-video statements |
-| Dependencies (`Cargo.toml`) | Unchanged dev-kit pin | Adds `image` and `futures-util` for frame sets | **Those additions** on top of the main pin; no dev-kit repository edits |
-| Agent packaging (`.mise/scripts/agent-*`, `agent/`) | Absent | Deploy-only operator scripts and Dockerfile | **Deploy:** copied scripts and agent image definitions for hardware-free `agent-image-verify` tests |
+| Area                                                                                 | Main (`98c0cc7`)                                                                        | Deploy (`a0f032a` + local)                                                              | Retained behavior                                                                                                                  |
+| ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Live video (`src/videos/`, CLI `--video-*`)                                          | External Nokhwa MJPEG catalog, dev-kit `MemoryVideos` wiring, `tests/external_video.rs` | Older or absent in branch tip; local tree reintroduces video flags without stream tests | **Main:** external live video path, 5 s live memory and 3-day disk retention defaults, no `POST /camera/picture` polling for video |
+| OT-2 stream contract (`src/opentrons/stream.rs`, `tests/opentrons_camera_stream.rs`) | Documents and tests pinned v10.0.0 `GET /camera/stream` as non-ingestible metadata      | Branch removes stream module and stream tests                                           | **Main:** stream fixtures, rejection helper, and hardware-free stream tests                                                        |
+| Still images (`src/images/`, `src/camera.rs`)                                        | Opentrons + external V4L2 sources, 30-day still retention                               | Adds optional source `camera` and frame-set history                                     | **Both:** main image catalog **plus** source `camera` (`--camera-index`) and frame-set SQLite (`migrations/003_frame_sets.sql`)    |
+| Serve binary (`src/bin/a2a-lab-ot2.rs`, `src/fixture.rs`, `src/lib.rs`)              | Video serve hooks                                                                       | Frame-set service and `--camera-index`                                                  | **Both:** video catalog from main, frame-set service stays available, listener stays off without a capture backend                 |
+| Docs (`doc-2`, `doc-3`, `doc-1`, `README`)                                           | Video and stream notes                                                                  | Frame-set and agent-image test rows                                                     | **Both:** combined tables and boundaries without dropping stream or external-video statements                                      |
+| Dependencies (`Cargo.toml`)                                                          | Unchanged dev-kit pin                                                                   | Adds `image` and `futures-util` for frame sets                                          | **Those additions** on top of the main pin; no dev-kit repository edits                                                            |
+| Agent packaging (`.mise/scripts/agent-*`, `agent/`)                                  | Absent                                                                                  | Deploy-only operator scripts and Dockerfile                                             | **Deploy:** copied scripts and agent image definitions for hardware-free `agent-image-verify` tests                                |
 
 Non-overlapping deploy-only modules merged file-by-file (not directory replace):
 `src/cameras/`, `src/frame_sets/`, `src/frame_set_service.rs`, and frame-set regression tests.
@@ -196,33 +196,33 @@ routes, and independent pump failure).
 
 Tests bind local listeners and a mock robot-server. They do not start the Docker simulator and they do not call Bedrock, OpenAI, or Anthropic.
 
-| File                          | Behavior under test                                                                                                                                                                                             |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/inventory.rs`          | Every pinned OpenAPI operation is classified, inventory ids are unique, and read tasks are GET-backed.                                                                                                          |
-| `tests/provider.rs`           | Task, log, and metric catalogs; schemas; pause, resume, stop, and delete; recovery and stateless commands; rejected input; logs and gauges; pagination; primitive HTTP tasks; readonly advertisement and start. |
-| `tests/a2a.rs`                | A2A run control, readonly over A2A, `agent-message` context, MCP tool listing, OpenID Connect acceptance and rejection, packaged `/ui/` routes and assets, public shell under OIDC, and a headless fixture.     |
-| `tests/agent.rs`              | Model selection, conversation history, tool calls, and one-context turn ordering.                                                                                                                               |
-| `tests/sila.rs`               | Default SiLA identity, operator PEM replacement, rejection of a partial PEM set, and a TLS bind.                                                                                                                |
-| `tests/image_catalog.rs`      | Two injectable cameras, pagination, search bounds, retention, and an isolated capture failure.                                                                                                                  |
-| `tests/opentrons_camera.rs`   | Mock `POST /camera/picture`, JPEG bytes and dimensions, and disabled, malformed, timeout, and unreachable failures.                                                                                             |
-| `tests/opentrons_camera_stream.rs` | Pinned v10.0.0 `GET /camera/stream` metadata, settings rejection, and proof that OT-2 has no ingestible native stream.                                                                                     |
-| `tests/external_camera.rs`    | Injected V4L2 grabs, `/dev/video4` as the default, and no video device opened by the suite.                                                                                                                     |
-| `tests/external_video.rs`     | External live video catalog defaults, invalid CLI limits, injected MJPEG follow, and shared A2A/MCP video skills.                                                                                               |
-| `tests/camera_warm_sessions.rs` | Warm external and `camera` MJPEG sessions, still/live JPEG reuse, reconnect, shutdown, and independent source failure through injected producers.                                                                                             |
-| `tests/video_dvr.rs`          | Indexed disk DVR restart, source-isolated cleanup, gap vs outside-retention frame-at, paginated window reads, clip expiry, partial tmp recovery, and async read responsiveness.                               |
-| `tests/video_serve.rs`        | Serve video CLI and env defaults, startup summaries and DVR path, disabled video, dual-source A2A/MCP listing, in-process live gateway routes, and independent live pump failure (hardware-free).                 |
-| `tests/image_serve.rs`        | Serve limits, both source ids, readonly image reads, exact A2A skills, exact MCP tools, and restored camera history across A2A and MCP.                                                                         |
-| `tests/image_history.rs`      | Restart restoration for both cameras, per-source retention, seven-day expiry, corrupt and oversized history, failed capture, and no database creation when only sources are listed.                             |
-| `tests/image_parity.rs`       | The same camera calls compared across A2A and MCP.                                                                                                                                                              |
-| `tests/media_parity.rs`       | Hardware-free external vs `camera` media contract matrix (`external_camera_media_parity_matrix`) across provider, A2A, MCP, and gateway paths with injected producers.                                                                         |
-| `tests/frame_set_contract.rs` | Portable frame-set validation, synchronization, and the import boundary of `src/frame_sets`.                                                                                                                    |
-| `tests/frame_set_history.rs`  | Restart, retention, search, and corrupt frame-set history.                                                                                                                                                      |
-| `tests/frame_set_service.rs`  | A2A task results, media URLs, one-capture color reuse, and two fake backends. No RealSense SDK.                                                                                                                 |
-| `tests/camera_backend.rs`     | Camera selection without a vendor adapter.                                                                                                                                                                                                      |
-| `tests/image_contract.rs`     | Shared image-source contract for `opentrons-camera`, `external-camera`, and `camera`, including A2A and MCP parity.                                                                                             |
-| `tests/agent_image.rs`        | Agent image script checks for architecture, checksum, USB arguments, writable state, and media-smoke skip/rollback helpers. No Docker and no camera.                                                                                               |
-| `tests/image_demo.rs`         | `list-image-sources` and a saved current JPEG without a camera or the simulator.                                                                                                                                |
-| `tests/support/mod.rs`        | The mock robot-server used by the suite.                                                                                                                                                                        |
+| File                               | Behavior under test                                                                                                                                                                                             |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/inventory.rs`               | Every pinned OpenAPI operation is classified, inventory ids are unique, and read tasks are GET-backed.                                                                                                          |
+| `tests/provider.rs`                | Task, log, and metric catalogs; schemas; pause, resume, stop, and delete; recovery and stateless commands; rejected input; logs and gauges; pagination; primitive HTTP tasks; readonly advertisement and start. |
+| `tests/a2a.rs`                     | A2A run control, readonly over A2A, `agent-message` context, MCP tool listing, OpenID Connect acceptance and rejection, packaged `/ui/` routes and assets, public shell under OIDC, and a headless fixture.     |
+| `tests/agent.rs`                   | Model selection, conversation history, tool calls, and one-context turn ordering.                                                                                                                               |
+| `tests/sila.rs`                    | Default SiLA identity, operator PEM replacement, rejection of a partial PEM set, and a TLS bind.                                                                                                                |
+| `tests/image_catalog.rs`           | Two injectable cameras, pagination, search bounds, retention, and an isolated capture failure.                                                                                                                  |
+| `tests/opentrons_camera.rs`        | Mock `POST /camera/picture`, JPEG bytes and dimensions, and disabled, malformed, timeout, and unreachable failures.                                                                                             |
+| `tests/opentrons_camera_stream.rs` | Pinned v10.0.0 `GET /camera/stream` metadata, settings rejection, and proof that OT-2 has no ingestible native stream.                                                                                          |
+| `tests/external_camera.rs`         | Injected V4L2 grabs, `/dev/video4` as the default, and no video device opened by the suite.                                                                                                                     |
+| `tests/external_video.rs`          | External live video catalog defaults, invalid CLI limits, injected MJPEG follow, and shared A2A/MCP video skills.                                                                                               |
+| `tests/camera_warm_sessions.rs`    | Warm external and `camera` MJPEG sessions, still/live JPEG reuse, reconnect, shutdown, and independent source failure through injected producers.                                                               |
+| `tests/video_dvr.rs`               | Indexed disk DVR restart, source-isolated cleanup, gap vs outside-retention frame-at, paginated window reads, clip expiry, partial tmp recovery, and async read responsiveness.                                 |
+| `tests/video_serve.rs`             | Serve video CLI and env defaults, startup summaries and DVR path, disabled video, dual-source A2A/MCP listing, in-process live gateway routes, and independent live pump failure (hardware-free).               |
+| `tests/image_serve.rs`             | Serve limits, both source ids, readonly image reads, exact A2A skills, exact MCP tools, and restored camera history across A2A and MCP.                                                                         |
+| `tests/image_history.rs`           | Restart restoration for both cameras, per-source retention, seven-day expiry, corrupt and oversized history, failed capture, and no database creation when only sources are listed.                             |
+| `tests/image_parity.rs`            | The same camera calls compared across A2A and MCP.                                                                                                                                                              |
+| `tests/media_parity.rs`            | Hardware-free external vs `camera` media contract matrix (`external_camera_media_parity_matrix`) across provider, A2A, MCP, and gateway paths with injected producers.                                          |
+| `tests/frame_set_contract.rs`      | Portable frame-set validation, synchronization, and the import boundary of `src/frame_sets`.                                                                                                                    |
+| `tests/frame_set_history.rs`       | Restart, retention, search, and corrupt frame-set history.                                                                                                                                                      |
+| `tests/frame_set_service.rs`       | A2A task results, media URLs, one-capture color reuse, and two fake backends. No RealSense SDK.                                                                                                                 |
+| `tests/camera_backend.rs`          | Camera selection without a vendor adapter.                                                                                                                                                                      |
+| `tests/image_contract.rs`          | Shared image-source contract for `opentrons-camera`, `external-camera`, and `camera`, including A2A and MCP parity.                                                                                             |
+| `tests/agent_image.rs`             | Agent image script checks for architecture, checksum, USB arguments, writable state, and rollback helpers. No Docker and no camera.                                                                             |
+| `tests/image_demo.rs`              | `list-image-sources` and a saved current JPEG without a camera or the simulator.                                                                                                                                |
+| `tests/support/mod.rs`             | The mock robot-server used by the suite.                                                                                                                                                                        |
 
 Provider tests require every non-skip inventory id to appear in `list_tasks`, `list_log_sources`, or `list_metrics`. That is the catalog contract. [doc-1](<../ot2-http/doc-1 - OT-2-robot-server-HTTP-mapping.md>) defines how each route is classified.
 
@@ -239,7 +239,7 @@ Expected outcomes differ by environment:
 
 ## Packaged web interface
 
-Normal `serve` enables the dev-kit browser on the A2A listener. `GET /ui`, `GET /ui/`, and `GET /ui/index.html` return the shell, and referenced files load from `/ui/assets/`. An unknown asset returns 404. The page is a same-origin client of that listener.
+Normal `serve` enables the dev-kit browser on the A2A listener. `GET /` redirects to `/ui/`. `GET /ui`, `GET /ui/`, and `GET /ui/index.html` return the shell, and referenced files load from `/ui/assets/`. An unknown asset returns 404. The page is a same-origin client of that listener.
 
 The shell and packaged assets stay public when OpenID Connect is configured. Protected A2A protocol routes still reject a missing token and a token without the required scope. A valid access token is accepted through the HTTP bearer alternative on the agent card. The browser does not run an OpenID Connect login flow. An operator pastes the access token into the bearer field, and the page keeps it only in page memory.
 
@@ -268,19 +268,16 @@ A successful run prints:
 smoke ok
 ```
 
-## Agent deployment and dual-source media smoke
+## Agent deployment
 
-`mise run quality` does not build the agent image, start the agent container, or open cameras. Hardware-free script checks live in `tests/agent_image.rs` (`agent-image-self-test.sh` and `agent-media-smoke-self-test.sh`).
+`mise run quality` does not build the agent image, start the agent container, or open cameras. Hardware-free script checks live in `tests/agent_image.rs` (`agent-image-self-test.sh`).
 
-| Task | Effect |
-| ---- | ------ |
-| `mise run agent-image` / `agent-image-all` | Build the agent images. |
-| `mise run agent-image-verify-all` | Verify image contents without a camera. |
-| `mise run agent-run` | Start the agent container with explicit USB and optional external camera device passthrough, non-root user, and writable `A2ALAB_STATE_DIR`. |
-| `mise run agent-stop` | Graceful stop; rollback text preserves retained SQLite and DVR files on the mount. |
-| `mise run agent-media-smoke` | Skipped unless `A2ALAB_MEDIA_SMOKE=1`. Verifies both configured sources over A2A/MCP and `/media/video-live/`, still/live reuse, restart recovery, and prints retention policy evidence. |
-| `mise run agent-media-smoke-native` | Skipped unless `A2ALAB_MEDIA_SMOKE=1` and `A2ALAB_MEDIA_SMOKE_NATIVE=1`. Host-native `serve` check for `external-camera` when container devices are unavailable (for example macOS). |
-Expected smoke evidence (no device identifiers in git): JPEG byte counts and `image/jpeg` for each verified source, advancing live MJPEG reads, matching stored still bytes, non-empty DVR timelines after restart, and printed policy lines for 5 s live memory, 259200 s disk video, and 30 d still history.
+| Task                                       | Effect                                                                                                                                       |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mise run agent-image` / `agent-image-all` | Build the agent images.                                                                                                                      |
+| `mise run agent-image-verify-all`          | Verify image contents without a camera.                                                                                                      |
+| `mise run agent-run`                       | Start the agent container with explicit USB and optional external camera device passthrough, non-root user, and writable `A2ALAB_STATE_DIR`. |
+| `mise run agent-stop`                      | Graceful stop; rollback text preserves retained SQLite and DVR files on the mount.                                                           |
 
 ## Troubleshooting
 

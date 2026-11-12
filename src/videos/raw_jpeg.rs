@@ -7,6 +7,25 @@ use a2a_lab_dev_kit::videos::{
 
 use crate::camera::trim_mjpeg_buffer;
 
+/// Trims MJPEG padding so decode and encode see one bounded access unit.
+pub fn normalize_mjpeg_frame(
+    frame: CapturedColorFrame,
+    max_bytes: u64,
+) -> Result<CapturedColorFrame, A2aLabError> {
+    if frame.format() != CaptureFormat::Mjpeg {
+        return Ok(frame);
+    }
+    let jpeg = bounded_mjpeg(frame.bytes(), max_bytes)?;
+    CapturedColorFrame::mjpeg(
+        frame.identity().clone(),
+        frame.timing().clone(),
+        frame.width(),
+        frame.height(),
+        &jpeg,
+        frame.color(),
+    )
+}
+
 /// Returns the bounded MJPEG access unit, or encodes packed YUY2 through the dev-kit derivative API.
 pub fn captured_frame_jpeg(
     frame: &CapturedColorFrame,

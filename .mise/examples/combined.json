@@ -10,12 +10,18 @@
         "name": "Bench camera",
         "description": "Overview of the bench",
         "format": "mjpeg",
+        "width": 1280,
+        "height": 720,
+        "capture_rate": 30,
         "device_index": 4
       },
       {
         "id": "detail",
         "name": "Detail camera",
         "format": "yuyv",
+        "width": 1280,
+        "height": 720,
+        "capture_rate": 30,
         "device_index": 6
       }
     ],

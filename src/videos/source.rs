@@ -12,6 +12,8 @@ use crate::camera::{
 /// Raw camera input negotiated before delivery encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LiveCameraInputFormat {
+    /// Same-resolution MJPEG when advertised, otherwise same-resolution YUY2.
+    Auto,
     /// Encoded MJPEG access units from the device.
     Mjpeg,
     /// Packed YUY2/YUYV from the device.
@@ -23,6 +25,7 @@ impl LiveCameraInputFormat {
     #[must_use]
     pub const fn capture_preference(self) -> CaptureFormatPreference {
         match self {
+            Self::Auto => CaptureFormatPreference::Auto,
             Self::Mjpeg => CaptureFormatPreference::Mjpeg,
             Self::Yuy2 => CaptureFormatPreference::Yuy2,
         }
@@ -48,8 +51,10 @@ pub struct LiveVideoSourceDescriptor {
     /// Deployment-specific capture-library index.
     pub device_index: u32,
     pub input: LiveCameraInputFormat,
-    pub width: u32,
-    pub height: u32,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// Optional capture frame rate. Independent of live output `videos.fps`.
+    pub capture_rate: Option<u32>,
     pub delivery: LiveVideoDelivery,
 }
 
@@ -63,8 +68,9 @@ impl LiveVideoSourceDescriptor {
             description: description.into(),
             device_index: index,
             input: LiveCameraInputFormat::Mjpeg,
-            width: EXTERNAL_CAMERA_WIDTH,
-            height: EXTERNAL_CAMERA_HEIGHT,
+            width: Some(EXTERNAL_CAMERA_WIDTH),
+            height: Some(EXTERNAL_CAMERA_HEIGHT),
+            capture_rate: None,
             delivery: LiveVideoDelivery::H264,
         }
     }
@@ -78,19 +84,22 @@ impl LiveVideoSourceDescriptor {
             description: "Live MJPEG from the configured camera.".to_owned(),
             device_index: index,
             input: LiveCameraInputFormat::Mjpeg,
-            width: 1280,
-            height: 720,
+            width: Some(1280),
+            height: Some(720),
+            capture_rate: None,
             delivery: LiveVideoDelivery::H264,
         }
     }
 
     /// Profile request for opening this source. Input format is raw capture only.
     pub fn capture_request(&self, output_fps: u32) -> Result<CaptureProfileRequest, A2aLabError> {
+        let capture_rate = self.capture_rate.map(CaptureRate::fps).transpose()?;
         CaptureProfileRequest::new(
             self.input.capture_preference(),
             self.width,
             self.height,
             CaptureRate::fps(output_fps.max(1))?,
+            capture_rate,
         )
     }
 

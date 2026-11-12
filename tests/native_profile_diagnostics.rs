@@ -52,14 +52,15 @@ fn configured_source_yields_single_explicit_candidate() {
         description: "test".to_owned(),
         device_index: 1,
         input: LiveCameraInputFormat::Mjpeg,
-        width: 1920,
-        height: 1080,
+        width: Some(1920),
+        height: Some(1080),
+        capture_rate: Some(5),
         delivery: LiveVideoDelivery::H264,
     };
     let candidates = native_capture_profile_candidates(&descriptor, 5).unwrap();
     assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].width(), 1920);
-    assert_eq!(candidates[0].height(), 1080);
+    assert_eq!(candidates[0].width(), Some(1920));
+    assert_eq!(candidates[0].height(), Some(1080));
     assert_eq!(candidates[0].preference(), CaptureFormatPreference::Mjpeg);
 }
 
@@ -71,8 +72,9 @@ fn negotiation_failure_lists_configured_and_advertised_profiles() {
         description: "test".to_owned(),
         device_index: 0,
         input: LiveCameraInputFormat::Mjpeg,
-        width: 1280,
-        height: 720,
+        width: Some(1280),
+        height: Some(720),
+        capture_rate: Some(5),
         delivery: LiveVideoDelivery::H264,
     };
     let advertised = vec![
@@ -90,7 +92,7 @@ fn negotiation_failure_lists_configured_and_advertised_profiles() {
     .unwrap_err()
     .to_string();
     let listed = format_advertised_capture_profiles(&advertised);
-    assert!(error.contains("configured profile MJPEG 1280x720 output 5fps"));
+    assert!(error.contains("configured profile MJPEG 1280x720@5fps output 5fps"));
     assert!(error.contains("available:"));
     assert!(error.contains(&listed));
     assert!(error.contains("MJPEG 1920x1080@30fps"));
@@ -98,16 +100,17 @@ fn negotiation_failure_lists_configured_and_advertised_profiles() {
 
 #[test]
 fn profile_request_and_list_formatting_are_stable() {
-    let request = CaptureProfileRequest::new(
+    let request = CaptureProfileRequest::exact(
         CaptureFormatPreference::Mjpeg,
         1280,
         720,
+        CaptureRate::fps(5).unwrap(),
         CaptureRate::fps(5).unwrap(),
     )
     .unwrap();
     assert_eq!(
         format_capture_profile_request(&request),
-        "MJPEG 1280x720 output 5fps"
+        "MJPEG 1280x720@5fps output 5fps"
     );
     let advertised = [profile(CaptureFormat::Yuy2, 640, 480, 15)];
     assert_eq!(
@@ -134,8 +137,11 @@ fn profile_request_and_list_formatting_are_stable() {
 }
 
 #[test]
-fn custom_source_without_width_fails_resolve() {
-    let dir = std::env::temp_dir().join(format!("a2a-lab-ot2-missing-size-{}", std::process::id()));
+fn custom_source_without_size_or_capture_rate_resolves() {
+    let dir = std::env::temp_dir().join(format!(
+        "a2a-lab-ot2-optional-capture-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("a2a-lab.json");
     std::fs::write(
@@ -147,7 +153,9 @@ fn custom_source_without_width_fails_resolve() {
         config_path: ExplicitSetting::cli(Some(path)),
         ..LabConfigInputs::default()
     };
-    let error = resolve_lab_config(&inputs).unwrap_err().to_string();
-    assert!(error.contains("videos.sources.width"));
+    let resolved = resolve_lab_config(&inputs).unwrap();
+    assert_eq!(resolved.video.sources[0].width, None);
+    assert_eq!(resolved.video.sources[0].height, None);
+    assert_eq!(resolved.video.sources[0].capture_rate, None);
     let _ = std::fs::remove_dir_all(dir);
 }

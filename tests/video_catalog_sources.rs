@@ -43,8 +43,9 @@ fn descriptor(
         description: format!("Description {id}"),
         device_index,
         input,
-        width: 4,
-        height: 4,
+        width: Some(4),
+        height: Some(4),
+        capture_rate: Some(5),
         delivery: LiveVideoDelivery::Mjpeg,
     }
 }
@@ -135,6 +136,7 @@ async fn empty_catalog_lists_no_sources() {
         86_400,
         &temp_dvr("empty"),
         1024,
+        None,
         LiveVideoInjections::none(),
     )
     .await
@@ -173,6 +175,7 @@ async fn three_injected_sources_are_discoverable() {
         86_400,
         &temp_dvr("three"),
         64 * 1024,
+        None,
         LiveVideoInjections::none()
             .with_color_camera(
                 "alpha",
@@ -241,6 +244,7 @@ async fn rejects_duplicate_ids_and_device_indices() {
             86_400,
             &temp_dvr("dup-id"),
             1024,
+            None,
             LiveVideoInjections::none(),
         )
         .await
@@ -258,6 +262,7 @@ async fn rejects_duplicate_ids_and_device_indices() {
             86_400,
             &temp_dvr("dup-dev"),
             1024,
+            None,
             LiveVideoInjections::none(),
         )
         .await
@@ -284,6 +289,7 @@ async fn reordered_descriptors_keep_identity() {
             86_400,
             &temp_dvr("order"),
             1024,
+            None,
             LiveVideoInjections::legacy_jpeg(
                 Some(Box::new(RepeatJpeg(frame.clone()))),
                 Some(Box::new(RepeatJpeg(frame.clone()))),
@@ -320,6 +326,7 @@ async fn one_failing_source_does_not_remove_healthy_sources() {
         86_400,
         &temp_dvr("isolate"),
         1024,
+        None,
         LiveVideoInjections::legacy_jpeg(
             Some(Box::new(FailJpeg)),
             Some(Box::new(RepeatJpeg(jpeg(4, 4)))),
@@ -356,6 +363,7 @@ async fn color_camera_rejects_wrong_negotiated_format() {
         86_400,
         &temp_dvr("wrong-fmt"),
         1024,
+        None,
         LiveVideoInjections::none().with_color_camera("camera", Box::new(camera)),
     )
     .await
@@ -391,6 +399,7 @@ async fn malformed_packed_yuy2_fails_without_fallback() {
         86_400,
         &temp_dvr("bad-yuy2"),
         1024,
+        None,
         LiveVideoInjections::none().with_color_camera("yuy2", Box::new(camera)),
     )
     .await
@@ -426,6 +435,7 @@ async fn yuy2_injected_source_publishes_live_mjpeg() {
         86_400,
         &temp_dvr("yuy2-live"),
         64 * 1024,
+        None,
         LiveVideoInjections::none().with_color_camera("raw-yuy2", Box::new(camera)),
     )
     .await

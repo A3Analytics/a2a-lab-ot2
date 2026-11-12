@@ -706,6 +706,22 @@ fn http() -> reqwest::Client {
 }
 
 async fn assert_shell_routes(base: &str) -> String {
+    let home = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap()
+        .get(format!("{base}/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(home.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        home.headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok()),
+        Some("/ui/")
+    );
     let mut shell = String::new();
     for path in ["/ui", "/ui/", "/ui/index.html"] {
         let response = http().get(format!("{base}{path}")).send().await.unwrap();

@@ -357,9 +357,9 @@ impl ConfiguredNativeStill {
         Ok(Self {
             descriptor: descriptor.clone(),
             format: ExternalCameraFormat {
-                width: descriptor.width,
-                height: descriptor.height,
-                fps: EXTERNAL_CAMERA_FPS,
+                width: descriptor.width.unwrap_or(640),
+                height: descriptor.height.unwrap_or(480),
+                fps: descriptor.capture_rate.unwrap_or(EXTERNAL_CAMERA_FPS),
             },
             timeout,
             transport: ImageTransportConfig::new(max_image_bytes)?,

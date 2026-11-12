@@ -1,0 +1,3 @@
+# Local verification only; sibling capture APIs may lag the git pin.
+[patch."https://github.com/A3Analytics/a2a-lab-dev-kit-rs"]
+a2a-lab-dev-kit = { path = "../a2a-lab-dev-kit-rs" }

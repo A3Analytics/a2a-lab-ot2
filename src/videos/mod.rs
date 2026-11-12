@@ -3,13 +3,17 @@
 pub(crate) mod capture_open;
 mod catalog;
 pub mod dvr;
+mod dvr_cadence;
+mod dyn_camera;
 mod external;
-mod h264;
+mod live_encode;
+mod native_drain;
 mod nokhwa_camera;
 mod raw_jpeg;
 pub mod semantic_eval;
 pub mod semantic_indexing;
 mod serve;
+mod session_capture;
 mod source;
 
 pub use catalog::{
@@ -18,10 +22,11 @@ pub use catalog::{
 };
 pub use dvr::{
     ANNOTATION_RECONCILE_INTERVAL, DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_VIDEO_DVR_ROOT,
-    IndexedVideoDvr, VIDEO_DVR_CLEANUP_INTERVAL, VideoDvrAnnotationQueue, VideoDvrCatalog,
-    VideoDvrMaintenance,
+    IndexedSourceFilter, IndexedVideoDvr, VIDEO_DVR_CLEANUP_INTERVAL, VideoDvrAnnotationQueue,
+    VideoDvrCatalog, VideoDvrMaintenance,
 };
 pub use external::LiveJpegSource;
+pub use live_encode::LiveH264Catalog;
 pub use serve::{
     DEFAULT_LIVE_VIDEO_MEMORY_SECS, DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS,
     VideoServeConfig, open_resolved_video_catalog, open_resolved_video_catalog_with_semantic,

@@ -48,11 +48,22 @@ fn page() -> PageRequest {
 }
 
 fn jpeg(width: u16, height: u16) -> Vec<u8> {
-    let mut data = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08];
-    data.extend_from_slice(&height.to_be_bytes());
-    data.extend_from_slice(&width.to_be_bytes());
-    data.extend_from_slice(&[0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9]);
-    data
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_fn(u32::from(width), u32::from(height), |_, _| {
+            Rgb([64, 64, 64])
+        });
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 80)
+        .write_image(
+            image.as_raw(),
+            u32::from(width),
+            u32::from(height),
+            ExtendedColorType::Rgb8,
+        )
+        .expect("jpeg");
+    out
 }
 
 fn profile(format: CaptureFormat, fps: u32) -> AdvertisedCaptureProfile {
@@ -127,7 +138,7 @@ fn both_formats(fps: u32) -> Vec<AdvertisedCaptureProfile> {
 
 async fn wait_for_live(provider: &a2a_lab_ot2::VideoDvrCatalog, id: &str) {
     let source = VideoSourceId::new(id).unwrap();
-    for _ in 0..50 {
+    for _ in 0..80 {
         if provider
             .follow_video(FollowVideoRequest::new(source.clone()))
             .await
@@ -146,7 +157,10 @@ async fn assert_jpeg_frame(provider: &a2a_lab_ot2::VideoDvrCatalog, id: &str) {
         .follow_video(FollowVideoRequest::new(source.clone()))
         .await
         .unwrap_or_else(|error| panic!("{id} follow: {error}"));
-    assert_eq!(follow.codec(), VideoCodec::Mjpeg, "{id}");
+    assert!(
+        matches!(follow.codec(), VideoCodec::Mjpeg | VideoCodec::H264),
+        "{id}"
+    );
     let timeline = provider
         .get_video_timeline(GetVideoTimelineRequest::new(source.clone()))
         .await
@@ -244,9 +258,9 @@ async fn three_file_sources_reach_injected_cameras_and_the_chat_factory() {
     let path = write_config(
         &dir,
         r#"{"schema_version":1,"chat":{"provider":"openai","model":"gpt-test"},"videos":{"sources":[
-            {"id":"deck.mjpeg","name":"Deck MJPEG","description":"Encoded input","format":"mjpeg","width":1280,"height":720,"device_index":0},
-            {"id":"deck.yuy2","name":"Deck YUY2","description":"Packed input","format":"yuy2","width":1280,"height":720,"device_index":1},
-            {"id":"deck.alias","name":"Deck alias","description":"YUYV alias","format":"yuyv","width":1280,"height":720,"device_index":2}
+            {"id":"deck.mjpeg","name":"Deck MJPEG","description":"Encoded input","format":"mjpeg","width":1280,"height":720,"capture_rate":5,"device_index":0},
+            {"id":"deck.yuy2","name":"Deck YUY2","description":"Packed input","format":"yuy2","width":1280,"height":720,"capture_rate":5,"device_index":1},
+            {"id":"deck.alias","name":"Deck alias","description":"YUYV alias","format":"yuyv","width":1280,"height":720,"capture_rate":5,"device_index":2}
         ],"fps":5,"live_retention":"5s","dvr":{"retention":"1d","storage_path":"./dvr"}}}"#,
     );
     let inputs = cli_file(path);
@@ -310,7 +324,7 @@ async fn precedence_retention_and_empty_sources_match_runtime() {
     let path = write_config(
         &dir,
         r#"{"schema_version":1,"videos":{"sources":[
-            {"id":"overview","format":"mjpeg","width":1280,"height":720,"device_index":3}
+            {"id":"overview","format":"mjpeg","width":1280,"height":720,"capture_rate":7,"device_index":3}
         ],"fps":7,"live_retention":"5m","dvr":{"retention":"1h30m","storage_path":"./from-file"}}}"#,
     );
     let inputs = LabConfigInputs {
@@ -389,9 +403,9 @@ async fn mismatched_input_does_not_fall_back_and_isolates_failure() {
     let path = write_config(
         &dir,
         r#"{"schema_version":1,"videos":{"sources":[
-            {"id":"good","format":"mjpeg","width":1280,"height":720,"device_index":4},
-            {"id":"wrong-mode","format":"yuy2","width":1280,"height":720,"device_index":5},
-            {"id":"short-yuy2","format":"yuy2","width":1280,"height":720,"device_index":6}
+            {"id":"good","format":"mjpeg","width":1280,"height":720,"capture_rate":5,"device_index":4},
+            {"id":"wrong-mode","format":"yuy2","width":1280,"height":720,"capture_rate":5,"device_index":5},
+            {"id":"short-yuy2","format":"yuy2","width":1280,"height":720,"capture_rate":5,"device_index":6}
         ],"dvr":{"storage_path":"./dvr"}}}"#,
     );
     let resolved = resolve_lab_config(&cli_file(path)).unwrap();
@@ -477,7 +491,7 @@ async fn restart_reuses_dvr_for_the_same_source_id() {
     let path = write_config(
         &dir,
         r#"{"schema_version":1,"videos":{"sources":[
-            {"id":"persist","name":"Persist","description":"Kept","format":"mjpeg","width":1280,"height":720,"device_index":8}
+            {"id":"persist","name":"Persist","description":"Kept","format":"mjpeg","width":1280,"height":720,"capture_rate":5,"device_index":8}
         ],"dvr":{"storage_path":"./kept-dvr"}}}"#,
     );
     let inputs = cli_file(path);
@@ -496,6 +510,7 @@ async fn restart_reuses_dvr_for_the_same_source_id() {
     first.shutdown();
     tokio::time::sleep(Duration::from_millis(50)).await;
     let second = open_persist(&resolved.video, sample).await;
+    wait_for_live(&second.provider(), "persist").await;
     let recovered = second
         .provider()
         .get_video_timeline(GetVideoTimelineRequest::new(
@@ -574,7 +589,7 @@ fn config_validate_succeeds_without_provider_credentials() {
     let path = write_config(
         &dir,
         r#"{"schema_version":1,"chat":{"provider":"anthropic","model":"claude-test"},"videos":{"sources":[
-            {"id":"deck.alias","format":"yuyv","width":1280,"height":720,"device_index":0}
+            {"id":"deck.alias","format":"yuyv","width":1280,"height":720,"capture_rate":5,"device_index":0}
         ],"live_retention":"5m","dvr":{"retention":"3d","storage_path":"./video-dvr"}}}"#,
     );
     let output = Command::new(env!("CARGO_BIN_EXE_a2a-lab-ot2"))

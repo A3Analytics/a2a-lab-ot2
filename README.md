@@ -144,27 +144,6 @@ mise run agent-run
 
 `mise run agent-stop` sends SIGTERM, removes the container, and prints rollback steps that preserve retained image and video files on the host mount. Fix missing device nodes or storage permission errors using the script diagnostics; do not delete the state directory to roll back.
 
-Opt-in media verification (not part of `mise run quality`):
-
-```bash
-# Linux agent container with both sources configured:
-A2ALAB_MEDIA_SMOKE=1 \
-A2ALAB_CAMERA_INDEX=0 \
-A2ALAB_EXTERNAL_CAMERA_INDEX=4 \
-A2ALAB_EXTERNAL_VIDEO_DEVICES=/dev/video4 \
-mise run agent-media-smoke
-
-# Native serve on the host (macOS; configuration-driven source ids):
-A2ALAB_MEDIA_SMOKE=1 A2ALAB_MEDIA_SMOKE_NATIVE=1 \
-A2ALAB_MAC_BUILTIN_DEVICE_INDEX=0 \
-A2ALAB_USB_WEBCAM_DEVICE_INDEX=1 \
-mise run agent-media-smoke-native
-```
-
-The native path loads `fixtures/native-macos-media-smoke-v1.json`, which advertises `mac-built-in` (not legacy `camera` / `external-camera`) and sets indexed disk video retention to **3 hours (10800 s)** for that local run only. Container and production defaults stay at 3 days (`259200` s).
-
-The smoke check verifies advancing live MJPEG on `/media/video-live/`, confirms `get_image` matches `get_current_image` for each verified source, restarts the agent to prove indexed DVR history survives, and prints retention policy values (5 s live memory on container smoke; 10800 s disk video on native macOS smoke; 30 d still history). Each source failure is reported independently.
-
 ## Choose an external camera
 
 Use the built-in inventory command for your operating system to identify candidate cameras:
@@ -217,7 +196,7 @@ A2A serves `/.well-known/agent-card.json` and `POST /message:send`. OpenID Conne
 
 ## Web interface
 
-`serve` always serves the packaged dev-kit browser on the existing A2A listener. There is no flag. `GET /ui`, `GET /ui/`, and `GET /ui/index.html` return the shell. Packaged assets are under `/ui/assets/`. Startup prints `Web UI` with the same origin already printed for A2A and the path `/ui/`. `A2ALAB_PUBLIC_URL` changes that origin for both lines.
+`serve` always serves the packaged dev-kit browser on the existing A2A listener. There is no flag. `GET /` redirects to `/ui/`. `GET /ui`, `GET /ui/`, and `GET /ui/index.html` return the shell. Packaged assets are under `/ui/assets/`. Startup prints `Web UI` with the same origin already printed for A2A and the path `/ui/`. `A2ALAB_PUBLIC_URL` changes that origin for both lines.
 
 The page is a same-origin client of the listener that served it. It loads the agent card and calls A2A HTTP+JSON on that origin. It does not open a second API.
 

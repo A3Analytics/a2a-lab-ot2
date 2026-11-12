@@ -3,10 +3,10 @@
 use std::time::Duration;
 
 use a2a_lab_dev_kit::{
-    DvrFrameAtRequest, DvrMediaPayload, DvrMediaStore, FollowVideoRequest, GetVideoClipRequest,
-    HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH, MemoryVideos, PageRequest, ReadDvrMediaWindowRequest,
-    ResolvedMediaAsset, TimeRange, UtcTimestamp, VideoCodec, VideoProvider, VideoSource,
-    VideoSourceId,
+    DvrFrameAtRequest, DvrMediaPayload, DvrMediaStore, DvrPictureProperties, DvrTrackId,
+    FollowVideoRequest, GetVideoClipRequest, HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH, MemoryVideos,
+    PageRequest, ReadDvrMediaWindowRequest, ResolvedMediaAsset, TimeRange, UtcTimestamp,
+    VideoCodec, VideoProvider, VideoSource, VideoSourceId,
 };
 use a2a_lab_ot2::videos::dvr::VideoDvrCatalog;
 use a2a_lab_ot2::videos::dvr::chunk::{chunk_relpath, crc32, minute_start_us};
@@ -733,7 +733,7 @@ async fn live_trick_playlist_includes_media_recorded_after_the_first_request() {
         append_keyframe(&catalog, &source, start, index).await;
     }
     let cached_init = catalog
-        .resolve_live_playback_asset(follow.id(), Some("init.mp4"))
+        .resolve_live_playback_asset(follow.id(), Some("init-0.mp4"))
         .await
         .unwrap();
     assert!(matches!(cached_init, ResolvedMediaAsset::Bytes(_)));
@@ -751,27 +751,44 @@ async fn append_keyframe(
     start: UtcTimestamp,
     index: i64,
 ) {
+    const INIT: &[u8] = &[
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x01, 0x68,
+    ];
+    let at = start.saturating_add_micros(index * 200_000);
+    let sample = vec![
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0x65,
+        u8::try_from(index).unwrap_or(1),
+    ];
     catalog
         .dvr()
-        .append_h264_sample(
-            source,
-            start.saturating_add_micros(index * 200_000),
-            200_000,
-            true,
-            &[
-                0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x01, 0x68,
-            ],
-            &[
-                0x00,
-                0x00,
-                0x00,
-                0x01,
-                0x65,
-                u8::try_from(index).unwrap_or(1),
-            ],
-        )
+        .append_h264_sample(source, at, 200_000, true, INIT, &sample)
         .await
         .unwrap();
+    let live = catalog.live_h264().get(source).unwrap_or_else(|| {
+        catalog
+            .live_h264()
+            .register(source, 120, 5, 1_000_000)
+            .unwrap()
+    });
+    let track = DvrTrackId::new("h264-trick-live").unwrap();
+    let store = live.inner();
+    if store
+        .snapshot()
+        .unwrap()
+        .epochs()
+        .iter()
+        .all(|epoch| epoch.track_id() != &track)
+    {
+        let picture = DvrPictureProperties::new(640, 480).unwrap();
+        store
+            .open_epoch(track.clone(), INIT.to_vec(), picture)
+            .unwrap();
+    }
+    store.append_sample(&track, at, sample, true).unwrap();
 }
 
 async fn trick_playlist(catalog: &VideoDvrCatalog, id: &a2a_lab_dev_kit::VideoFollowId) -> String {

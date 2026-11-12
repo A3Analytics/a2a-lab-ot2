@@ -2,11 +2,11 @@
 
 use std::io::Cursor;
 
+use a2a_lab_dev_kit::A2aLabError;
 use a2a_lab_dev_kit::videos::{
     ColorMatrix, ColorProperties, ColorRange, FrameRoiTransform, SavedFrameRef, Sha256Digest,
     VideoCodec, frame_h264_picture,
 };
-use a2a_lab_dev_kit::{A2aLabError, DvrTrackId, VideoSourceId};
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
@@ -228,9 +228,7 @@ impl IndexedVideoDvr {
     ) -> Result<FrameEvidencePixels, FrameEvidenceFailure> {
         let frame = request.frame();
         self.guard_retained_revision(frame).await?;
-        let (codec, codec_init) = self
-            .track_codec(frame.source_id(), frame.track_id())
-            .await?;
+        let (codec, codec_init) = self.track_codec(frame).await?;
         let payload = self
             .load_verified_payload(frame, limits.max_payload_bytes())
             .await?;
@@ -277,9 +275,10 @@ impl IndexedVideoDvr {
 
     async fn track_codec(
         &self,
-        source_id: &VideoSourceId,
-        track_id: &DvrTrackId,
+        frame: &SavedFrameRef,
     ) -> Result<(VideoCodec, Vec<u8>), FrameEvidenceFailure> {
+        let source_id = frame.source_id();
+        let track_id = frame.track_id();
         let row = sqlx::query(
             "SELECT codec, codec_init FROM dvr_tracks WHERE source_id = ?1 AND track_id = ?2",
         )
@@ -299,9 +298,26 @@ impl IndexedVideoDvr {
                 .map_err(|error| db_failure(error.to_string()))?,
         )
         .map_err(|error| db_failure(error.to_string()))?;
-        let init: Vec<u8> = row
+        let mut init: Vec<u8> = row
             .try_get("codec_init")
             .map_err(|error| db_failure(error.to_string()))?;
+        if codec == VideoCodec::H264 {
+            let epoch_init = super::h264_epoch::codec_init_for_frame(
+                self.sqlite_pool(),
+                source_id,
+                track_id,
+                frame.captured_at(),
+            )
+            .await
+            .map_err(|error| db_failure(error.to_string()))?;
+            let Some(epoch_init) = epoch_init else {
+                return Err(FrameEvidenceFailure::new(
+                    FrameEvidenceFailureKind::CorruptPayload,
+                    "H.264 epoch is missing decoder initialization",
+                ));
+            };
+            init = epoch_init;
+        }
         Ok((codec, init))
     }
 

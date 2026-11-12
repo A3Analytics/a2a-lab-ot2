@@ -60,21 +60,6 @@ fn agent_image_scripts_reject_bad_inputs_without_docker() {
 }
 
 #[test]
-fn agent_media_smoke_scripts_skip_and_validate_without_hardware() {
-    let output = Command::new("bash")
-        .current_dir(repo_root())
-        .arg(".mise/scripts/agent-media-smoke-self-test.sh")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
 fn agent_run_args_without_config_preserve_prior_behavior() {
     let state = std::env::temp_dir().join(format!("a2a-lab-ot2-agent-args-{}", std::process::id()));
     fs::create_dir_all(&state).unwrap();

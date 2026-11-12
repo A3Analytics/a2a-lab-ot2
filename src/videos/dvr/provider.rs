@@ -5,27 +5,33 @@ use std::time::{Duration, Instant};
 
 use a2a_lab_dev_kit::{
     A2aLabError, DvrFrameAtRequest, DvrMediaPackager, DvrMediaPayload, DvrMediaStore,
-    FollowVideoRequest, GetVideoClipRequest, GetVideoFrameAtRequest, GetVideoFrameAtResult,
-    GetVideoTimelineRequest, HLS_PLAYLIST_RELATIVE_PATH, HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH,
-    Image, ImageDescriptor, ImageId, ImageSourceId, JsonObject, ListVideoSourcesRequest,
-    MAX_PAGE_LIMIT, MemoryVideos, PackagedHlsSession, PackagedMediaAsset, Page, PageRequest,
-    ReadDvrMediaWindowRequest, ResolvedMediaAsset, TimeRange, UtcTimestamp, VideoClip, VideoClipId,
-    VideoClipStream, VideoCodec, VideoFollow, VideoFollowId, VideoFrame, VideoLiveStream,
-    VideoProvider, VideoSource, VideoSourceId, VideoTimeline,
+    EpochHlsSession, EpochPlaylistKind, FollowVideoRequest, GetVideoClipRequest,
+    GetVideoFrameAtRequest, GetVideoFrameAtResult, GetVideoTimelineRequest, H264LiveStore,
+    HLS_PLAYLIST_RELATIVE_PATH, HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH, Image, ImageDescriptor,
+    ImageId, ImageSourceId, JsonObject, ListVideoSourcesRequest, MAX_PAGE_LIMIT, MemoryVideos,
+    PackagedMediaAsset, Page, PageRequest, ReadDvrMediaWindowRequest, ResolvedMediaAsset,
+    TimeRange, UtcTimestamp, VideoClip, VideoClipId, VideoClipStream, VideoCodec, VideoFollow,
+    VideoFollowId, VideoFrame, VideoLiveStream, VideoProvider, VideoSource, VideoSourceId,
+    VideoTimeline, export_finite_h264_epochs, load_epoch_hls_asset,
 };
 use tokio::sync::Mutex;
 
 use crate::images::jpeg_dimensions;
 use crate::videos::dvr::IndexedVideoDvr;
+use crate::videos::live_encode::LiveH264Catalog;
 
+use super::epoch_playback::{
+    effective_h264_range, epoch_session_has, live_store_edge_anchor, load_live_store_asset,
+    package_epochs_range, package_live_store_at, playback_8x_from_epoch,
+};
 use a2a_lab_dev_kit::DvrTrackId;
 
 #[derive(Clone)]
 struct StoredClip {
     clip: VideoClip,
-    track_id: DvrTrackId,
+    mjpeg_track: Option<DvrTrackId>,
     expires_at: Instant,
-    hls: Option<PackagedHlsSession>,
+    hls: Option<EpochHlsSession>,
 }
 
 #[derive(Clone)]
@@ -34,13 +40,14 @@ struct StoredFollow {
     source_id: VideoSourceId,
     anchor: Option<UtcTimestamp>,
     expires_at: Instant,
-    hls: Option<PackagedHlsSession>,
+    hls: Option<EpochHlsSession>,
 }
 
 /// Combined live window and disk-backed DVR catalog.
 #[derive(Clone)]
 pub struct VideoDvrCatalog {
     live: MemoryVideos,
+    live_h264: LiveH264Catalog,
     dvr: IndexedVideoDvr,
     clips: Arc<Mutex<Vec<StoredClip>>>,
     next_clip: Arc<Mutex<u64>>,
@@ -57,6 +64,7 @@ impl VideoDvrCatalog {
     ) -> Result<Self, A2aLabError> {
         Ok(Self {
             live,
+            live_h264: LiveH264Catalog::new(),
             dvr,
             clips: Arc::new(Mutex::new(Vec::new())),
             next_clip: Arc::new(Mutex::new(0)),
@@ -69,6 +77,11 @@ impl VideoDvrCatalog {
     #[must_use]
     pub fn live(&self) -> &MemoryVideos {
         &self.live
+    }
+
+    #[must_use]
+    pub fn live_h264(&self) -> &LiveH264Catalog {
+        &self.live_h264
     }
 
     #[must_use]
@@ -102,22 +115,36 @@ impl VideoDvrCatalog {
         VideoDvrMaintenance { task }
     }
 
-    async fn h264_ready(&self, source_id: &VideoSourceId) -> bool {
+    async fn h264_live_ready(&self, source_id: &VideoSourceId) -> bool {
         let Ok(true) = self.live.live_available(source_id).await else {
             return false;
         };
-        let Ok(tracks) = self.dvr.list_tracks(source_id).await else {
+        let Some(store) = self.live_h264.get(source_id) else {
             return false;
         };
-        tracks
-            .iter()
-            .any(|track| track.id().as_str() == "h264" && track.codec() == VideoCodec::H264)
+        store
+            .inner()
+            .snapshot()
+            .is_ok_and(|snapshot| !snapshot.samples().is_empty())
+    }
+
+    fn live_h264_store(
+        &self,
+        source_id: &VideoSourceId,
+    ) -> Result<Arc<H264LiveStore>, A2aLabError> {
+        self.live_h264
+            .get(source_id)
+            .map(|store| Arc::clone(store.inner()))
+            .ok_or_else(|| {
+                A2aLabError::live_unavailable("in-memory H.264 live store is not registered")
+            })
     }
 
     async fn follow_encoded(
         &self,
         request: FollowVideoRequest,
     ) -> Result<VideoFollow, A2aLabError> {
+        let live = self.live_h264_store(request.source_id())?;
         let mut next = self.next_follow.lock().await;
         *next += 1;
         let id = VideoFollowId::new(format!("h264-follow-{next}"))?;
@@ -126,22 +153,14 @@ impl VideoDvrCatalog {
             VideoFollow::new_encoded(id, request.source_id().clone(), VideoCodec::H264)?;
         let packager = DvrMediaPackager::default();
         let anchor = match request.anchor_at() {
-            Some(anchor) => Ok(anchor),
-            None => DvrMediaPackager::live_edge_anchor(&self.dvr, request.source_id()).await,
+            Some(anchor) => anchor,
+            None => live_store_edge_anchor(&live)?,
         };
         let mut hls = None;
-        if let Ok(anchor) = anchor
-            && let Ok(session) = packager
-                .package_live_hls_at(
-                    &self.dvr,
-                    follow.path(),
-                    request.source_id(),
-                    &DvrTrackId::new("h264")?,
-                    anchor,
-                )
-                .await
+        if let Ok(session) =
+            package_live_store_at(&live, anchor, packager.config().playback_window_us())
         {
-            follow = follow.with_playback_8x(session.playback_8x_metadata());
+            follow = follow.with_playback_8x(playback_8x_from_epoch(&session));
             hls = Some(session);
         }
         self.follows.lock().await.push(StoredFollow {
@@ -181,33 +200,27 @@ impl VideoDvrCatalog {
         stored.expires_at = Instant::now() + self.clip_ttl;
         let stored = stored.clone();
         drop(follows);
+        let live = self.live_h264_store(&stored.source_id)?;
         let path = relative_path.unwrap_or(HLS_PLAYLIST_RELATIVE_PATH);
-        let track_id = DvrTrackId::new("h264")?;
         let packager = DvrMediaPackager::default();
         if !refreshes_live_playlist(path)
             && let Some(session) = stored.hls.as_ref()
-            && clip_session_has(session, path)
+            && epoch_session_has(session, path)
         {
-            let asset = packager.load_hls_asset(&self.dvr, session, path).await?;
+            let asset = load_live_store_asset(&live, session, path)?;
             return Ok(ResolvedMediaAsset::Bytes(asset));
         }
+        let previous_origin = stored.hls.as_ref().map(EpochHlsSession::timeline_origin_us);
         let anchor = match stored.anchor {
             Some(anchor) => anchor,
-            None => DvrMediaPackager::live_edge_anchor(&self.dvr, &stored.source_id).await?,
+            None => live_store_edge_anchor(&live)?,
         };
-        let mut session = packager
-            .package_live_hls_at(
-                &self.dvr,
-                stored.follow.path(),
-                &stored.source_id,
-                &track_id,
-                anchor,
-            )
-            .await?;
-        if let Some(cached) = stored.hls.as_ref() {
-            session.pin_timeline_origin(cached.timeline_origin_us());
+        let mut session =
+            package_live_store_at(&live, anchor, packager.config().playback_window_us())?;
+        if let Some(origin_us) = previous_origin {
+            session.pin_timeline_origin(origin_us);
         }
-        let asset = packager.load_hls_asset(&self.dvr, &session, path).await?;
+        let asset = load_live_store_asset(&live, &session, path)?;
         if let Some(stored) = self
             .follows
             .lock()
@@ -332,21 +345,18 @@ impl VideoProvider for VideoDvrCatalog {
     async fn get_video_clip(&self, request: GetVideoClipRequest) -> Result<VideoClip, A2aLabError> {
         request.check()?;
         let source_id = request.source_id().clone();
-        let h264 = DvrTrackId::new("h264")?;
-        let (track_id, encoded) = if self
-            .effective_range(&source_id, &h264, request.range())
-            .await
-            .is_ok()
-        {
-            (h264, true)
+        let h264_range = effective_h264_range(&self.dvr, &source_id, request.range()).await;
+        let (track_id, encoded, effective_range) = if let Ok(range) = h264_range {
+            (MemoryVideos::mjpeg_track_id(&source_id)?, true, range)
         } else {
-            (MemoryVideos::mjpeg_track_id(&source_id)?, false)
-        };
-        let Ok(effective_range) = self
-            .effective_range(&source_id, &track_id, request.range())
-            .await
-        else {
-            return self.live.get_video_clip(request).await;
+            let track_id = MemoryVideos::mjpeg_track_id(&source_id)?;
+            let Ok(range) = self
+                .effective_range(&source_id, &track_id, request.range())
+                .await
+            else {
+                return self.live.get_video_clip(request).await;
+            };
+            (track_id, false, range)
         };
         let mut next = self.next_clip.lock().await;
         *next += 1;
@@ -364,16 +374,14 @@ impl VideoProvider for VideoDvrCatalog {
             VideoClip::new_mjpeg(id, source_id, request.range(), effective_range)?
         };
         let hls = if encoded {
-            let session = DvrMediaPackager::default()
-                .package_hls_range(
-                    &self.dvr,
-                    clip.path(),
-                    clip.source_id(),
-                    &track_id,
-                    effective_range,
-                )
-                .await?;
-            clip = clip.with_playback_8x(session.playback_8x_metadata());
+            let session = package_epochs_range(
+                &self.dvr,
+                clip.source_id(),
+                effective_range,
+                EpochPlaylistKind::Finite,
+            )
+            .await?;
+            clip = clip.with_playback_8x(playback_8x_from_epoch(&session));
             Some(session)
         } else {
             None
@@ -381,7 +389,7 @@ impl VideoProvider for VideoDvrCatalog {
         let expires_at = Instant::now() + self.clip_ttl;
         self.clips.lock().await.push(StoredClip {
             clip: clip.clone(),
-            track_id,
+            mjpeg_track: if encoded { None } else { Some(track_id) },
             expires_at,
             hls,
         });
@@ -403,6 +411,9 @@ impl VideoProvider for VideoDvrCatalog {
             )));
         }
         self.purge_expired_clips().await;
+        let Some(mjpeg_track) = stored.mjpeg_track.as_ref() else {
+            return self.live.open_video_clip(id).await;
+        };
         let range = stored.clip.effective_range();
         let mut cursor = None;
         let mut frames = Vec::new();
@@ -411,7 +422,7 @@ impl VideoProvider for VideoDvrCatalog {
                 .dvr
                 .read_media_window(ReadDvrMediaWindowRequest::new(
                     stored.clip.source_id().clone(),
-                    stored.track_id.clone(),
+                    mjpeg_track.clone(),
                     range,
                     PageRequest::new(cursor, MAX_PAGE_LIMIT)?,
                 )?)
@@ -452,22 +463,30 @@ impl VideoProvider for VideoDvrCatalog {
             )));
         }
         self.purge_expired_clips().await;
-        let packager = DvrMediaPackager::default();
         if stored.clip.codec() == VideoCodec::H264 {
-            return packager
-                .export_finite_mp4(
-                    &self.dvr,
-                    stored.clip.source_id(),
-                    &stored.track_id,
-                    stored.clip.effective_range(),
-                )
-                .await;
+            let clips = export_finite_h264_epochs(
+                &self.dvr,
+                stored.clip.source_id(),
+                stored.clip.effective_range(),
+            )
+            .await?;
+            if clips.len() != 1 {
+                return Err(A2aLabError::invalid(
+                    "export",
+                    "finite export spans multiple H.264 epochs; narrow the requested range",
+                ));
+            }
+            return PackagedMediaAsset::new("video/mp4", clips[0].mp4().to_vec());
         }
-        packager
+        let mjpeg_track = stored
+            .mjpeg_track
+            .as_ref()
+            .ok_or_else(|| A2aLabError::not_found("video clip", id.to_string()))?;
+        DvrMediaPackager::default()
             .export_finite_mjpeg(
                 &self.dvr,
                 stored.clip.source_id(),
-                &stored.track_id,
+                mjpeg_track,
                 stored.clip.effective_range(),
             )
             .await
@@ -510,7 +529,7 @@ impl VideoProvider for VideoDvrCatalog {
     }
 
     async fn follow_video(&self, request: FollowVideoRequest) -> Result<VideoFollow, A2aLabError> {
-        if self.h264_ready(request.source_id()).await {
+        if self.h264_live_ready(request.source_id()).await {
             return self.follow_encoded(request).await;
         }
         self.live.follow_video(request).await
@@ -559,7 +578,6 @@ impl VideoProvider for VideoDvrCatalog {
         relative_path: Option<&str>,
     ) -> Result<ResolvedMediaAsset, A2aLabError> {
         let path = relative_path.unwrap_or(HLS_PLAYLIST_RELATIVE_PATH);
-        let packager = DvrMediaPackager::default();
         let cached = {
             let mut clips = self.clips.lock().await;
             let Some(stored) = clips.iter_mut().find(|clip| clip.clip.id() == id) else {
@@ -577,28 +595,33 @@ impl VideoProvider for VideoDvrCatalog {
             stored
                 .hls
                 .clone()
-                .filter(|session| clip_session_has(session, path))
+                .filter(|session| epoch_session_has(session, path))
         };
         if let Some(session) = cached.as_ref() {
-            let asset = packager.load_hls_asset(&self.dvr, session, path).await?;
+            let source_id = {
+                let clips = self.clips.lock().await;
+                clips
+                    .iter()
+                    .find(|clip| clip.clip.id() == id)
+                    .map(|clip| clip.clip.source_id().clone())
+                    .ok_or_else(|| A2aLabError::not_found("video clip", id.to_string()))?
+            };
+            let asset = load_epoch_hls_asset(&self.dvr, &source_id, session, path).await?;
             return Ok(ResolvedMediaAsset::Bytes(asset));
         }
-        let (root, source_id, track_id, range) = {
+        let (source_id, range) = {
             let clips = self.clips.lock().await;
             let Some(stored) = clips.iter().find(|clip| clip.clip.id() == id) else {
                 return Err(A2aLabError::not_found("video clip", id.to_string()));
             };
             (
-                stored.clip.path().to_owned(),
                 stored.clip.source_id().clone(),
-                stored.track_id.clone(),
                 stored.clip.effective_range(),
             )
         };
-        let session = packager
-            .package_hls_range(&self.dvr, &root, &source_id, &track_id, range)
-            .await?;
-        let asset = packager.load_hls_asset(&self.dvr, &session, path).await?;
+        let session =
+            package_epochs_range(&self.dvr, &source_id, range, EpochPlaylistKind::Finite).await?;
+        let asset = load_epoch_hls_asset(&self.dvr, &source_id, &session, path).await?;
         if let Some(stored) = self
             .clips
             .lock()
@@ -623,26 +646,6 @@ fn newest_inside(interval: TimeRange, live_newest: Option<UtcTimestamp>) -> UtcT
 
 fn refreshes_live_playlist(path: &str) -> bool {
     path == HLS_PLAYLIST_RELATIVE_PATH || path == HLS_TRICK_8X_PLAYLIST_RELATIVE_PATH
-}
-
-fn clip_session_has(session: &PackagedHlsSession, path: &str) -> bool {
-    if path == session.init_relative_path() || path == session.playlist_relative_path() {
-        return true;
-    }
-    if session
-        .segments()
-        .iter()
-        .any(|segment| segment.relative_path() == path)
-    {
-        return true;
-    }
-    session.trick_8x().is_some_and(|trick| {
-        path == trick.playlist_relative_path()
-            || trick
-                .segments()
-                .iter()
-                .any(|segment| segment.relative_path() == path)
-    })
 }
 
 #[cfg(test)]

@@ -26,8 +26,9 @@ fn descriptor(id: &str) -> LiveVideoSourceDescriptor {
         description: format!("Description {id}"),
         device_index: 7,
         input: LiveCameraInputFormat::Mjpeg,
-        width: 4,
-        height: 4,
+        width: Some(4),
+        height: Some(4),
+        capture_rate: Some(5),
         delivery: LiveVideoDelivery::Mjpeg,
     }
 }

@@ -42,6 +42,7 @@ pub struct ResolvedVideoSettings {
     pub fps: u32,
     pub live_retention_secs: u64,
     pub disk_retention_secs: u64,
+    pub dvr_save_interval_nanos: Option<u64>,
     pub dvr_storage: ResolvedDvrStorage,
     pub max_image_bytes: u64,
 }
@@ -130,6 +131,10 @@ fn resolve_video(
     }
 
     let dvr_storage = resolve_dvr_storage(inputs, loaded)?;
+    let dvr_save_interval_nanos = file_videos
+        .and_then(|videos| videos.dvr.as_ref())
+        .and_then(|dvr| dvr.save_interval)
+        .map(a2a_lab_dev_kit::SaveIntervalDuration::as_nanos);
     let (max_image_bytes, _) = inputs
         .max_image_bytes
         .explicit_or(None, || a2a_lab_dev_kit::DEFAULT_MAX_IMAGE_BYTES);
@@ -138,12 +143,16 @@ fn resolve_video(
     apply_legacy_source_upserts(inputs, &mut sources)?;
     apply_description_override(inputs, &mut sources)?;
     validate_live_sources(&sources)?;
+    for source in &sources {
+        source.capture_request(fps)?;
+    }
 
     Ok(ResolvedVideoSettings {
         sources,
         fps,
         live_retention_secs,
         disk_retention_secs,
+        dvr_save_interval_nanos,
         dvr_storage,
         max_image_bytes,
     })
@@ -209,8 +218,9 @@ fn descriptor_from_file_source(
             description: source.display_description().to_owned(),
             device_index: source.device_index,
             input,
-            width: EXTERNAL_CAMERA_WIDTH,
-            height: EXTERNAL_CAMERA_HEIGHT,
+            width: Some(EXTERNAL_CAMERA_WIDTH),
+            height: Some(EXTERNAL_CAMERA_HEIGHT),
+            capture_rate: source.capture_rate,
             delivery: LiveVideoDelivery::H264,
         }),
         CAMERA_SOURCE_ID => Ok(LiveVideoSourceDescriptor {
@@ -219,33 +229,25 @@ fn descriptor_from_file_source(
             description: source.display_description().to_owned(),
             device_index: source.device_index,
             input,
-            width: 1280,
-            height: 720,
+            width: Some(1280),
+            height: Some(720),
+            capture_rate: source.capture_rate,
             delivery: LiveVideoDelivery::H264,
         }),
         _ => {
-            let width = source.width.ok_or_else(|| {
-                A2aLabError::invalid(
-                    "videos.sources.width",
-                    format!("source `{id}` requires explicit width"),
-                )
-            })?;
-            let height = source.height.ok_or_else(|| {
-                A2aLabError::invalid(
-                    "videos.sources.height",
-                    format!("source `{id}` requires explicit height"),
-                )
-            })?;
-            Ok(LiveVideoSourceDescriptor {
+            let descriptor = LiveVideoSourceDescriptor {
                 id: id.to_owned(),
                 name: source.display_name().to_owned(),
                 description: source.display_description().to_owned(),
                 device_index: source.device_index,
                 input,
-                width,
-                height,
+                width: source.width,
+                height: source.height,
+                capture_rate: source.capture_rate,
                 delivery: LiveVideoDelivery::H264,
-            })
+            };
+            descriptor.capture_request(1)?;
+            Ok(descriptor)
         }
     }
 }
@@ -343,8 +345,9 @@ fn legacy_external_descriptor(
         description,
         device_index: index,
         input,
-        width: EXTERNAL_CAMERA_WIDTH,
-        height: EXTERNAL_CAMERA_HEIGHT,
+        width: Some(EXTERNAL_CAMERA_WIDTH),
+        height: Some(EXTERNAL_CAMERA_HEIGHT),
+        capture_rate: None,
         delivery: LiveVideoDelivery::H264,
     }
 }
@@ -356,8 +359,9 @@ fn legacy_camera_descriptor(index: u32, input: LiveCameraInputFormat) -> LiveVid
         description: "Live MJPEG from the configured camera.".to_owned(),
         device_index: index,
         input,
-        width: 1280,
-        height: 720,
+        width: Some(1280),
+        height: Some(720),
+        capture_rate: None,
         delivery: LiveVideoDelivery::H264,
     }
 }
@@ -389,6 +393,7 @@ fn chat_provider_to_model(provider: ChatProvider) -> ModelProvider {
 
 const fn input_format(format: VideoInputFormat) -> LiveCameraInputFormat {
     match format {
+        VideoInputFormat::Auto => LiveCameraInputFormat::Auto,
         VideoInputFormat::Mjpeg => LiveCameraInputFormat::Mjpeg,
         VideoInputFormat::Yuy2 => LiveCameraInputFormat::Yuy2,
     }
@@ -407,8 +412,9 @@ mod tests {
             description: "from file".to_owned(),
             device_index: 1,
             input: LiveCameraInputFormat::Yuy2,
-            width: 1280,
-            height: 720,
+            width: Some(1280),
+            height: Some(720),
+            capture_rate: None,
             delivery: LiveVideoDelivery::Mjpeg,
         }];
         let inputs = LabConfigInputs {

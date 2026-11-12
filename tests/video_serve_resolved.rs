@@ -35,11 +35,22 @@ fn page() -> PageRequest {
 }
 
 fn jpeg(width: u16, height: u16) -> Vec<u8> {
-    let mut data = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08];
-    data.extend_from_slice(&height.to_be_bytes());
-    data.extend_from_slice(&width.to_be_bytes());
-    data.extend_from_slice(&[0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9]);
-    data
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_fn(u32::from(width), u32::from(height), |_, _| {
+            Rgb([64, 64, 64])
+        });
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 80)
+        .write_image(
+            image.as_raw(),
+            u32::from(width),
+            u32::from(height),
+            ExtendedColorType::Rgb8,
+        )
+        .expect("jpeg");
+    out
 }
 
 struct ScriptCamera {
@@ -81,7 +92,7 @@ fn profile(format: CaptureFormat, width: u32, height: u32, fps: u32) -> Advertis
 
 async fn wait_for_live(provider: &a2a_lab_ot2::VideoDvrCatalog, id: &str) {
     let source = VideoSourceId::new(id).unwrap();
-    for _ in 0..50 {
+    for _ in 0..80 {
         if provider
             .follow_video(FollowVideoRequest::new(source.clone()))
             .await
@@ -107,8 +118,8 @@ async fn videos_only_file_controls_sources_and_timing() {
     let path = dir.join("a2a-lab.json");
     let loaded = load_config(
         r#"{"schema_version":1,"videos":{"sources":[
-            {"id":"bench","name":"Bench","description":"Overview","format":"yuyv","width":1280,"height":720,"device_index":4},
-            {"id":"detail","name":"Detail","description":"Close-up","format":"mjpeg","width":1280,"height":720,"device_index":6}
+            {"id":"bench","name":"Bench","description":"Overview","format":"yuyv","width":1280,"height":720,"capture_rate":7,"device_index":4},
+            {"id":"detail","name":"Detail","description":"Close-up","format":"mjpeg","width":1280,"height":720,"capture_rate":7,"device_index":6}
         ],"fps":7,"live_retention":"11s","dvr":{"retention":"2d","storage_path":"./dvr-store"}}}"#,
         &path,
     );
@@ -238,7 +249,7 @@ async fn restart_keeps_timeline_for_same_ids_and_dvr_root() {
     load_config(
         &format!(
             r#"{{"schema_version":1,"videos":{{"sources":[
-                {{"id":"persist","name":"Persist","description":"DVR","format":"mjpeg","width":1280,"height":720,"device_index":2}}
+                {{"id":"persist","name":"Persist","description":"DVR","format":"mjpeg","width":1280,"height":720,"capture_rate":5,"device_index":2}}
             ],"dvr":{{"storage_path":{storage}}}}}}}"#
         ),
         &path,
@@ -283,6 +294,7 @@ async fn restart_keeps_timeline_for_same_ids_and_dvr_root() {
     .await
     .unwrap()
     .expect("second catalog");
+    wait_for_live(&second.provider(), "persist").await;
     let recovered = second
         .provider()
         .get_video_timeline(GetVideoTimelineRequest::new(

@@ -50,8 +50,8 @@ pub use sila::{
 };
 pub use videos::{
     DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_LIVE_VIDEO_MEMORY_SECS, DEFAULT_VIDEO_DVR_ROOT,
-    DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, ExternalVideoConfig, IndexedVideoDvr,
-    LiveCameraInputFormat, LiveJpegSource, LiveVideoCatalog, LiveVideoDelivery,
+    DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, ExternalVideoConfig, IndexedSourceFilter,
+    IndexedVideoDvr, LiveCameraInputFormat, LiveJpegSource, LiveVideoCatalog, LiveVideoDelivery,
     LiveVideoInjections, LiveVideoSourceDescriptor, VideoDvrCatalog, VideoServeConfig,
     WebcamVideoConfig, open_resolved_video_catalog, open_resolved_video_catalog_with_semantic,
     open_video_catalog, resolve_serve_semantic_indexing, resolved_video_summary,

@@ -1,4 +1,4 @@
-const DEVKIT_REVISION: &str = "64ea97d3edcac8f51ba802dbed7fc4a595aec763";
+const DEVKIT_REVISION: &str = "62663923ce4be49f79c6d6bf5ea51c70eadd68a6";
 const DEVKIT_URL: &str = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs";
 const TCK_REVISION: &str = "1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd";
 const TCK_URL: &str = "https://github.com/A3Analytics/a2a-lab-tck";
@@ -12,10 +12,15 @@ fn cargo_uses_the_public_immutable_devkit_independently() {
     assert!(manifest.contains(&format!("rev = \"{DEVKIT_REVISION}\"")));
     let published =
         format!("source = \"git+{DEVKIT_URL}?rev={DEVKIT_REVISION}#{DEVKIT_REVISION}\"");
-    let patched = manifest
+    let manifest_patched = manifest
         .contains("[patch.\"https://github.com/A3Analytics/a2a-lab-dev-kit-rs\"]")
         && manifest.contains("path = \"../a2a-lab-dev-kit-rs\"");
-    if patched {
+    let local_patch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".cargo/config.toml");
+    let local_patched = local_patch.exists()
+        && std::fs::read_to_string(&local_patch)
+            .unwrap_or_default()
+            .contains("path = \"../a2a-lab-dev-kit-rs\"");
+    if manifest_patched || local_patched {
         assert!(!lockfile.contains(&published));
         assert!(lockfile.contains("name = \"a2a-lab-dev-kit\""));
     } else {

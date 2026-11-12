@@ -176,6 +176,7 @@ pub fn resolved_video_summary(settings: &ResolvedVideoSettings) -> String {
         .iter()
         .map(|source| {
             let input = match source.input {
+                LiveCameraInputFormat::Auto => "auto",
                 LiveCameraInputFormat::Mjpeg => "mjpeg",
                 LiveCameraInputFormat::Yuy2 => "yuy2",
             };
@@ -229,6 +230,7 @@ pub async fn open_resolved_video_catalog_with_semantic(
             settings.disk_retention_secs,
             &settings.dvr_storage.path,
             settings.max_image_bytes,
+            settings.dvr_save_interval_nanos,
             injections,
             semantic.as_ref(),
             semantic_injections.unwrap_or_default(),

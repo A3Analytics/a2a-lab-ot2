@@ -7,9 +7,9 @@ use a2a_lab_ot2::{
     ExplicitSetting, ImageServeConfig, LabConfigInputs, image_catalog, resolve_lab_config,
 };
 
-fn fixture_path() -> std::path::PathBuf {
+fn example_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/native-macos-media-smoke-v1.json")
+        .join(".mise/examples/videos-only.json")
 }
 
 fn jpeg() -> Vec<u8> {
@@ -21,9 +21,9 @@ fn jpeg() -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn native_macos_fixture_registers_custom_image_sources() {
+async fn configured_video_sources_register_custom_image_sources() {
     let inputs = LabConfigInputs {
-        config_path: ExplicitSetting::cli(Some(fixture_path())),
+        config_path: ExplicitSetting::cli(Some(example_path())),
         ..LabConfigInputs::default()
     };
     let resolved = resolve_lab_config(&inputs).unwrap();
@@ -42,8 +42,8 @@ async fn native_macos_fixture_registers_custom_image_sources() {
         .iter()
         .map(|item| item.id.as_str().to_owned())
         .collect::<Vec<_>>();
-    assert!(ids.contains(&"mac-built-in".to_owned()));
-    assert!(!ids.contains(&"usb-webcam".to_owned()));
+    assert!(ids.contains(&"bench".to_owned()));
+    assert!(ids.contains(&"detail".to_owned()));
     assert!(!ids.contains(&"camera".to_owned()));
 }
 

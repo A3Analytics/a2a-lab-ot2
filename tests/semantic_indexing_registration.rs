@@ -267,6 +267,7 @@ async fn live_catalog_annotation_queue_backfills_and_survives_restart() {
         86_400,
         &dir,
         2_000_000,
+        None,
         LiveVideoInjections::none(),
     )
     .await
@@ -293,6 +294,7 @@ async fn live_catalog_annotation_queue_backfills_and_survives_restart() {
         86_400,
         &dir,
         2_000_000,
+        None,
         LiveVideoInjections::none(),
     )
     .await

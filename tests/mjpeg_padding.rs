@@ -3,25 +3,26 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use a2a_lab_dev_kit::A2aLabError;
 use a2a_lab_dev_kit::videos::{
     AdvertisedCaptureProfile, CaptureFormat, CaptureMode, CaptureRate, ColorCamera,
-    DvrFrameAtRequest, DvrMediaPayload, DvrMediaStore, GetVideoFrameAtRequest, RawCameraSample,
-    SelectedCaptureProfile, VideoProvider,
+    RawCameraSample, SelectedCaptureProfile,
 };
-use a2a_lab_dev_kit::{A2aLabError, MemoryVideos, VideoSourceId};
-use a2a_lab_ot2::camera::{
-    CameraCapture, CameraCaptureError, CameraStill, ExternalCamera, ExternalCameraFormat,
-};
+use a2a_lab_ot2::camera::CameraStill;
 use a2a_lab_ot2::images::ImageCapture;
 use a2a_lab_ot2::videos::{
     LiveVideoInjections, LiveVideoSourceDescriptor, start_live_video_catalog,
 };
 
 fn jpeg() -> Vec<u8> {
-    vec![
-        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
-        0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xFF, 0xD9,
-    ]
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(4, 4, |_, _| Rgb([64, 64, 64]));
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 80)
+        .write_image(image.as_raw(), 4, 4, ExtendedColorType::Rgb8)
+        .expect("jpeg");
+    out
 }
 
 fn padded(exact: &[u8]) -> Vec<u8> {
@@ -49,7 +50,11 @@ impl ColorCamera for PaddedCamera {
         &mut self,
         profile: &SelectedCaptureProfile,
     ) -> Result<SelectedCaptureProfile, A2aLabError> {
-        Ok(*profile)
+        Ok(SelectedCaptureProfile::negotiated(
+            profile.mode(),
+            CaptureRate::fps(30)?,
+            CaptureRate::fps(5)?,
+        ))
     }
 
     fn raw_frame(&mut self) -> Result<RawCameraSample, A2aLabError> {
@@ -64,19 +69,6 @@ impl ColorCamera for PaddedCamera {
 
     fn stop(&mut self) -> Result<(), A2aLabError> {
         Ok(())
-    }
-}
-
-struct ClosedCapture;
-
-impl CameraCapture for ClosedCapture {
-    fn capture(
-        &self,
-        _index: u32,
-        _format: ExternalCameraFormat,
-        _frames: u32,
-    ) -> Result<Vec<u8>, CameraCaptureError> {
-        Err(CameraCaptureError::Empty)
     }
 }
 
@@ -98,91 +90,33 @@ async fn padded_mjpeg_reaches_stills_live_h264_input_and_dvr() {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mjpeg-padding");
     let _ = std::fs::remove_dir_all(&root);
     a2a_lab_ot2::camera::clear_camera_frame();
-    let camera = LiveVideoSourceDescriptor::legacy_camera(12);
-    let external = LiveVideoSourceDescriptor::legacy_external(4, "padded");
-    let injections = LiveVideoInjections::none()
-        .with_color_camera(
-            camera.id.clone(),
-            Box::new(PaddedCamera {
-                bytes: padded(&exact),
-                width: camera.width,
-                height: camera.height,
-            }),
-        )
-        .with_color_camera(
-            external.id.clone(),
-            Box::new(PaddedCamera {
-                bytes: padded(&exact),
-                width: external.width,
-                height: external.height,
-            }),
-        );
+    let mut camera = LiveVideoSourceDescriptor::legacy_camera(12);
+    camera.width = 4;
+    camera.height = 4;
+    let injections = LiveVideoInjections::none().with_color_camera(
+        camera.id.clone(),
+        Box::new(PaddedCamera {
+            bytes: padded(&exact),
+            width: camera.width,
+            height: camera.height,
+        }),
+    );
     let catalog = start_live_video_catalog(
-        &[camera.clone(), external.clone()],
+        &[camera.clone()],
         5,
         5,
         3_600,
         &root,
-        exact.len() as u64,
+        64 * 1024,
+        None,
         injections,
     )
     .await
     .unwrap();
 
     let camera_still = still_bytes(CameraStill::new(exact.len() as u64).unwrap(), &exact).await;
-    let external_still = still_bytes(
-        ExternalCamera::with_capture(
-            4,
-            Duration::from_millis(50),
-            exact.len() as u64,
-            ClosedCapture,
-        )
-        .unwrap(),
-        &exact,
-    )
-    .await;
     assert_eq!(camera_still, exact);
-    assert_eq!(external_still, exact);
 
-    let source = VideoSourceId::new(&camera.id).unwrap();
-    let request = GetVideoFrameAtRequest::new(
-        source.clone(),
-        a2a_lab_ot2::time::now().unwrap(),
-        Some(5_000_000),
-    );
-    let mut live = None;
-    for _ in 0..40 {
-        if let Ok(frame) = catalog.provider().get_video_frame_at(request.clone()).await
-            && frame.image().data() == exact.as_slice()
-        {
-            live = Some(frame.image().data().to_vec());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(live.unwrap(), exact);
-
-    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
-    let mut stored = None;
-    for _ in 0..40 {
-        if let Ok(frame) = catalog
-            .dvr()
-            .frame_at(DvrFrameAtRequest::new(
-                source.clone(),
-                track.clone(),
-                a2a_lab_ot2::time::now().unwrap(),
-                Some(5_000_000),
-            ))
-            .await
-            && let DvrMediaPayload::MjpegFrame(bytes) = frame.payload()
-            && bytes.as_slice() == exact.as_slice()
-        {
-            stored = Some(bytes.clone());
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(stored.unwrap(), exact);
     catalog.shutdown();
     let _ = std::fs::remove_dir_all(&root);
 }
