@@ -77,6 +77,8 @@ A command-line value replaces the environment variable of the same option. The e
 | `--frame-set-db`              | `A2ALAB_FRAME_SET_DB`              | `.a2a-lab-ot2/frame-sets.sqlite`               | SQLite catalog for frame-set tasks and UI metadata. The frame-set listener stays off unless a capture backend is attached.                                                                                                                                      |
 | `--frame-set-port`            | `A2ALAB_FRAME_SET_PORT`            | `31003`                                        | HTTP listener for frame-set tasks, channel bytes, and `/ot2/frame-sets/ui`.                                                                                                                                                                                     |
 | `--frame-set-retention`       | `A2ALAB_FRAME_SET_RETENTION`       | `32`                                           | Newest frame-set metadata rows kept per source in `--frame-set-db`.                                                                                                                                                                                             |
+| `--config`                    | `A2ALAB_CONFIG`                    | none                                           | Optional `a2a-lab.json` path. Relative paths resolve from the working directory. When set to a v2 file with `semantic_indexing`, serve wires DVR semantic workers and search. See [doc-6](<../configuration/doc-6 - A2A-LAB-configuration-file.md>).              |
+| (semantic live gate)          | `A2ALAB_SEMANTIC_INDEXING_LIVE`    | off                                            | When `true`, `1`, or `yes`, semantic indexing and search use live Bedrock description and embedding adapters. Unset or any other value selects deterministic providers for credential-free local validation, `config validate`, and tests.                      |
 
 Live video is served through the devkit `DeclarativeVideoRuntime`. `serve` constructs one runtime from resolved `VideoConfig` (file or legacy flags), wires the DVR provider into A2A/MCP, attaches `A2aServer::with_capture_settings` for the runtime capture-settings handle, and serves configured stills from `runtime.still_cache()`. `--external-camera-index` and `--camera-index` still add `external-camera` and `camera` entries with MJPEG input mapped into the same declarative sources as `camera_id` in a configuration file. Clip and live playback bytes are served through `/media/video-clips/` and `/media/video-live/` on the A2A listener from the runtime provider (not a network A2A client back to this process). Shutdown stops capture workers and releases camera sessions through the runtime shutdown handle.
 
@@ -99,6 +101,96 @@ Credentials are process environment, not flags:
 | Anthropic | `ANTHROPIC_API_KEY`                                                                                                                      |
 
 The model is loaded only while serving. Startup prints `model <provider> <id>`. A credential or invoke failure names that provider and model.
+
+Bedrock credentials for **chat** and for **semantic indexing** use the same SDK chain. Repository JSON and mise examples never store access keys, session tokens, or other secrets. Supply credentials only through the environment or shared AWS config files on the operator workstation.
+
+## Semantic indexing and Bedrock on macOS
+
+macOS bench indexing pairs a native `videos.sources` entry (`camera_id` and `format: "auto"`) with the local example `.mise/examples/local.json` (see [doc-6](<../configuration/doc-6 - A2A-LAB-configuration-file.md>)). That source is eligible for retained-frame semantic indexing. `opentrons-camera` remains a robot still-only source and is outside semantic indexing scope.
+
+### Live mode gate
+
+`A2ALAB_SEMANTIC_INDEXING_LIVE=true` is the explicit switch for live Bedrock description and embedding during `serve`. Without it, workers and search embedders stay deterministic and **do not require AWS credentials**, which is how `mise run quality` and `config validate` remain credential-free even when the file names Bedrock models.
+
+Recognized truthy values are `1`, `true`, and `yes` (case-sensitive trimming applies to the value). Any other set value, including `false`, keeps deterministic adapters.
+
+### AWS profile and region for live semantic indexing
+
+Live semantic wiring resolves AWS settings as follows:
+
+| Variable | Role |
+| -------- | ---- |
+| `AWS_PROFILE` | Shared-credentials profile name; defaults to `default` when unset. |
+| `AWS_REGION` | Region override for Bedrock when set. |
+| `AWS_DEFAULT_REGION` | Used when `AWS_REGION` is unset. |
+
+Region must be configured through one of those variables or the active profile. Credentials must resolve through the standard SDK chain (shared config, environment variables, or credential processes). Nothing in the repository substitutes for operator-side AWS configuration.
+
+### Model and vector-space compatibility
+
+Before relying on live search, confirm:
+
+- `semantic_indexing.description.model` is non-empty, enabled for your account, and supports image input.
+- `semantic_indexing.embeddings.model` is non-empty and enabled for text embedding.
+- `semantic_indexing.embeddings.space.dimensions`, `normalization`, `metric`, and `generation` describe the same vector space the embedding model emits. Indexed vectors and query embeddings must share that space.
+
+At search time, callers must pass a `provenance.model_space` that matches the active configuration. `get_semantic_search_capabilities` reports `active_provenance` for the running process. Changing embedding model or space without re-indexing yields search failures with `provenance.model_space does not match the configured semantic embedding model space` or `does not match the active query embedding provider model space`.
+
+### Launch and validation (mise)
+
+Credential-free configuration check:
+
+```bash
+export A2ALAB_CONFIG="$PWD/.mise/examples/local.json"
+mise run a2a-lab-ot2 -- config validate
+```
+
+Expected stdout contains `configuration valid`. Validation does not open the camera or call Bedrock when `A2ALAB_SEMANTIC_INDEXING_LIVE` is unset.
+
+Live bench startup (robot-server optional when only the Mac camera is configured):
+
+```bash
+export A2ALAB_CONFIG="$PWD/.mise/examples/local.json"
+export A2ALAB_SEMANTIC_INDEXING_LIVE=true
+export AWS_PROFILE=your-profile
+export AWS_REGION=us-east-1
+mise run start
+```
+
+After listeners bind, confirm the source and video line:
+
+```bash
+mise run a2a-lab-ot2 -- list-image-sources
+```
+
+The configured source id (for example `mac-built-in`) appears alongside `opentrons-camera`. With semantic embeddings enabled, the agent card and MCP server also expose `get-semantic-search-capabilities`, `get-semantic-indexing-coverage`, and `search-semantic-frames`.
+
+Observable semantic search check after frames are retained and indexed:
+
+1. Open `http://127.0.0.1:31000/ui/`, select the video source, and run a text semantic search; ranked frame metadata confirms indexed results.
+2. Or call the MCP tool `search_semantic_frames` on `http://127.0.0.1:31001/mcp` with `scope.source_id` set to the configured id, `query.kind` `text`, and `provenance.model_space` taken from `get_semantic_search_capabilities`.
+
+Indexed DVR bytes and the semantic vector store honor the file retention settings; the macOS example relies on the default three-day disk DVR retention when `videos.dvr.retention` is omitted (`259200` seconds).
+
+Optional one-frame Bedrock smoke (not required for normal serve) is documented in `.mise/scripts/semantic-indexing-smoke.sh` and requires `A2ALAB_SEMANTIC_INDEXING_SMOKE=1` plus credentials; do not enable smoke in shared logs.
+
+### Troubleshooting live semantic indexing
+
+| Symptom | Likely cause | What to do |
+| ------- | ------------- | ---------- |
+| Startup or worker error mentioning `AWS region is not configured` | Missing `AWS_REGION` / `AWS_DEFAULT_REGION` and no region on the profile | Set region env vars or add `region` to the `AWS_PROFILE` profile. |
+| `AWS credentials are unavailable for live Bedrock semantic indexing` | Profile missing or expired credentials | Fix `AWS_PROFILE`, refresh SSO or keys outside the repo; verify with the AWS CLI using the same profile. |
+| `Bedrock model access or authorization failed` or `AccessDenied` on invoke | Model not enabled or IAM lacks `bedrock:InvokeModel` | Enable the description and embedding model ids in the account region; extend IAM for the principal. |
+| `configured Bedrock description model is missing or empty` | Blank `semantic_indexing.description.model` | Set a Bedrock image-capable model id in the file. |
+| `configured Bedrock text embedding model is missing or empty` | Blank embedding model | Set `semantic_indexing.embeddings.model`. |
+| `configured Bedrock embedding vector space has invalid dimensions` | Zero or incompatible `space.dimensions` | Align dimensions with the embedding model output. |
+| Search returns `provenance.model_space does not match` | Client provenance stale or file changed after indexing | Read `active_provenance` from capabilities and re-index after model or space changes. |
+| Search scope error `source is outside configured semantic indexing scope` | Query targets a non-video source such as `opentrons-camera` | Query only ids from `videos.sources`. |
+| `semantic vector search is disabled` | File omits embeddings configuration | Add `semantic_indexing.embeddings` or use description-only mode expectations. |
+
+Error text from live Bedrock failures is designed to omit secret values. Deterministic mode never invokes the AWS SDK for semantic adapters.
+
+The approved macOS semantic-indexing contract that previously lived in plan doc-8 is integrated here and in [doc-6](<../configuration/doc-6 - A2A-LAB-configuration-file.md>); TASK-89 remains authoritative for the example JSON.
 
 ## Commands and output
 
@@ -200,7 +292,7 @@ The server type is `OpentronsOt2` and the default server name is `opentrons-ot2`
 
 ## Startup and failure
 
-Serve rejects an empty external-camera description, a zero capture timeout, a zero image or video retention bound, and a zero or overflow-prone decoded-byte maximum before it contacts robot-server or binds a listener. It then prints the image and video lines, checks robot-server `/health`, and opens the image-history database before the other listeners. A corrupt retained row or a database that cannot be created fails startup. A failure is reported as `<dependency>: <cause>` and the process exits non-zero. Dependency names include `opentrons robot-server at <url>`, `images`, `videos`, `conversation store at <path>`, `sila`, `mcp at http://127.0.0.1:31001/mcp`, `<provider> model <id>`, `oidc`, and `a2a at http://127.0.0.1:31000`.
+Serve rejects an empty external-camera description, a zero capture timeout, a zero image or video retention bound, and a zero or overflow-prone decoded-byte maximum before it contacts robot-server or binds a listener. It then prints the image and video lines, checks robot-server `/health`, and opens the image-history database before the other listeners. A corrupt retained row or a database that cannot be created fails startup. With `A2ALAB_SEMANTIC_INDEXING_LIVE=true`, semantic worker startup validates Bedrock description and embedding configuration and AWS prerequisites before capture indexing runs; missing region, credentials, or invalid model or vector-space settings surface as `videos` or provider-unavailable messages containing the guidance in the semantic troubleshooting table above. A failure is reported as `<dependency>: <cause>` and the process exits non-zero. Dependency names include `opentrons robot-server at <url>`, `images`, `videos`, `conversation store at <path>`, `sila`, `mcp at http://127.0.0.1:31001/mcp`, `<provider> model <id>`, `oidc`, and `a2a at http://127.0.0.1:31000`.
 
 Startup still succeeds when a configured camera is missing, disabled, busy, or unsupported. `opentrons-camera` stays listed. `external-camera` stays listed only when a device was configured. Only a capture of the failing source returns an error. Those errors name the source or device: missing and permission denied and busy and timeout are unavailable; a disabled camera, a malformed frame, and an oversized frame are invalid. With `--v4l2-device /dev/video4`, the image line names `external-camera device /dev/video4` and the effective description instead of `external-camera off`.
 

@@ -7,6 +7,7 @@ use a2a_lab_dev_kit::{
     FakeTextEmbeddingProvider, SemanticIndexingConfig, SemanticStreamSchedule,
 };
 
+use super::bedrock::{ensure_live_bedrock_description, ensure_live_bedrock_ready};
 use super::bundle::SemanticIndexingProviders;
 use super::config::{
     description_provider_config, description_provider_config_for_model, embedding_provider_config,
@@ -148,6 +149,9 @@ pub async fn build_live_providers<M: FrameDescriptionMedia + Send + Sync + 'stat
     let embedding_config = embedding_provider_config(embeddings)?;
     let description_limits = frame_description_limits(&semantic.limits);
     let embedding_limits = text_embedding_limits(&semantic.limits);
+    ensure_live_bedrock_ready(&description_config, &embedding_config)
+        .await
+        .map_err(map_indexing_failure)?;
     let description = LunaFrameDescriptionProvider::connect(
         description_config,
         description_limits,
@@ -185,6 +189,9 @@ pub async fn build_live_providers_for_source<M: FrameDescriptionMedia + Send + S
     })?;
     let embedding_config =
         embedding_provider_config_for_model(embeddings, schedule.embedding_model())?;
+    ensure_live_bedrock_ready(&description_config, &embedding_config)
+        .await
+        .map_err(map_indexing_failure)?;
     let description = LunaFrameDescriptionProvider::connect(
         description_config,
         frame_description_limits(&semantic.limits),
@@ -209,8 +216,12 @@ pub async fn build_live_description_provider<M: FrameDescriptionMedia + Send + S
     media: Arc<M>,
     model: Option<&str>,
 ) -> Result<LunaFrameDescriptionProvider<M>, a2a_lab_dev_kit::A2aLabError> {
+    let description_config = description_provider_config_for_model(&semantic.description, model)?;
+    ensure_live_bedrock_description(&description_config)
+        .await
+        .map_err(map_indexing_failure)?;
     LunaFrameDescriptionProvider::connect(
-        description_provider_config_for_model(&semantic.description, model)?,
+        description_config,
         frame_description_limits(&semantic.limits),
         media,
         semantic.description.credentials(),

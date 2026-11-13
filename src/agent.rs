@@ -154,11 +154,7 @@ impl RecordingServeAgentFactory {
 }
 
 pub(crate) fn bedrock_profile() -> String {
-    std::env::var("AWS_PROFILE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "default".to_owned())
+    crate::videos::semantic_indexing::bedrock_profile()
 }
 
 async fn bedrock_client(profile: &str) -> BedrockClient {
@@ -171,11 +167,7 @@ async fn bedrock_client(profile: &str) -> BedrockClient {
 }
 
 pub(crate) fn bedrock_region() -> Option<String> {
-    std::env::var("AWS_REGION")
-        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+    crate::videos::semantic_indexing::bedrock_region_override()
 }
 
 /// Rig agent that calls the lab MCP server and stores each A2A context in SQLite.

@@ -1,9 +1,14 @@
-//! Devkit DVR store boundary for OT2-1 (TASK-85).
+//! Devkit DVR store boundary for OT2-1 (TASK-85) and shared-pool semantic persistence (TASK-93).
 
 use a2a_lab_dev_kit::{
-    DvrFrameAtRequest, DvrMediaPayload, DvrMediaStore, MemoryVideos, VideoSourceId,
+    DvrFrameAtRequest, DvrMediaPayload, DvrMediaStore, EmbeddingMetric, FrameDescriptionProvenance,
+    FrameEmbeddingVector, MemoryVideos, ModelSpaceIdentity, ProvenanceGeneration, Sha256Digest,
+    TextEmbeddingProvenance, VectorNormalization, VideoSourceId,
 };
 use a2a_lab_ot2::IndexedVideoDvr;
+use a2a_lab_ot2::videos::dvr::{
+    IndexingCheckpoint, ListManifestFramesRequest, ManifestPageRequest,
+};
 
 fn temp_root(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -65,5 +70,114 @@ async fn chunk_media_survives_reopen_and_semantic_jobs_follow() {
         DvrMediaPayload::MjpegFrame(bytes) if bytes == &jpeg()
     ));
     assert_eq!(store.count_indexing_jobs().await.unwrap(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn sample_description(text: &str) -> FrameDescriptionProvenance {
+    FrameDescriptionProvenance::new(
+        "bedrock",
+        "global.openai.gpt-5.6-luna",
+        Sha256Digest::hash_bytes(b"prompt-v1"),
+        Sha256Digest::hash_bytes(b"preprocess-v1"),
+        None,
+        Sha256Digest::hash_bytes(text.as_bytes()),
+        ProvenanceGeneration::new(1).unwrap(),
+    )
+    .unwrap()
+}
+
+fn sample_embedding(text: &str) -> TextEmbeddingProvenance {
+    TextEmbeddingProvenance::new(
+        "bedrock",
+        "text-embed-v1",
+        4,
+        VectorNormalization::L2Unit,
+        EmbeddingMetric::Cosine,
+        ProvenanceGeneration::new(1).unwrap(),
+        Sha256Digest::hash_bytes(text.as_bytes()),
+    )
+    .unwrap()
+}
+
+fn sample_model_space() -> ModelSpaceIdentity {
+    ModelSpaceIdentity::new(
+        "bedrock",
+        "text-embed-v1",
+        4,
+        VectorNormalization::L2Unit,
+        EmbeddingMetric::Cosine,
+        ProvenanceGeneration::new(1).unwrap(),
+    )
+    .unwrap()
+}
+
+fn sample_vector() -> FrameEmbeddingVector {
+    FrameEmbeddingVector::new(vec![0.6, 0.0, 0.8, 0.0], 4).unwrap()
+}
+
+#[tokio::test]
+async fn semantic_migrations_idempotent_through_repeated_reopen() {
+    let dir = temp_root("migrate-idempotent");
+    let _ = std::fs::remove_dir_all(&dir);
+    let source = VideoSourceId::new("camera").unwrap();
+    let capture = a2a_lab_ot2::time::now().unwrap();
+    let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
+    let text = "plate centered";
+    let vector = sample_vector();
+    let frame_id = {
+        let store = IndexedVideoDvr::open(&dir, 86_400).await.unwrap();
+        store
+            .append_mjpeg_frame(&source, capture, 1_000_000, &jpeg())
+            .await
+            .unwrap();
+        let request = ListManifestFramesRequest::new(
+            source.clone(),
+            track.clone(),
+            None,
+            true,
+            ManifestPageRequest::new(None, 4).unwrap(),
+        )
+        .unwrap();
+        let page = store.list_manifest_frames(&request).await.unwrap();
+        let frame = page.items()[0].frame().clone();
+        let frame_id = frame.frame_id().as_str().to_owned();
+        store
+            .upsert_frame_description(&frame, text, &sample_description(text))
+            .await
+            .unwrap();
+        store
+            .upsert_frame_embedding(
+                &frame,
+                &sample_model_space(),
+                &sample_embedding(text),
+                &vector,
+                IndexingCheckpoint::Ready,
+            )
+            .await
+            .unwrap();
+        frame_id
+    };
+    for _ in 0..2 {
+        let store = IndexedVideoDvr::open(&dir, 86_400).await.unwrap();
+        let priority_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('semantic_indexing_jobs')
+             WHERE name = 'enqueue_priority'",
+        )
+        .fetch_one(store.sqlite_pool())
+        .await
+        .unwrap();
+        assert_eq!(priority_exists, 1);
+        let generation_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('semantic_embedding_config_identity')
+             WHERE name = 'model_space_generation'",
+        )
+        .fetch_one(store.sqlite_pool())
+        .await
+        .unwrap();
+        assert_eq!(generation_exists, 1);
+        let record = store.get_manifest_frame(&frame_id).await.unwrap();
+        assert_eq!(record.embedding().and_then(|e| e.vector()), Some(&vector));
+        assert_eq!(store.count_indexing_jobs().await.unwrap(), 1);
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

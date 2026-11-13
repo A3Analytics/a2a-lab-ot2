@@ -11,27 +11,33 @@ use a2a_lab_dev_kit::videos::{
 };
 use base64::Engine;
 use rig::bedrock::client::Client as BedrockClient;
-use rig::bedrock::completion::CompletionModel as BedrockCompletionModel;
 use rig::client::{CompletionClient, ProviderClient};
 use rig::completion::{AssistantContent, CompletionModel, CompletionRequest, Message};
 use rig::message::{DocumentSourceKind, Image, ImageMediaType, UserContent};
 use rig::providers::openai::Client as OpenAiClient;
 use tokio::time::timeout;
 
+use super::bedrock::{load_bedrock_sdk_config, map_bedrock_invoke_failure};
 use super::credentials::{credential_env_configured, redacted_credential_env};
 use super::media::FrameDescriptionMedia;
 use super::prompt::DESCRIPTION_PROMPT;
-use crate::agent::{bedrock_profile, bedrock_region};
 
 enum LunaCompletionModel {
-    Bedrock(BedrockCompletionModel),
+    Bedrock {
+        sdk: Box<aws_config::SdkConfig>,
+        model: String,
+    },
     OpenAi(<OpenAiClient as CompletionClient>::CompletionModel),
 }
 
 impl LunaCompletionModel {
     async fn describe_jpeg(&self, jpeg: Vec<u8>) -> Result<String, SemanticIndexingFailure> {
         match self {
-            Self::Bedrock(model) => describe_with_model(model, jpeg).await,
+            Self::Bedrock { sdk, model } => {
+                let client = bedrock_client(sdk);
+                let completion = client.completion_model(model);
+                describe_with_model(&completion, jpeg).await
+            }
             Self::OpenAi(model) => describe_with_model(model, jpeg).await,
         }
     }
@@ -85,11 +91,11 @@ async fn build_completion_model(
 ) -> Result<LunaCompletionModel, SemanticIndexingFailure> {
     match config.backend() {
         FrameDescriptionBackend::Bedrock => {
-            let profile = bedrock_profile();
-            let client = bedrock_client(&profile).await;
-            Ok(LunaCompletionModel::Bedrock(
-                client.completion_model(config.model()),
-            ))
+            let sdk = load_bedrock_sdk_config().await?;
+            Ok(LunaCompletionModel::Bedrock {
+                sdk: Box::new(sdk),
+                model: config.model().to_owned(),
+            })
         }
         FrameDescriptionBackend::Openai => {
             let client = OpenAiClient::from_env().map_err(|error| {
@@ -106,13 +112,8 @@ async fn build_completion_model(
     }
 }
 
-async fn bedrock_client(profile: &str) -> BedrockClient {
-    let mut loader =
-        aws_config::defaults(aws_config::BehaviorVersion::latest()).profile_name(profile);
-    if let Some(region) = bedrock_region() {
-        loader = loader.region(aws_config::Region::new(region));
-    }
-    aws_sdk_bedrockruntime::Client::new(&loader.load().await).into()
+fn bedrock_client(config: &aws_config::SdkConfig) -> BedrockClient {
+    aws_sdk_bedrockruntime::Client::new(config).into()
 }
 
 impl<M: FrameDescriptionMedia + Send + Sync + 'static> FrameDescriptionProvider
@@ -232,9 +233,7 @@ fn encoded_jpeg_image(jpeg: &[u8]) -> Image {
 }
 
 fn map_completion_error(error: &rig::completion::CompletionError) -> SemanticIndexingFailure {
-    SemanticIndexingFailure::ProviderUnavailable {
-        message: error.to_string(),
-    }
+    map_bedrock_invoke_failure(&error.to_string())
 }
 
 #[cfg(test)]

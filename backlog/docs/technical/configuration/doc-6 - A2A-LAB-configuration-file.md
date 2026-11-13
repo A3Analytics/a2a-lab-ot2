@@ -70,7 +70,34 @@ Legacy `--external-camera-index`, `--camera-index`, and matching environment var
 
 Still images for file-configured video sources use the runtime `still_cache` when the source is enabled on `serve`; the separate `opentrons-camera` image history path is unchanged. OT-2 onboard robot pictures and Orbbec frame sets are not `videos.sources` entries.
 
+Each configured `videos.sources` entry is also listed as a native image source. While `serve` runs, retained DVR frames from those sources are eligible for semantic indexing when the file includes a v2 `semantic_indexing` block (see below). That path is independent from `opentrons-camera`, which is always advertised for robot still capture, is not a `videos.sources` entry, does not record declarative DVR, and carries no semantic indexing identity.
+
+### macOS built-in camera example
+
+The local credential-free sample `.mise/examples/local.json` supports bench use on macOS. It sets `schema_version` to `2`, selects the built-in camera with `camera_id` (for example `0`) and `format: "auto"`, and pairs that source with Bedrock description and embedding providers under `semantic_indexing`. The `auto` format lets the declarative runtime negotiate MJPEG or YUY2 at the configured width, height, and `capture_rate`, matching other native sources.
+
+```bash
+export A2ALAB_CONFIG="$PWD/.mise/examples/local.json"
+mise run a2a-lab-ot2 -- config validate
+```
+
+`config validate` succeeds without opening the camera and without AWS credentials because live Bedrock adapters are opt-in (see [doc-3](<../cli/doc-3 - a2a-lab-ot2-command-and-configuration-reference.md>)). Omitted `videos.dvr.retention` keeps the default indexed disk retention of three days (`259200` seconds).
+
 While `serve` runs, A2A exposes the runtime capture-settings document through `A2aServer::with_capture_settings` (same settings surface as the devkit web UI capture view). Changing capture parameters follows the devkit settings-watch contract; edits are not written back to the JSON file.
+
+## Semantic indexing (`schema_version` 2)
+
+A `semantic_indexing` object is valid only when `schema_version` is `2`. It configures Luna frame descriptions, optional text embeddings, Jev frame decisions, per-source schedules (derived from `videos.sources`), and storage paths such as `semantic_indexing.limits.storage.vector_index_path`. Semantic providers are independent from `chat`; a file may use OpenAI for chat and Bedrock for indexing.
+
+The file has no secret fields. Bedrock credentials and regions are supplied through the AWS SDK environment and shared profile chain (`AWS_PROFILE`, `AWS_REGION` or `AWS_DEFAULT_REGION`), not through JSON keys. Set `A2ALAB_SEMANTIC_INDEXING_LIVE=true` before `serve` to select live Bedrock adapters; when the variable is unset or false, deterministic providers are used so local validation, `config validate`, and tests run without AWS access.
+
+Before live search, verify that the configured values are mutually compatible:
+
+- `semantic_indexing.description.model` is a Bedrock model id that supports image input in your account and region.
+- `semantic_indexing.embeddings.model` is an enabled Bedrock embedding model id.
+- `semantic_indexing.embeddings.space` (`dimensions`, `normalization`, `metric`, and `generation`) matches the vector space produced by that embedding model. Search requests must use the same model space as `get_semantic_search_capabilities` reports; a mismatch returns `provenance.model_space does not match the configured semantic embedding model space`.
+
+Operator commands for launch, AWS resolution, semantic search, and troubleshooting live in [doc-3](<../cli/doc-3 - a2a-lab-ot2-command-and-configuration-reference.md>). The macOS Bedrock indexing contract from the retired plan doc-8 is preserved there and in this section alongside the TASK-89 example file.
 
 ## Chat
 
@@ -109,4 +136,4 @@ mise run agent-run
 
 ## Out of scope
 
-This version does not do semantic indexing, network or file video ingestion, or hot reload. It has no secret fields. Unknown keys, including `semantic_indexing`, fail validation.
+This guide does not cover network or file video ingestion or hot reload. It has no secret fields. Unknown keys fail validation; v2 files accept `semantic_indexing` when `schema_version` is `2`.

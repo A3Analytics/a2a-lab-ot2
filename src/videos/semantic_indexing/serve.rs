@@ -7,6 +7,7 @@ use a2a_lab_dev_kit::{
     A2aLabError, DecisionEvaluationCoverage, SemanticIndexingConfig, SemanticVideoSearchProvider,
 };
 
+use super::bedrock::live_semantic_indexing_enabled;
 use super::factory::{
     build_deterministic_description_provider, build_deterministic_providers,
     build_deterministic_providers_for_source, build_deterministic_search_embedder,
@@ -139,7 +140,7 @@ async fn prepare_annotation_lane_worker(
     faults: Arc<IndexingWorkerFaults>,
 ) -> Result<AnyIndexingAnnotationWorker, A2aLabError> {
     if semantic.embeddings.is_none() {
-        if force_deterministic || !live_indexing_enabled() {
+        if force_deterministic || !live_semantic_indexing_enabled() {
             return build_description_only_deterministic_worker(
                 semantic, sources, worker_id, faults, lane,
             )
@@ -150,7 +151,7 @@ async fn prepare_annotation_lane_worker(
                 .await?,
         )));
     }
-    if force_deterministic || !live_indexing_enabled() {
+    if force_deterministic || !live_semantic_indexing_enabled() {
         return build_deterministic_worker(semantic, sources, worker_id, faults, lane).await;
     }
     Ok(AnyIndexingAnnotationWorker::Live(Arc::new(
@@ -334,17 +335,12 @@ async fn build_live_worker(
     Ok(worker)
 }
 
-fn live_indexing_enabled() -> bool {
-    std::env::var("A2ALAB_SEMANTIC_INDEXING_LIVE")
-        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
-}
-
 async fn prepare_search_embedder(
     semantic: &SemanticIndexingConfig,
     dvr: &IndexedVideoDvr,
     force_deterministic: bool,
 ) -> Result<DvrSearchEmbedder, A2aLabError> {
-    if force_deterministic || !live_indexing_enabled() {
+    if force_deterministic || !live_semantic_indexing_enabled() {
         return build_deterministic_search_embedder(semantic).await;
     }
     let media = Arc::new(EvidenceJpegMedia::new(Arc::new(dvr.clone())));

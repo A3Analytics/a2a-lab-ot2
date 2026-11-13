@@ -1,5 +1,7 @@
 //! Hardware-free external vs webcam media contract matrix.
 
+#![allow(clippy::large_futures)]
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

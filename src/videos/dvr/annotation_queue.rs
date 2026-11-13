@@ -44,6 +44,12 @@ impl AnnotationQueueWorker {
             semantic: Arc::new(semantic),
         }
     }
+
+    /// Whether this lane uses live Luna/embedding adapters.
+    #[must_use]
+    pub fn uses_live_adapters(&self) -> bool {
+        self.inner.uses_live_adapters()
+    }
 }
 
 /// Live capture and historical backfill workers running on the same reconcile loop.

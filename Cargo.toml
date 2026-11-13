@@ -7,6 +7,10 @@ description = "Example lab agent wrapping an Opentrons OT-2 robot-server simulat
 publish = false
 default-run = "a2a-lab-ot2"
 
+[patch.crates-io]
+nokhwa-bindings-macos = { git = "https://github.com/l1npengfih/nokhwa", rev = "dd8f26a32de8b1fbe996b7ac870eacf22cad6593" }
+nokhwa-core = { git = "https://github.com/l1npengfih/nokhwa", rev = "dd8f26a32de8b1fbe996b7ac870eacf22cad6593" }
+
 [profile.dev.package.openh264]
 opt-level = 3
 
@@ -40,6 +44,7 @@ aws-config = { version = "1", default-features = false, features = [
     "rt-tokio",
     "sso",
 ] }
+aws-credential-types = { version = "1", default-features = false }
 aws-sdk-bedrockruntime = { version = "1", default-features = false, features = [
     "rt-tokio",
     "default-https-client",

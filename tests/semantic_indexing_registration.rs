@@ -117,7 +117,7 @@ async fn h264_commit_records_manifest_and_unique_job() {
 }
 
 #[tokio::test]
-async fn metadata_commit_fault_exposes_no_row_or_job() {
+async fn metadata_commit_fault_retains_media_without_semantic_orphans() {
     let (_dir, store) = open_store("meta-fault").await;
     let source = VideoSourceId::new("camera").unwrap();
     let capture = fresh_capture(0);
@@ -127,7 +127,7 @@ async fn metadata_commit_fault_exposes_no_row_or_job() {
         .await;
     assert!(result.is_err());
     assert_eq!(store.count_indexing_jobs().await.unwrap(), 0);
-    let count: i64 = sqlx::query_scalar(
+    let media_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM dvr_frames WHERE source_id = ?1 AND start_us = ?2",
     )
     .bind(source.as_str())
@@ -135,7 +135,19 @@ async fn metadata_commit_fault_exposes_no_row_or_job() {
     .fetch_one(store.sqlite_pool())
     .await
     .unwrap();
-    assert_eq!(count, 0);
+    assert_eq!(media_count, 1);
+    let manifest_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM semantic_frame_revisions")
+        .fetch_one(store.sqlite_pool())
+        .await
+        .unwrap();
+    assert_eq!(manifest_count, 0);
+    store.save_faults().set_fail_metadata_commit(false);
+    let report = store
+        .reconcile_indexing_jobs(&store_ns(), DEFAULT_RECONCILE_BATCH)
+        .await
+        .unwrap();
+    assert_eq!(report.jobs_created(), 1);
+    assert_eq!(store.count_indexing_jobs().await.unwrap(), 1);
 }
 
 #[tokio::test]

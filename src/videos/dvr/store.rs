@@ -7,9 +7,8 @@ use std::time::Duration;
 use a2a_lab_dev_kit::{
     A2aLabError, DvrCommittedFrame, DvrFrameAtRequest, DvrFrameAtResult, DvrMediaCoverage,
     DvrMediaPayload, DvrMediaSegment, DvrMediaStore, DvrMediaTrack, DvrPersistHook,
-    DvrRetentionBounds, DvrStoreNamespace, DvrTrackId, MemoryVideos, Page,
-    ReadDvrMediaWindowRequest, SavedFrameRef, SqliteChunkDvrStore, TimeRange, UtcTimestamp,
-    VideoCodec, VideoSourceId,
+    DvrRetentionBounds, DvrStoreNamespace, DvrTrackId, Page, ReadDvrMediaWindowRequest,
+    SavedFrameRef, SqliteChunkDvrStore, TimeRange, UtcTimestamp, VideoCodec, VideoSourceId,
 };
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteRow;
@@ -449,12 +448,10 @@ impl IndexedVideoDvr {
             .hook_error
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let track_id = MemoryVideos::mjpeg_track_id(source_id)?;
         self.chunk
             .append_mjpeg_frame(source_id, captured_at, frame_period_us, jpeg)
             .await?;
-        self.finish_append_or_rollback(source_id, &track_id, captured_at)
-            .await
+        self.propagate_hook_failure()
     }
 
     pub async fn append_h264_sample(
@@ -475,7 +472,6 @@ impl IndexedVideoDvr {
             .hook_error
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let track_id = DvrTrackId::new("h264")?;
         self.chunk
             .append_h264_sample(
                 source_id,
@@ -486,27 +482,15 @@ impl IndexedVideoDvr {
                 sample,
             )
             .await?;
-        self.finish_append_or_rollback(source_id, &track_id, captured_at)
-            .await
+        self.propagate_hook_failure()
     }
 
-    async fn finish_append_or_rollback(
-        &self,
-        source_id: &VideoSourceId,
-        track_id: &DvrTrackId,
-        captured_at: UtcTimestamp,
-    ) -> Result<(), A2aLabError> {
-        let Some(err) = self
-            .hook_error
+    fn propagate_hook_failure(&self) -> Result<(), A2aLabError> {
+        self.hook_error
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
-        else {
-            return Ok(());
-        };
-        self.delete_dvr_frame(source_id, track_id, captured_at)
-            .await?;
-        Err(err)
+            .map_or(Ok(()), Err)
     }
 
     pub(crate) async fn on_frame_committed(
@@ -558,25 +542,6 @@ impl IndexedVideoDvr {
             .await?;
         }
         tx.commit().await.map_err(db_error)?;
-        Ok(())
-    }
-
-    async fn delete_dvr_frame(
-        &self,
-        source_id: &VideoSourceId,
-        track_id: &DvrTrackId,
-        start: UtcTimestamp,
-    ) -> Result<(), A2aLabError> {
-        sqlx::query(
-            "DELETE FROM dvr_frames
-             WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3",
-        )
-        .bind(source_id.as_str())
-        .bind(track_id.as_str())
-        .bind(start.as_micros())
-        .execute(self.sqlite_pool())
-        .await
-        .map_err(db_error)?;
         Ok(())
     }
 

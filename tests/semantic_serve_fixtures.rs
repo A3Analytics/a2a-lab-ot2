@@ -292,7 +292,11 @@ async fn enabled_semantic_registers_capabilities_for_configured_source() {
 
 #[tokio::test]
 async fn enabled_semantic_advertises_local_bge_active_provenance() {
-    let caps = search_capabilities_for_config("local-bge", &semantic_document_local_bge()).await;
+    let caps = Box::pin(search_capabilities_for_config(
+        "local-bge",
+        &semantic_document_local_bge(),
+    ))
+    .await;
     let active = caps.active_provenance().expect("active provenance");
     assert_eq!(active.model_space().provider(), "local_bge");
     assert_eq!(active.model_space().model(), "BAAI/bge-small-en-v1.5");

@@ -27,6 +27,9 @@ fn example_configuration_files_validate_without_credentials() {
     assert!(combined.contains("\"sources\": []"));
     assert!(combined.contains("\"format\": \"yuyv\""));
     assert!(combined.contains("\"camera_id\""));
+    assert!(combined.contains("\"schema_version\": 2"));
+    assert!(combined.contains("\"provider\": \"bedrock\""));
+    assert!(combined.contains("\"format\": \"auto\""));
 
     for path in &paths {
         let output = Command::new(env!("CARGO_BIN_EXE_a2a-lab-ot2"))

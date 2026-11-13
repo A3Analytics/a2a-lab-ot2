@@ -15,18 +15,21 @@ use fastembed::{
     InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel,
 };
 use rig::bedrock::client::Client as BedrockClient;
-use rig::bedrock::embedding::EmbeddingModel as BedrockEmbeddingModel;
 use rig::client::{EmbeddingsClient, ProviderClient};
 use rig::embeddings::EmbeddingModel;
 use rig::providers::openai::Client as OpenAiClient;
 use rig::providers::openai::embedding::EmbeddingModel as OpenAiEmbeddingModel;
 use tokio::time::timeout;
 
+use super::bedrock::{load_bedrock_sdk_config, map_bedrock_invoke_failure};
 use super::credentials::{credential_env_configured, redacted_credential_env};
-use crate::agent::{bedrock_profile, bedrock_region};
 
 enum TextEmbeddingBackend {
-    Bedrock(BedrockEmbeddingModel),
+    Bedrock {
+        sdk: Box<aws_config::SdkConfig>,
+        model: String,
+        dims: usize,
+    },
     OpenAi(OpenAiEmbeddingModel),
     LocalBge(Box<Mutex<TextEmbedding>>),
 }
@@ -34,7 +37,11 @@ enum TextEmbeddingBackend {
 impl TextEmbeddingBackend {
     async fn embed_one(&self, text: &str) -> Result<Vec<f32>, SemanticIndexingFailure> {
         match self {
-            Self::Bedrock(model) => embed_rig_texts(model, text).await,
+            Self::Bedrock { sdk, model, dims } => {
+                let client = bedrock_client(sdk);
+                let embedding = client.embedding_model_with_ndims(model, *dims);
+                embed_rig_texts(&embedding, text).await
+            }
             Self::OpenAi(model) => embed_rig_texts(model, text).await,
             Self::LocalBge(model) => {
                 let mut model =
@@ -103,12 +110,13 @@ async fn build_embedding_backend(
 ) -> Result<TextEmbeddingBackend, SemanticIndexingFailure> {
     let provider = config.provider();
     if provider.eq_ignore_ascii_case("bedrock") {
-        let profile = bedrock_profile();
-        let client = bedrock_client(&profile).await;
+        let sdk = load_bedrock_sdk_config().await?;
         let dims = usize::try_from(config.model_space().dimensions()).unwrap_or(0);
-        return Ok(TextEmbeddingBackend::Bedrock(
-            client.embedding_model_with_ndims(config.model(), dims),
-        ));
+        return Ok(TextEmbeddingBackend::Bedrock {
+            sdk: Box::new(sdk),
+            model: config.model().to_owned(),
+            dims,
+        });
     }
     if provider.eq_ignore_ascii_case("openai") {
         let client = OpenAiClient::from_env().map_err(|error| {
@@ -199,13 +207,8 @@ fn first_existing<const N: usize>(
         })
 }
 
-async fn bedrock_client(profile: &str) -> BedrockClient {
-    let mut loader =
-        aws_config::defaults(aws_config::BehaviorVersion::latest()).profile_name(profile);
-    if let Some(region) = bedrock_region() {
-        loader = loader.region(aws_config::Region::new(region));
-    }
-    aws_sdk_bedrockruntime::Client::new(&loader.load().await).into()
+fn bedrock_client(config: &aws_config::SdkConfig) -> BedrockClient {
+    aws_sdk_bedrockruntime::Client::new(config).into()
 }
 
 impl TextEmbeddingProvider for ConfiguredTextEmbeddingProvider {
@@ -262,9 +265,7 @@ async fn embed_rig_texts<M: EmbeddingModel>(
     let embeddings = model
         .embed_texts([text.to_owned()])
         .await
-        .map_err(|error| SemanticIndexingFailure::ProviderUnavailable {
-            message: error.to_string(),
-        })?;
+        .map_err(|error| map_bedrock_invoke_failure(&error.to_string()))?;
     let Some(first) = embeddings.first() else {
         return Err(SemanticIndexingFailure::PartialResponse {
             message: "embedding provider returned no vectors".to_owned(),

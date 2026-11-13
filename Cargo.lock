@@ -107,6 +107,7 @@ dependencies = [
  "a2a-lab-dev-kit",
  "async-trait",
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-bedrockruntime",
  "axum",
  "base64 0.22.1",
@@ -3297,8 +3298,7 @@ dependencies = [
 [[package]]
 name = "nokhwa-bindings-macos"
 version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f70d3908ea68324e44a6b3a0f885aa59e433fb1f6678839d09e0df7d226fb42d"
+source = "git+https://github.com/l1npengfih/nokhwa?rev=dd8f26a32de8b1fbe996b7ac870eacf22cad6593#dd8f26a32de8b1fbe996b7ac870eacf22cad6593"
 dependencies = [
  "block",
  "cocoa-foundation",
@@ -3325,8 +3325,7 @@ dependencies = [
 [[package]]
 name = "nokhwa-core"
 version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1cba20bebd3bd9ae22f9273ade5bbe49da3e047c8512b53fbaf8b4b9c80d496"
+source = "git+https://github.com/l1npengfih/nokhwa?rev=dd8f26a32de8b1fbe996b7ac870eacf22cad6593#dd8f26a32de8b1fbe996b7ac870eacf22cad6593"
 dependencies = [
  "bytes",
  "image",

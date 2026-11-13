@@ -108,6 +108,12 @@ pub enum AnyIndexingAnnotationWorker {
 }
 
 impl AnyIndexingAnnotationWorker {
+    /// Whether indexing uses live Luna/embedding adapters instead of fakes.
+    #[must_use]
+    pub fn uses_live_adapters(&self) -> bool {
+        matches!(self, Self::Live(_) | Self::LiveDescriptionOnly(_))
+    }
+
     /// Runs one bounded worker pass for the configured provider pair.
     pub async fn run_batch(
         &self,

@@ -20,6 +20,12 @@ pub enum DvrSearchEmbedder {
 }
 
 impl DvrSearchEmbedder {
+    /// Whether semantic search uses live configured adapters instead of fakes.
+    #[must_use]
+    pub fn uses_live_adapters(&self) -> bool {
+        matches!(self, Self::Live(_))
+    }
+
     /// Active provider configuration and model space.
     #[must_use]
     pub fn config(&self) -> &TextEmbeddingProviderConfig {

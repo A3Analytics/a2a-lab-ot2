@@ -1,5 +1,6 @@
 //! Luna frame-description and text-embedding adapters (retrieval metadata only).
 
+mod bedrock;
 mod bundle;
 mod config;
 mod credentials;
@@ -13,6 +14,11 @@ mod prompt;
 mod serve;
 mod smoke;
 
+pub use bedrock::{
+    bedrock_profile, bedrock_region_override, ensure_live_bedrock_description,
+    ensure_live_bedrock_ready, live_semantic_indexing_enabled, load_bedrock_sdk_config,
+    map_bedrock_invoke_failure,
+};
 pub use bundle::SemanticIndexingProviders;
 pub use config::{
     DEFAULT_LOCAL_BGE_MODEL, default_open_luna_description_provider,
@@ -26,8 +32,8 @@ pub use embedding::ConfiguredTextEmbeddingProvider;
 pub use factory::{SemanticIndexingAdapterMode, build_semantic_indexing_providers};
 pub use factory::{
     build_deterministic_description_provider, build_deterministic_providers,
-    build_deterministic_providers_for_source, build_live_description_provider,
-    build_live_providers_for_source,
+    build_deterministic_providers_for_source, build_deterministic_search_embedder,
+    build_live_description_provider, build_live_providers, build_live_providers_for_source,
 };
 pub use jev::{
     EvidenceJpegDecisionMedia, InjectedJevDecisionMedia, JevDecisionMedia, JevHttpClient,
