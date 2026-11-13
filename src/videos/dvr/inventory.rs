@@ -30,7 +30,7 @@ impl IndexedVideoDvr {
     pub async fn list_indexed_source_ids(&self) -> Result<Vec<VideoSourceId>, A2aLabError> {
         let labels: Vec<String> =
             sqlx::query_scalar("SELECT source_id FROM dvr_tracks ORDER BY source_id")
-                .fetch_all(self.sqlite_pool())
+                .fetch_all(self.media_pool())
                 .await
                 .map_err(super::store::db_error)?;
         labels.into_iter().map(VideoSourceId::new).collect()
@@ -61,7 +61,7 @@ impl IndexedVideoDvr {
              GROUP BY s.track_id, t.codec",
         )
         .bind(source_id.as_str())
-        .fetch_all(self.sqlite_pool())
+        .fetch_all(self.media_pool())
         .await
         .map_err(super::store::db_error)?;
         let mut out = Vec::new();

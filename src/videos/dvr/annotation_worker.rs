@@ -8,9 +8,9 @@ use crate::videos::semantic_indexing::EvidenceJpegMedia;
 use crate::videos::semantic_indexing::LunaFrameDescriptionProvider;
 use a2a_lab_dev_kit::{
     A2aLabError, FakeFrameDescriptionProvider, FakeTextEmbeddingProvider, FrameDescriptionProvider,
-    FrameDescriptionRequest, ProvenanceGeneration, SemanticIndexingConfig, SemanticIndexingFailure,
-    SemanticWorkerLimits, TextEmbeddingKey, TextEmbeddingProvider, TextEmbeddingRequest,
-    validate_description_batch, validate_embedding_batch,
+    FrameDescriptionRequest, KeyedFrameDescription, ProvenanceGeneration, SemanticIndexingConfig,
+    SemanticIndexingFailure, SemanticWorkerLimits, TextEmbeddingKey, TextEmbeddingProvider,
+    TextEmbeddingRequest, validate_description_batch, validate_embedding_batch,
 };
 
 use super::frame_manifest::{
@@ -18,6 +18,7 @@ use super::frame_manifest::{
 };
 use super::indexing_job_store::{IndexingJobRecord, IndexingJobState};
 use super::indexing_registration::{DEFAULT_RECONCILE_BATCH, IndexingWorkerLane};
+use super::stage_batch::{provider_batch_limit, schedule_indexing_retry};
 use super::store::IndexedVideoDvr;
 use super::worker_faults::IndexingWorkerFaults;
 use crate::videos::semantic_indexing::{SemanticIndexingProviders, build_deterministic_providers};
@@ -73,6 +74,35 @@ impl IndexingWorkerBatchReport {
     pub const fn lane(&self) -> IndexingWorkerLane {
         self.lane
     }
+
+    pub(crate) fn record_description_committed(&mut self) {
+        self.descriptions_committed = self.descriptions_committed.saturating_add(1);
+    }
+
+    pub(crate) fn record_embedding_committed(&mut self) {
+        self.embeddings_committed = self.embeddings_committed.saturating_add(1);
+    }
+
+    pub(crate) fn record_failure(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+    }
+
+    pub(crate) fn after_claim(
+        reclaimed_leases: u32,
+        claimed: u32,
+        backlog_over_limit: bool,
+        lane: IndexingWorkerLane,
+    ) -> Self {
+        Self {
+            reclaimed_leases,
+            claimed,
+            descriptions_committed: 0,
+            embeddings_committed: 0,
+            failures: 0,
+            backlog_over_limit,
+            lane,
+        }
+    }
 }
 
 /// Deterministic retrieval-only providers plus limits for one DVR worker loop.
@@ -105,13 +135,18 @@ pub enum AnyIndexingAnnotationWorker {
     Live(Arc<LiveIndexingWorker>),
     DeterministicDescriptionOnly(Arc<DeterministicDescriptionOnlyWorker>),
     LiveDescriptionOnly(Arc<LiveDescriptionOnlyWorker>),
+    DeterministicEmbeddingOnly(Arc<super::embedding_worker::DeterministicEmbeddingOnlyWorker>),
+    LiveEmbeddingOnly(Arc<super::embedding_worker::LiveEmbeddingOnlyWorker>),
 }
 
 impl AnyIndexingAnnotationWorker {
     /// Whether indexing uses live Luna/embedding adapters instead of fakes.
     #[must_use]
     pub fn uses_live_adapters(&self) -> bool {
-        matches!(self, Self::Live(_) | Self::LiveDescriptionOnly(_))
+        matches!(
+            self,
+            Self::Live(_) | Self::LiveDescriptionOnly(_) | Self::LiveEmbeddingOnly(_)
+        )
     }
 
     /// Runs one bounded worker pass for the configured provider pair.
@@ -127,6 +162,10 @@ impl AnyIndexingAnnotationWorker {
                 worker.as_ref().run_batch(dvr, semantic).await
             }
             Self::LiveDescriptionOnly(worker) => worker.as_ref().run_batch(dvr, semantic).await,
+            Self::DeterministicEmbeddingOnly(worker) => {
+                worker.as_ref().run_batch(dvr, semantic).await
+            }
+            Self::LiveEmbeddingOnly(worker) => worker.as_ref().run_batch(dvr, semantic).await,
         }
     }
 }
@@ -171,6 +210,13 @@ where
         self.source_providers.insert(source_id.into(), providers);
         self
     }
+}
+
+struct DescriptionWorkItem {
+    job: IndexingJobRecord,
+    manifest: SemanticFrameManifestRecord,
+    request: FrameDescriptionRequest,
+    source_id: String,
 }
 
 /// One bounded Luna-description pass with no embedding provider.
@@ -244,50 +290,67 @@ where
         let claimed = dvr
             .claim_indexing_jobs_for_lane(&self.worker_id, claim_batch, deadline, now_us, self.lane)
             .await?;
-        let mut report = IndexingWorkerBatchReport {
-            reclaimed_leases: reclaimed,
-            claimed: u32::try_from(claimed.len()).unwrap_or(u32::MAX),
-            backlog_over_limit: queue.backlog_over_limit,
-            lane: self.lane,
-            ..Default::default()
-        };
+        let mut report = IndexingWorkerBatchReport::after_claim(
+            reclaimed,
+            u32::try_from(claimed.len()).unwrap_or(u32::MAX),
+            queue.backlog_over_limit,
+            self.lane,
+        );
         let description_limits = frame_description_limits(&semantic.limits);
+        let batch_limit = provider_batch_limit(description_limits.max_batch_items());
         let concurrency = usize::try_from(self.limits.max_concurrency)
             .unwrap_or(1)
             .max(1);
         for chunk in claimed.chunks(concurrency) {
-            let outcomes = join_all(
-                chunk
-                    .iter()
-                    .map(|job| self.process_one(dvr, semantic, job, now_us, description_limits)),
-            )
-            .await;
-            for outcome in outcomes {
-                match outcome {
-                    Ok(committed) => {
-                        if committed {
-                            report.descriptions_committed =
-                                report.descriptions_committed.saturating_add(1);
-                        }
+            let mut work: Vec<DescriptionWorkItem> = Vec::new();
+            for job in chunk {
+                match self
+                    .prepare_description_work(dvr, semantic, job, now_us, description_limits)
+                    .await
+                {
+                    Ok(DescriptionPrep::IdempotentCommitted) => {
+                        report.record_description_committed();
                     }
+                    Ok(DescriptionPrep::Noop) => {}
+                    Ok(DescriptionPrep::Ready(item)) => work.push(*item),
                     Err(error) => {
                         eprintln!("description worker {}: {error}", self.worker_id);
-                        report.failures = report.failures.saturating_add(1);
+                        report.record_failure();
                     }
                 }
+            }
+            work.sort_by(|a, b| a.source_id.cmp(&b.source_id));
+            let mut start = 0usize;
+            while start < work.len() {
+                let mut end = start + 1;
+                while end < work.len() && work[end].source_id == work[start].source_id {
+                    end += 1;
+                }
+                let group = &work[start..end];
+                for batch in group.chunks(batch_limit) {
+                    self.execute_description_provider_batch(
+                        dvr,
+                        batch,
+                        now_us,
+                        description_limits,
+                        &mut report,
+                    )
+                    .await;
+                }
+                start = end;
             }
         }
         Ok(report)
     }
 
-    async fn process_one(
+    async fn prepare_description_work(
         &self,
         dvr: &IndexedVideoDvr,
         semantic: &SemanticIndexingConfig,
         job: &IndexingJobRecord,
         now_us: i64,
         limits: a2a_lab_dev_kit::FrameDescriptionLimits,
-    ) -> Result<bool, A2aLabError> {
+    ) -> Result<DescriptionPrep, A2aLabError> {
         let manifest = dvr.get_manifest_frame(job.frame_id()).await?;
         let frame = manifest.frame();
         if manifest.retained_state() != ManifestRetainedState::Retained
@@ -295,7 +358,7 @@ where
             || manifest.payload_status() != MediaPayloadStatus::Available
         {
             dvr.expire_indexing_job(job.job_id(), now_us).await?;
-            return Ok(false);
+            return Ok(DescriptionPrep::Noop);
         }
         let schedule = semantic.schedule_for(frame.source_id().as_str());
         if !dvr
@@ -310,7 +373,7 @@ where
         {
             dvr.release_indexing_job(job.job_id(), &self.worker_id)
                 .await?;
-            return Ok(false);
+            return Ok(DescriptionPrep::Noop);
         }
         if let Some(stored) = manifest.description() {
             let committed = dvr
@@ -322,7 +385,14 @@ where
                     now_us,
                 )
                 .await?;
-            return Ok(committed);
+            return if committed {
+                Ok(DescriptionPrep::IdempotentCommitted)
+            } else {
+                Err(A2aLabError::invalid(
+                    "indexing job",
+                    "stale worker lost idempotent description race",
+                ))
+            };
         }
         let generation = ProvenanceGeneration::new(1)
             .map_err(|error| A2aLabError::invalid("generation", error.to_string()))?;
@@ -334,36 +404,140 @@ where
             limits.max_pixels().min(640 * 480),
         )
         .map_err(map_indexing_failure)?;
-        let provider = self.provider_for(frame.source_id().as_str());
-        let responses = provider
-            .describe_frames(vec![request.clone()])
-            .await
-            .map_err(map_indexing_failure)?;
-        let validated =
-            validate_description_batch(limits, std::slice::from_ref(&request), &responses)
-                .map_err(map_indexing_failure)?;
-        let item = validated
-            .first()
-            .ok_or_else(|| A2aLabError::unavailable("empty description batch"))?;
-        if self.faults.crash_before_description_commit() {
-            return Err(A2aLabError::unavailable(
-                "injected crash before description commit",
-            ));
+        let source_id = frame.source_id().as_str().to_owned();
+        Ok(DescriptionPrep::Ready(Box::new(DescriptionWorkItem {
+            job: job.clone(),
+            manifest,
+            request,
+            source_id,
+        })))
+    }
+
+    async fn execute_description_provider_batch(
+        &self,
+        dvr: &IndexedVideoDvr,
+        batch: &[DescriptionWorkItem],
+        now_us: i64,
+        limits: a2a_lab_dev_kit::FrameDescriptionLimits,
+        report: &mut IndexingWorkerBatchReport,
+    ) {
+        if batch.is_empty() {
+            return;
         }
-        let provenance = item.to_provenance()?;
-        dvr.upsert_frame_description(frame, item.text(), &provenance)
+        let provider = self.provider_for(batch[0].source_id.as_str());
+        let requests: Vec<FrameDescriptionRequest> =
+            batch.iter().map(|item| item.request.clone()).collect();
+        let validated = match provider.describe_frames(requests.clone()).await {
+            Ok(responses) => match validate_description_batch(limits, &requests, &responses) {
+                Ok(validated) => validated,
+                Err(failure) => {
+                    for item in batch {
+                        let _ = schedule_indexing_retry(
+                            dvr,
+                            &self.worker_id,
+                            &item.job,
+                            &self.limits,
+                            &failure.to_string(),
+                            now_us,
+                        )
+                        .await;
+                        report.record_failure();
+                    }
+                    return;
+                }
+            },
+            Err(failure) => {
+                let message = failure.to_string();
+                for item in batch {
+                    let _ = schedule_indexing_retry(
+                        dvr,
+                        &self.worker_id,
+                        &item.job,
+                        &self.limits,
+                        &message,
+                        now_us,
+                    )
+                    .await;
+                    report.record_failure();
+                }
+                return;
+            }
+        };
+        if self.faults.crash_before_description_commit() {
+            for item in batch {
+                let _ = schedule_indexing_retry(
+                    dvr,
+                    &self.worker_id,
+                    &item.job,
+                    &self.limits,
+                    "injected crash before description commit",
+                    now_us,
+                )
+                .await;
+                report.record_failure();
+            }
+            return;
+        }
+        for (item, description) in batch.iter().zip(validated.iter()) {
+            match self
+                .commit_description(dvr, item, description, now_us)
+                .await
+            {
+                Ok(true) => report.record_description_committed(),
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("description worker {}: {error}", self.worker_id);
+                    let _ = schedule_indexing_retry(
+                        dvr,
+                        &self.worker_id,
+                        &item.job,
+                        &self.limits,
+                        &error.to_string(),
+                        now_us,
+                    )
+                    .await;
+                    report.record_failure();
+                }
+            }
+        }
+        if self.faults.crash_after_description_commit() {
+            report.record_failure();
+        }
+    }
+
+    async fn commit_description(
+        &self,
+        dvr: &IndexedVideoDvr,
+        item: &DescriptionWorkItem,
+        description: &KeyedFrameDescription,
+        now_us: i64,
+    ) -> Result<bool, A2aLabError> {
+        let provenance = description.to_provenance()?;
+        dvr.upsert_frame_description(item.manifest.frame(), description.text(), &provenance)
             .await?;
         let committed = dvr
             .complete_indexing_description_cas(
-                job.job_id(),
+                item.job.job_id(),
                 &self.worker_id,
-                job.revision_generation(),
+                item.job.revision_generation(),
                 provenance.generation().get(),
                 now_us,
             )
             .await?;
-        Ok(committed)
+        if !committed {
+            return Err(A2aLabError::invalid(
+                "indexing job",
+                "stale worker lost description completion race",
+            ));
+        }
+        Ok(true)
     }
+}
+
+enum DescriptionPrep {
+    Noop,
+    IdempotentCommitted,
+    Ready(Box<DescriptionWorkItem>),
 }
 
 impl DeterministicIndexingWorker {
@@ -841,6 +1015,6 @@ struct JobOutcome {
     embedding_committed: bool,
 }
 
-fn map_indexing_failure(failure: SemanticIndexingFailure) -> A2aLabError {
+pub(crate) fn map_indexing_failure(failure: SemanticIndexingFailure) -> A2aLabError {
     failure.into_lab_error()
 }

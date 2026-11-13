@@ -132,12 +132,12 @@ async fn metadata_commit_fault_retains_media_without_semantic_orphans() {
     )
     .bind(source.as_str())
     .bind(capture.as_micros())
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.media_pool())
     .await
     .unwrap();
     assert_eq!(media_count, 1);
     let manifest_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM semantic_frame_revisions")
-        .fetch_one(store.sqlite_pool())
+        .fetch_one(store.semantic_pool())
         .await
         .unwrap();
     assert_eq!(manifest_count, 0);
@@ -193,15 +193,15 @@ async fn reconcile_backfills_missing_manifest_and_job() {
         .await
         .unwrap();
     sqlx::query("DELETE FROM semantic_indexing_job_runtime")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     sqlx::query("DELETE FROM semantic_indexing_jobs")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     sqlx::query("DELETE FROM semantic_frame_revisions")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     assert_eq!(store.count_indexing_jobs().await.unwrap(), 0);
@@ -254,7 +254,7 @@ async fn reconcile_marks_corrupt_payload_explicitly() {
     sqlx::query("UPDATE dvr_frames SET payload_crc32 = 0 WHERE source_id = ?1 AND start_us = ?2")
         .bind(source.as_str())
         .bind(capture.as_micros())
-        .execute(store.sqlite_pool())
+        .execute(store.media_pool())
         .await
         .unwrap();
     let record = store.get_manifest_frame(&frame_id).await.unwrap();
@@ -278,15 +278,15 @@ async fn seed_retained_frames_missing_jobs(frame_count: usize) -> std::path::Pat
             .unwrap();
     }
     sqlx::query("DELETE FROM semantic_indexing_job_runtime")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     sqlx::query("DELETE FROM semantic_indexing_jobs")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     sqlx::query("DELETE FROM semantic_frame_revisions")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     assert_eq!(store.count_indexing_jobs().await.unwrap(), 0);

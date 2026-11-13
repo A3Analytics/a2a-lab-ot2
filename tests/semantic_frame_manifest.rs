@@ -371,14 +371,14 @@ async fn legacy_provenance_without_vector_blob_round_trips() {
     .bind(1_i64)
     .bind(1_i64)
     .bind(sample_embedding(text).source_text_hash().as_str())
-    .execute(store.sqlite_pool())
+    .execute(store.semantic_pool())
     .await
     .unwrap();
     sqlx::query(
         "UPDATE semantic_frame_revisions SET embedding_checkpoint = 'ready' WHERE frame_id = ?1",
     )
     .bind(frame.frame_id().as_str())
-    .execute(store.sqlite_pool())
+    .execute(store.semantic_pool())
     .await
     .unwrap();
     let record = store

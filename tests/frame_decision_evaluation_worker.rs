@@ -177,7 +177,7 @@ async fn worker_evaluates_all_three_predicates_without_luna() {
     let decisions: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM frame_decisions WHERE frame_id = ?1")
             .bind(&frame_id)
-            .fetch_one(store.sqlite_pool())
+            .fetch_one(store.semantic_pool())
             .await
             .unwrap();
     assert_eq!(decisions, 3);
@@ -435,13 +435,13 @@ async fn commit_replay_keeps_idempotent_append_after_crash() {
     sqlx::query(
         "UPDATE frame_decision_evaluation_job_runtime SET next_retry_at_us = 0, job_state = 'pending', lease_owner = NULL",
     )
-    .execute(store.sqlite_pool())
+    .execute(store.semantic_pool())
     .await
     .unwrap();
     worker.run_batch(&store, &semantic, &targets).await.unwrap();
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM frame_decisions WHERE frame_id = ?1")
         .bind(&frame_id)
-        .fetch_one(store.sqlite_pool())
+        .fetch_one(store.semantic_pool())
         .await
         .unwrap();
     assert_eq!(count, 1);
@@ -504,7 +504,7 @@ async fn distinct_jev_revisions_coexist_as_separate_jobs() {
         .unwrap();
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM frame_decisions WHERE frame_id = ?1")
         .bind(&frame_id)
-        .fetch_one(store.sqlite_pool())
+        .fetch_one(store.semantic_pool())
         .await
         .unwrap();
     assert_eq!(count, 1);
@@ -512,7 +512,7 @@ async fn distinct_jev_revisions_coexist_as_separate_jobs() {
         "SELECT COUNT(*) FROM frame_decision_evaluation_jobs WHERE frame_id = ?1",
     )
     .bind(&frame_id)
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(jobs, 2);
@@ -555,7 +555,7 @@ async fn partial_predicate_support_marks_unsupported_without_llm_fallback() {
     let unsupported: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM frame_decision_evaluation_job_runtime WHERE coverage = 'unsupported'",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert!(unsupported >= 2);

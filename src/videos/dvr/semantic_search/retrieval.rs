@@ -242,7 +242,7 @@ async fn playback_neighbors(
     .bind(scope_end)
     .bind(hit_us)
     .bind(i64::from(max_neighbors))
-    .fetch_all(dvr.sqlite_pool())
+    .fetch_all(dvr.semantic_pool())
     .await
     .map_err(crate::videos::dvr::store::db_error)?;
     let after = sqlx::query(
@@ -260,7 +260,7 @@ async fn playback_neighbors(
     .bind(scope_end)
     .bind(hit_us)
     .bind(i64::from(max_neighbors))
-    .fetch_all(dvr.sqlite_pool())
+    .fetch_all(dvr.semantic_pool())
     .await
     .map_err(crate::videos::dvr::store::db_error)?;
 

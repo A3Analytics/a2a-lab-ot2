@@ -11,6 +11,15 @@ default-run = "a2a-lab-ot2"
 nokhwa-bindings-macos = { git = "https://github.com/l1npengfih/nokhwa", rev = "dd8f26a32de8b1fbe996b7ac870eacf22cad6593" }
 nokhwa-core = { git = "https://github.com/l1npengfih/nokhwa", rev = "dd8f26a32de8b1fbe996b7ac870eacf22cad6593" }
 
+[patch."https://github.com/A3Analytics/a2a-lab-dev-kit-rs"]
+a2a-lab-dev-kit = { path = "../a2a-lab-dev-kit-rs", default-features = false, features = [
+    "sila2",
+    "web-ui",
+    "yuv",
+    "openh264",
+    "nokhwa",
+] }
+
 [profile.dev.package.openh264]
 opt-level = 3
 

@@ -338,7 +338,7 @@ impl IndexedVideoDvr {
         .bind(roi.map(|b| f64::from(b[3])))
         .bind(provenance.text_hash().as_str())
         .bind(i64::try_from(provenance.generation().get()).unwrap_or(i64::MAX))
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         self.set_description_checkpoint(frame.frame_id().as_str(), IndexingCheckpoint::Ready)
@@ -405,7 +405,7 @@ impl IndexedVideoDvr {
         .bind(i64::try_from(model_space.generation().get()).unwrap_or(i64::MAX))
         .bind(provenance.source_text_hash().as_str())
         .bind(blob)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         self.set_embedding_checkpoint(frame.frame_id().as_str(), checkpoint)
@@ -469,7 +469,7 @@ impl IndexedVideoDvr {
         .bind(metric_label(space.metric()))
         .bind(space_generation)
         .bind(fetch_limit)
-        .fetch_all(self.sqlite_pool())
+        .fetch_all(self.semantic_pool())
         .await
         .map_err(db_error)?;
         let scan_usize = usize::try_from(scan_limit).unwrap_or(usize::MAX);
@@ -524,7 +524,7 @@ impl IndexedVideoDvr {
         .bind(cursor_start)
         .bind(cursor_frame)
         .bind(limit + 1)
-        .fetch_all(self.sqlite_pool())
+        .fetch_all(self.semantic_pool())
         .await
         .map_err(db_error)?;
         let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
@@ -555,7 +555,7 @@ impl IndexedVideoDvr {
              FROM semantic_frame_revisions WHERE frame_id = ?1",
         )
         .bind(frame_id)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?;
         let Some(row) = row else {
@@ -578,7 +578,7 @@ impl IndexedVideoDvr {
         _policy: RegisterConflictPolicy,
     ) -> Result<RegisterManifestOutcome, A2aLabError> {
         let registered_at = crate::time::now()?;
-        let mut tx = self.sqlite_pool().begin().await.map_err(db_error)?;
+        let mut tx = self.semantic_pool().begin().await.map_err(db_error)?;
         let outcome = self
             .register_manifest_revision_tx(
                 &mut tx,
@@ -780,7 +780,7 @@ impl IndexedVideoDvr {
              FROM semantic_frame_descriptions WHERE frame_id = ?1",
         )
         .bind(frame_id)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?;
         let Some(row) = row else {
@@ -850,7 +850,7 @@ impl IndexedVideoDvr {
              FROM semantic_frame_embeddings WHERE frame_id = ?1",
         )
         .bind(frame_id)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?;
         let Some(row) = row else {
@@ -902,7 +902,7 @@ impl IndexedVideoDvr {
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM semantic_frame_revisions WHERE frame_id = ?1")
                 .bind(frame_id)
-                .fetch_one(self.sqlite_pool())
+                .fetch_one(self.semantic_pool())
                 .await
                 .map_err(db_error)?;
         if count == 0 {
@@ -921,7 +921,7 @@ impl IndexedVideoDvr {
         )
         .bind(frame_id)
         .bind(checkpoint_label(checkpoint))
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(())
@@ -937,7 +937,7 @@ impl IndexedVideoDvr {
         )
         .bind(frame_id)
         .bind(checkpoint_label(checkpoint))
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(())

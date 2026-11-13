@@ -72,12 +72,12 @@ A command-line value replaces the environment variable of the same option. The e
 | `--video-fps`                 | `A2ALAB_VIDEO_FPS`                 | `5`                                            | Live MJPEG frame rate for every enabled native video source. Zero is rejected.                                                                                                                                                                                  |
 | `--video-retention-secs`      | `A2ALAB_VIDEO_RETENTION_SECS`      | `5`                                            | In-memory live window per source (distinct from disk retention). Zero is rejected before listeners bind.                                                                                                                                                        |
 | `--video-disk-retention-secs` | `A2ALAB_VIDEO_DISK_RETENTION_SECS` | `259200` (three days)                          | Indexed DVR retention on disk. Zero is rejected before listeners bind.                                                                                                                                                                                          |
-| `--video-dvr-root`            | `A2ALAB_VIDEO_DVR_ROOT`            | `.a2a-lab-ot2/video-dvr`                       | Directory for DVR payloads and `index.sqlite`. An empty path is rejected before listeners bind.                                                                                                                                                                 |
-| `--camera-index`              | `A2ALAB_CAMERA_INDEX`              | off                                            | Enables source `camera`. The declarative runtime opens that V4L index for live H.264 and DVR; still images for that id are served from the runtime warm still cache when available.                                                                               |
+| `--video-dvr-root`            | `A2ALAB_VIDEO_DVR_ROOT`            | `.a2a-lab-ot2/video-dvr`                       | Directory for DVR payloads and media-only `index.sqlite`. Semantic jobs use `semantic_indexing.limits.storage.sqlite_path`. An empty path is rejected before listeners bind.                                                                                    |
+| `--camera-index`              | `A2ALAB_CAMERA_INDEX`              | off                                            | Enables source `camera`. The declarative runtime opens that V4L index for live H.264 and DVR; still images for that id are served from the runtime warm still cache when available.                                                                             |
 | `--frame-set-db`              | `A2ALAB_FRAME_SET_DB`              | `.a2a-lab-ot2/frame-sets.sqlite`               | SQLite catalog for frame-set tasks and UI metadata. The frame-set listener stays off unless a capture backend is attached.                                                                                                                                      |
 | `--frame-set-port`            | `A2ALAB_FRAME_SET_PORT`            | `31003`                                        | HTTP listener for frame-set tasks, channel bytes, and `/ot2/frame-sets/ui`.                                                                                                                                                                                     |
 | `--frame-set-retention`       | `A2ALAB_FRAME_SET_RETENTION`       | `32`                                           | Newest frame-set metadata rows kept per source in `--frame-set-db`.                                                                                                                                                                                             |
-| `--config`                    | `A2ALAB_CONFIG`                    | none                                           | Optional `a2a-lab.json` path. Relative paths resolve from the working directory. When set to a v2 file with `semantic_indexing`, serve wires DVR semantic workers and search. See [doc-6](<../configuration/doc-6 - A2A-LAB-configuration-file.md>).              |
+| `--config`                    | `A2ALAB_CONFIG`                    | none                                           | Optional `a2a-lab.json` path. Relative paths resolve from the working directory. When set to a v2 file with `semantic_indexing`, serve wires DVR semantic workers and search. See [doc-6](<../configuration/doc-6 - A2A-LAB-configuration-file.md>).            |
 | (semantic live gate)          | `A2ALAB_SEMANTIC_INDEXING_LIVE`    | off                                            | When `true`, `1`, or `yes`, semantic indexing and search use live Bedrock description and embedding adapters. Unset or any other value selects deterministic providers for credential-free local validation, `config validate`, and tests.                      |
 
 Live video is served through the devkit `DeclarativeVideoRuntime`. `serve` constructs one runtime from resolved `VideoConfig` (file or legacy flags), wires the DVR provider into A2A/MCP, attaches `A2aServer::with_capture_settings` for the runtime capture-settings handle, and serves configured stills from `runtime.still_cache()`. `--external-camera-index` and `--camera-index` still add `external-camera` and `camera` entries with MJPEG input mapped into the same declarative sources as `camera_id` in a configuration file. Clip and live playback bytes are served through `/media/video-clips/` and `/media/video-live/` on the A2A listener from the runtime provider (not a network A2A client back to this process). Shutdown stops capture workers and releases camera sessions through the runtime shutdown handle.
@@ -118,11 +118,11 @@ Recognized truthy values are `1`, `true`, and `yes` (case-sensitive trimming app
 
 Live semantic wiring resolves AWS settings as follows:
 
-| Variable | Role |
-| -------- | ---- |
-| `AWS_PROFILE` | Shared-credentials profile name; defaults to `default` when unset. |
-| `AWS_REGION` | Region override for Bedrock when set. |
-| `AWS_DEFAULT_REGION` | Used when `AWS_REGION` is unset. |
+| Variable             | Role                                                               |
+| -------------------- | ------------------------------------------------------------------ |
+| `AWS_PROFILE`        | Shared-credentials profile name; defaults to `default` when unset. |
+| `AWS_REGION`         | Region override for Bedrock when set.                              |
+| `AWS_DEFAULT_REGION` | Used when `AWS_REGION` is unset.                                   |
 
 Region must be configured through one of those variables or the active profile. Credentials must resolve through the standard SDK chain (shared config, environment variables, or credential processes). Nothing in the repository substitutes for operator-side AWS configuration.
 
@@ -176,17 +176,17 @@ Optional one-frame Bedrock smoke (not required for normal serve) is documented i
 
 ### Troubleshooting live semantic indexing
 
-| Symptom | Likely cause | What to do |
-| ------- | ------------- | ---------- |
-| Startup or worker error mentioning `AWS region is not configured` | Missing `AWS_REGION` / `AWS_DEFAULT_REGION` and no region on the profile | Set region env vars or add `region` to the `AWS_PROFILE` profile. |
-| `AWS credentials are unavailable for live Bedrock semantic indexing` | Profile missing or expired credentials | Fix `AWS_PROFILE`, refresh SSO or keys outside the repo; verify with the AWS CLI using the same profile. |
-| `Bedrock model access or authorization failed` or `AccessDenied` on invoke | Model not enabled or IAM lacks `bedrock:InvokeModel` | Enable the description and embedding model ids in the account region; extend IAM for the principal. |
-| `configured Bedrock description model is missing or empty` | Blank `semantic_indexing.description.model` | Set a Bedrock image-capable model id in the file. |
-| `configured Bedrock text embedding model is missing or empty` | Blank embedding model | Set `semantic_indexing.embeddings.model`. |
-| `configured Bedrock embedding vector space has invalid dimensions` | Zero or incompatible `space.dimensions` | Align dimensions with the embedding model output. |
-| Search returns `provenance.model_space does not match` | Client provenance stale or file changed after indexing | Read `active_provenance` from capabilities and re-index after model or space changes. |
-| Search scope error `source is outside configured semantic indexing scope` | Query targets a non-video source such as `opentrons-camera` | Query only ids from `videos.sources`. |
-| `semantic vector search is disabled` | File omits embeddings configuration | Add `semantic_indexing.embeddings` or use description-only mode expectations. |
+| Symptom                                                                    | Likely cause                                                             | What to do                                                                                               |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| Startup or worker error mentioning `AWS region is not configured`          | Missing `AWS_REGION` / `AWS_DEFAULT_REGION` and no region on the profile | Set region env vars or add `region` to the `AWS_PROFILE` profile.                                        |
+| `AWS credentials are unavailable for live Bedrock semantic indexing`       | Profile missing or expired credentials                                   | Fix `AWS_PROFILE`, refresh SSO or keys outside the repo; verify with the AWS CLI using the same profile. |
+| `Bedrock model access or authorization failed` or `AccessDenied` on invoke | Model not enabled or IAM lacks `bedrock:InvokeModel`                     | Enable the description and embedding model ids in the account region; extend IAM for the principal.      |
+| `configured Bedrock description model is missing or empty`                 | Blank `semantic_indexing.description.model`                              | Set a Bedrock image-capable model id in the file.                                                        |
+| `configured Bedrock text embedding model is missing or empty`              | Blank embedding model                                                    | Set `semantic_indexing.embeddings.model`.                                                                |
+| `configured Bedrock embedding vector space has invalid dimensions`         | Zero or incompatible `space.dimensions`                                  | Align dimensions with the embedding model output.                                                        |
+| Search returns `provenance.model_space does not match`                     | Client provenance stale or file changed after indexing                   | Read `active_provenance` from capabilities and re-index after model or space changes.                    |
+| Search scope error `source is outside configured semantic indexing scope`  | Query targets a non-video source such as `opentrons-camera`              | Query only ids from `videos.sources`.                                                                    |
+| `semantic vector search is disabled`                                       | File omits embeddings configuration                                      | Add `semantic_indexing.embeddings` or use description-only mode expectations.                            |
 
 Error text from live Bedrock failures is designed to omit secret values. Deterministic mode never invokes the AWS SDK for semantic adapters.
 

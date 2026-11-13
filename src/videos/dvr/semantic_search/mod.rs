@@ -229,7 +229,7 @@ impl DvrSemanticSearchProvider {
         .bind(source_id)
         .bind(start)
         .bind(end)
-        .fetch_one(self.dvr.sqlite_pool())
+        .fetch_one(self.dvr.semantic_pool())
         .await
         .map_err(db_error)?;
 

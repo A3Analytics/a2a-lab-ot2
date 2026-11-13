@@ -30,18 +30,34 @@ async fn devkit_schema_without_duplicate_ot2_media_migrations() {
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN
          ('dvr_frames', 'dvr_chunks', 'dvr_tracks', 'dvr_h264_epochs')",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.media_pool())
     .await
     .unwrap();
     assert_eq!(media_tables, 4);
+    let semantic_on_media: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN
+         ('semantic_frame_revisions', 'semantic_indexing_jobs', 'frame_decisions')",
+    )
+    .fetch_one(store.media_pool())
+    .await
+    .unwrap();
+    assert_eq!(semantic_on_media, 0);
     let semantic_tables: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN
          ('semantic_frame_revisions', 'semantic_indexing_jobs', 'frame_decisions')",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(semantic_tables, 3);
+    let mut held = store.semantic_pool().begin().await.unwrap();
+    sqlx::query("SELECT 1").execute(&mut *held).await.unwrap();
+    let media_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dvr_frames")
+        .fetch_one(store.media_pool())
+        .await
+        .unwrap();
+    assert_eq!(media_count, 0);
+    held.commit().await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -163,7 +179,7 @@ async fn semantic_migrations_idempotent_through_repeated_reopen() {
             "SELECT COUNT(*) FROM pragma_table_info('semantic_indexing_jobs')
              WHERE name = 'enqueue_priority'",
         )
-        .fetch_one(store.sqlite_pool())
+        .fetch_one(store.semantic_pool())
         .await
         .unwrap();
         assert_eq!(priority_exists, 1);
@@ -171,7 +187,7 @@ async fn semantic_migrations_idempotent_through_repeated_reopen() {
             "SELECT COUNT(*) FROM pragma_table_info('semantic_embedding_config_identity')
              WHERE name = 'model_space_generation'",
         )
-        .fetch_one(store.sqlite_pool())
+        .fetch_one(store.semantic_pool())
         .await
         .unwrap();
         assert_eq!(generation_exists, 1);

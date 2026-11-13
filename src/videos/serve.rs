@@ -234,6 +234,30 @@ pub async fn start_fixture_declarative_serve(
     dvr_save_interval_nanos: Option<u64>,
     injections: LiveVideoInjections,
 ) -> Result<DeclarativeVideoServe, A2aLabError> {
+    Box::pin(start_fixture_declarative_serve_inner(
+        sources,
+        fps,
+        live_retention_secs,
+        disk_retention_secs,
+        disk_root,
+        max_image_bytes,
+        dvr_save_interval_nanos,
+        injections,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_fixture_declarative_serve_inner(
+    sources: Vec<LiveVideoSourceDescriptor>,
+    fps: u32,
+    live_retention_secs: u64,
+    disk_retention_secs: u64,
+    disk_root: &Path,
+    max_image_bytes: u64,
+    dvr_save_interval_nanos: Option<u64>,
+    injections: LiveVideoInjections,
+) -> Result<DeclarativeVideoServe, A2aLabError> {
     let settings = ResolvedVideoSettings {
         sources,
         fps,

@@ -2,6 +2,7 @@
 
 mod bedrock;
 mod bundle;
+mod cohere;
 mod config;
 mod credentials;
 mod description;
@@ -20,6 +21,7 @@ pub use bedrock::{
     map_bedrock_invoke_failure,
 };
 pub use bundle::SemanticIndexingProviders;
+pub use cohere::{DEFAULT_COHERE_EMBED_DIMENSIONS, DEFAULT_COHERE_EMBED_MODEL, cohere_embed_texts};
 pub use config::{
     DEFAULT_LOCAL_BGE_MODEL, default_open_luna_description_provider,
     default_open_luna_embedding_provider, description_provider_config,

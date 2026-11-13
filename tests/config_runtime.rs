@@ -489,12 +489,12 @@ async fn restart_reuses_dvr_for_the_same_source_id() {
     let inputs = cli_file(path);
     let resolved = resolve_lab_config(&inputs).unwrap();
     let sample = RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(1280, 720));
-    let first = open_persist(&resolved.video, sample.clone()).await;
+    let first = Box::pin(open_persist(&resolved.video, sample.clone())).await;
     wait_for_live(&first.provider(), first.still_cache(), "persist").await;
     tokio::time::sleep(Duration::from_millis(800)).await;
     first.shutdown();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let second = open_persist(&resolved.video, sample).await;
+    let second = Box::pin(open_persist(&resolved.video, sample)).await;
     wait_for_live(&second.provider(), second.still_cache(), "persist").await;
     let listed = second
         .provider()

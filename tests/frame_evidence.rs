@@ -289,7 +289,7 @@ async fn unsupported_h265_reports_codec_failure() {
     sqlx::query("UPDATE dvr_tracks SET codec = 'h265' WHERE source_id = ?1 AND track_id = ?2")
         .bind(frame.source_id().as_str())
         .bind(frame.track_id().as_str())
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     let error = store

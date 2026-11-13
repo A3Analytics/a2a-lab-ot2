@@ -93,12 +93,18 @@ impl Drop for DeclarativeVideoServe {
 
 struct SemanticDvrReady {
     slot: Arc<OnceLock<IndexedVideoDvr>>,
+    semantic_sqlite: std::path::PathBuf,
 }
 
 #[async_trait]
 impl DvrReady for SemanticDvrReady {
     async fn on_dvr_opened(&self, store: &SqliteChunkDvrStore) -> Result<(), A2aLabError> {
-        IndexedVideoDvr::adopt_opened(store.clone(), Arc::clone(&self.slot)).await?;
+        IndexedVideoDvr::adopt_opened_at(
+            store.clone(),
+            Arc::clone(&self.slot),
+            &self.semantic_sqlite,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -112,10 +118,15 @@ async fn start_declarative_serve(
     semantic_injections: SemanticServeInjections,
 ) -> Result<DeclarativeVideoServe, A2aLabError> {
     let (hooks, store_slot) = IndexedVideoDvr::runtime_persist_hooks();
+    let semantic_sqlite = semantic.map_or_else(
+        || storage_root.join("semantic.sqlite"),
+        |settings| settings.sqlite_path.clone(),
+    );
     let mut runtime_config = VideoRuntimeConfig::new(video, storage_root)
         .with_hooks(hooks)
         .with_dvr_ready(Arc::new(SemanticDvrReady {
             slot: Arc::clone(&store_slot),
+            semantic_sqlite,
         }));
     runtime_config.max_frame_bytes = max_frame_bytes;
     let runtime =

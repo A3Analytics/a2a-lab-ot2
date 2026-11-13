@@ -115,7 +115,7 @@ async fn expired_lease_resumes_after_reclaim() {
     )
     .bind(expired_at)
     .bind(&job_id)
-    .execute(store.sqlite_pool())
+    .execute(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(updated.rows_affected(), 1);
@@ -163,7 +163,7 @@ async fn stale_worker_cannot_complete_newer_lease() {
         "UPDATE semantic_frame_revisions SET revision_seq = revision_seq + 1 WHERE frame_id = ?1",
     )
     .bind(&frame_id)
-    .execute(store.sqlite_pool())
+    .execute(store.semantic_pool())
     .await
     .unwrap();
     assert!(
@@ -197,7 +197,7 @@ async fn persisted_description_survives_embedding_outage() {
     faults.set_force_embedding_failure(false);
     sqlx::query("UPDATE semantic_indexing_job_runtime SET next_retry_at_us = 0 WHERE job_id = ?1")
         .bind(&job_id)
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     worker.run_batch(&store, &semantic).await.unwrap();
@@ -263,7 +263,7 @@ async fn crash_after_description_commit_reuses_text_idempotently() {
     let decisions: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM frame_decisions WHERE frame_id = ?1")
             .bind(&frame_id)
-            .fetch_one(store.sqlite_pool())
+            .fetch_one(store.semantic_pool())
             .await
             .unwrap();
     assert_eq!(decisions, 0);
@@ -361,7 +361,7 @@ async fn worker_processes_jobs_when_backlog_over_limit() {
          VALUES ('materialization_paused', 'true')
          ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value",
     )
-    .execute(store.sqlite_pool())
+    .execute(store.semantic_pool())
     .await
     .unwrap();
     let report = worker.run_batch(&store, &semantic).await.unwrap();
@@ -371,7 +371,7 @@ async fn worker_processes_jobs_when_backlog_over_limit() {
     let legacy: String = sqlx::query_scalar(
         "SELECT meta_value FROM semantic_indexing_worker_meta WHERE meta_key = 'materialization_paused'",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(legacy, "false");

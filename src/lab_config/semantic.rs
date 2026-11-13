@@ -14,6 +14,7 @@ use super::selected_config_path;
 pub struct ResolvedSemanticIndexing {
     pub config: SemanticIndexingConfig,
     pub vector_index_path: PathBuf,
+    pub sqlite_path: PathBuf,
     pub indexed_source_ids: HashSet<String>,
 }
 
@@ -29,25 +30,11 @@ pub fn resolve_semantic_indexing(
     let Some(config) = loaded.config.semantic_indexing else {
         return Ok(None);
     };
-    let schedules = loaded
-        .config
-        .videos
-        .as_ref()
-        .map(|videos| {
-            videos
-                .sources
-                .iter()
-                .map(|source| {
-                    source.semantic_indexing.clone().unwrap_or_else(|| {
-                        a2a_lab_dev_kit::SemanticStreamSchedule::every_saved_frame(
-                            source.id.as_str(),
-                        )
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let config = config.with_schedules(schedules);
+    let config = if let Some(videos) = loaded.config.videos.as_ref() {
+        a2a_lab_dev_kit::attach_stream_schedules(config, &videos.sources)
+    } else {
+        config
+    };
     let vector_index_path = loaded.semantic_vector_index_path.ok_or_else(|| {
         A2aLabError::invalid(
             "semantic_indexing.limits.storage.vector_index_path",
@@ -55,6 +42,9 @@ pub fn resolve_semantic_indexing(
         )
     })?;
     validate_vector_storage(&vector_index_path)?;
+    let sqlite_path = loaded
+        .semantic_sqlite_path
+        .unwrap_or_else(|| video.dvr_storage.path.join("semantic.sqlite"));
     let indexed_source_ids = video
         .sources
         .iter()
@@ -63,6 +53,7 @@ pub fn resolve_semantic_indexing(
     Ok(Some(ResolvedSemanticIndexing {
         config,
         vector_index_path,
+        sqlite_path,
         indexed_source_ids,
     }))
 }

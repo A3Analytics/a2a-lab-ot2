@@ -157,7 +157,8 @@ systemd.
 ## Indexed video DVR format, lifecycle, and recovery
 
 Disk video retention defaults to three days under `.a2a-lab-ot2/video-dvr/`
-(`index.sqlite` plus per-source payload trees). Each retained MJPEG frame is
+(`index.sqlite` for media rows, plus per-source payload trees). Semantic
+manifests and jobs are a separate `semantic.sqlite`. Each retained MJPEG frame is
 indexed with generic `VideoSourceId` and `DvrTrackId` rows, half-open UTC
 segment bounds, codec metadata, and an atomic payload file (`*.mjpeg` via
 `*.mjpeg.tmp` rename). Restart reopens the SQLite index and payloads without

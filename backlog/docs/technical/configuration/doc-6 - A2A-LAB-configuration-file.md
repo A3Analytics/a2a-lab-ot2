@@ -87,7 +87,7 @@ While `serve` runs, A2A exposes the runtime capture-settings document through `A
 
 ## Semantic indexing (`schema_version` 2)
 
-A `semantic_indexing` object is valid only when `schema_version` is `2`. It configures Luna frame descriptions, optional text embeddings, Jev frame decisions, per-source schedules (derived from `videos.sources`), and storage paths such as `semantic_indexing.limits.storage.vector_index_path`. Semantic providers are independent from `chat`; a file may use OpenAI for chat and Bedrock for indexing.
+A `semantic_indexing` object is valid only when `schema_version` is `2`. It configures Luna frame descriptions, optional text embeddings, Jev frame decisions, per-source schedules (derived from `videos.sources`), and storage paths `semantic_indexing.limits.storage.sqlite_path` (semantic database; default `semantic.sqlite` beside the file) and `vector_index_path`. The semantic database is separate from DVR `index.sqlite`. Semantic providers are independent from `chat`; a file may use OpenAI for chat and Bedrock for indexing.
 
 The file has no secret fields. Bedrock credentials and regions are supplied through the AWS SDK environment and shared profile chain (`AWS_PROFILE`, `AWS_REGION` or `AWS_DEFAULT_REGION`), not through JSON keys. Set `A2ALAB_SEMANTIC_INDEXING_LIVE=true` before `serve` to select live Bedrock adapters; when the variable is unset or false, deterministic providers are used so local validation, `config validate`, and tests run without AWS access.
 

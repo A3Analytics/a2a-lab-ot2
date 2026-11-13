@@ -8,7 +8,8 @@ use a2a_lab_dev_kit::{
     A2aLabError, DvrCommittedFrame, DvrFrameAtRequest, DvrFrameAtResult, DvrMediaCoverage,
     DvrMediaPayload, DvrMediaSegment, DvrMediaStore, DvrMediaTrack, DvrPersistHook,
     DvrRetentionBounds, DvrStoreNamespace, DvrTrackId, Page, ReadDvrMediaWindowRequest,
-    SavedFrameRef, SqliteChunkDvrStore, TimeRange, UtcTimestamp, VideoCodec, VideoSourceId,
+    SavedFrameRef, SemanticIndexingConfig, SemanticIndexingStage, SemanticSqliteStore,
+    SqliteChunkDvrStore, TimeRange, UtcTimestamp, VideoCodec, VideoSourceId,
 };
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteRow;
@@ -22,24 +23,6 @@ use super::indexing_registration::{INDEXING_PRIORITY_LIVE, SaveFaults, commit_in
 use super::indexing_scope::IndexedSourceFilter;
 use super::semantic_persist_hook::SemanticPersistHook;
 
-const SCHEMA_SEMANTIC_MANIFEST: &str =
-    include_str!("../../../migrations/007_semantic_frame_manifest.sql");
-const SCHEMA_INDEXING_JOBS: &str =
-    include_str!("../../../migrations/008_semantic_indexing_jobs.sql");
-const SCHEMA_FRAME_DECISIONS: &str = include_str!("../../../migrations/009_frame_decisions.sql");
-const SCHEMA_INDEXING_JOB_LIFECYCLE: &str =
-    include_str!("../../../migrations/010_semantic_indexing_job_lifecycle.sql");
-const SCHEMA_DECISION_EVALUATION_JOBS: &str =
-    include_str!("../../../migrations/011_frame_decision_evaluation_jobs.sql");
-const SCHEMA_SEMANTIC_STAGE_SCHEDULES: &str =
-    include_str!("../../../migrations/012_semantic_stage_schedules.sql");
-const SCHEMA_EMBEDDING_CONFIG_IDENTITY: &str =
-    include_str!("../../../migrations/013_embedding_config_identity.sql");
-const SCHEMA_INDEXING_JOB_PRIORITY: &str =
-    include_str!("../../../migrations/014_semantic_indexing_job_priority.sql");
-const SCHEMA_EMBEDDING_CONFIG_GENERATION: &str =
-    include_str!("../../../migrations/015_embedding_config_generation.sql");
-
 /// Default root directory for indexed video payloads and SQLite index.
 pub const DEFAULT_VIDEO_DVR_ROOT: &str = ".a2a-lab-ot2/video-dvr";
 
@@ -49,12 +32,14 @@ pub const DEFAULT_DISK_VIDEO_RETENTION_SECS: u64 = 3 * 24 * 60 * 60;
 /// Hourly cleanup while serve is running.
 pub const VIDEO_DVR_CLEANUP_INTERVAL: Duration = Duration::from_hours(1);
 
-/// Restart-safe indexed DVR with devkit media storage and OT-2 semantic tables.
+/// Restart-safe indexed DVR. Media and semantic databases are separate devkit stores.
 #[derive(Clone)]
 pub struct IndexedVideoDvr {
     chunk: SqliteChunkDvrStore,
+    semantic: SemanticSqliteStore,
     pub(crate) save_faults: Arc<SaveFaults>,
     indexing_sources: Arc<RwLock<IndexedSourceFilter>>,
+    semantic_indexing: Arc<RwLock<Option<SemanticIndexingConfig>>>,
     hook_error: Arc<Mutex<Option<A2aLabError>>>,
 }
 
@@ -80,14 +65,14 @@ impl IndexedVideoDvr {
         let prior: Option<String> = sqlx::query_scalar(
             "SELECT config_digest FROM semantic_embedding_config_identity WHERE singleton_id = 1",
         )
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?;
         if prior.as_deref() == Some(digest.as_str()) {
             return Ok(false);
         }
         let now_us = crate::time::now()?.as_micros();
-        let mut tx = self.sqlite_pool().begin().await.map_err(db_error)?;
+        let mut tx = self.semantic_pool().begin().await.map_err(db_error)?;
         if prior.is_some() {
             self.wipe_retained_embedding_vectors_tx(&mut tx).await?;
             self.persist_embedding_config_identity_tx(
@@ -223,7 +208,7 @@ impl IndexedVideoDvr {
             "SELECT COALESCE(model_space_generation, 0)
              FROM semantic_embedding_config_identity WHERE singleton_id = 1",
         )
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?
         .unwrap_or(0);
@@ -238,7 +223,7 @@ impl IndexedVideoDvr {
                AND emb.model_space_generation = ?1",
         )
         .bind(active)
-        .fetch_one(self.sqlite_pool())
+        .fetch_one(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(u64::try_from(count.max(0)).unwrap_or(0))
@@ -250,7 +235,7 @@ impl IndexedVideoDvr {
             "SELECT COUNT(*) FROM semantic_frame_embeddings
              WHERE embedding_vector IS NOT NULL AND length(embedding_vector) > 0",
         )
-        .fetch_one(self.sqlite_pool())
+        .fetch_one(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(u64::try_from(count.max(0)).unwrap_or(0))
@@ -260,7 +245,7 @@ impl IndexedVideoDvr {
         let generation: Option<i64> = sqlx::query_scalar(
             "SELECT model_space_generation FROM semantic_embedding_config_identity WHERE singleton_id = 1",
         )
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(generation.and_then(|value| u64::try_from(value.max(0)).ok()))
@@ -275,15 +260,28 @@ impl IndexedVideoDvr {
         (vec![hook], store_slot)
     }
 
-    /// Wraps an already-opened devkit chunk store and runs OT-2 semantic migrations.
+    /// Wraps an already-opened devkit chunk store and opens the semantic database beside it.
     pub async fn adopt_opened(
         chunk: SqliteChunkDvrStore,
         store_slot: Arc<OnceLock<IndexedVideoDvr>>,
     ) -> Result<Self, A2aLabError> {
+        let semantic_path = chunk.root().join("semantic.sqlite");
+        Self::adopt_opened_at(chunk, store_slot, semantic_path).await
+    }
+
+    /// Wraps media storage and opens the semantic database at `semantic_sqlite`.
+    pub async fn adopt_opened_at(
+        chunk: SqliteChunkDvrStore,
+        store_slot: Arc<OnceLock<IndexedVideoDvr>>,
+        semantic_sqlite: impl AsRef<Path>,
+    ) -> Result<Self, A2aLabError> {
+        let semantic = SemanticSqliteStore::open(semantic_sqlite).await?;
         let store = Self {
             chunk,
+            semantic,
             save_faults: Arc::new(SaveFaults::default()),
             indexing_sources: Arc::new(RwLock::new(IndexedSourceFilter::all_sources())),
+            semantic_indexing: Arc::new(RwLock::new(None)),
             hook_error: Arc::new(Mutex::new(None)),
         };
         let _ = store_slot.set(store.clone());
@@ -293,6 +291,16 @@ impl IndexedVideoDvr {
 
     /// Opens or creates the store. Validates storage before capture starts.
     pub async fn open(root: impl AsRef<Path>, retain_secs: u64) -> Result<Self, A2aLabError> {
+        let root = root.as_ref();
+        Self::open_with_semantic_path(root, retain_secs, root.join("semantic.sqlite")).await
+    }
+
+    /// Opens media storage at `root` and the semantic database at `semantic_sqlite`.
+    pub async fn open_with_semantic_path(
+        root: impl AsRef<Path>,
+        retain_secs: u64,
+        semantic_sqlite: impl AsRef<Path>,
+    ) -> Result<Self, A2aLabError> {
         if retain_secs == 0 {
             return Err(A2aLabError::invalid(
                 "video_disk_retention_secs",
@@ -306,124 +314,12 @@ impl IndexedVideoDvr {
         let store_slot: Arc<OnceLock<IndexedVideoDvr>> = Arc::new(OnceLock::new());
         let hook = Arc::new(SemanticPersistHook::new(Arc::clone(&store_slot)));
         let chunk = SqliteChunkDvrStore::open_with_hooks(root, retain_secs, vec![hook]).await?;
-        let store = Self {
-            chunk,
-            save_faults: Arc::new(SaveFaults::default()),
-            indexing_sources: Arc::new(RwLock::new(IndexedSourceFilter::all_sources())),
-            hook_error: Arc::new(Mutex::new(None)),
-        };
-        let _ = store_slot.set(store.clone());
-        store.finish_opening().await?;
-        Ok(store)
+        Self::adopt_opened_at(chunk, store_slot, semantic_sqlite).await
     }
 
     async fn finish_opening(&self) -> Result<(), A2aLabError> {
-        self.apply_semantic_schema().await?;
-        self.migrate_semantic_embedding_vectors().await?;
-        self.migrate_indexing_job_priority().await?;
-        self.migrate_embedding_config_generation().await?;
-        self.backfill_indexing_job_runtime().await?;
         h264_epoch::migrate_h264_epochs(self).await?;
         let _ = self.reconcile_frame_decision_tombstones().await?;
-        Ok(())
-    }
-
-    async fn apply_semantic_schema(&self) -> Result<(), A2aLabError> {
-        for statement in SCHEMA_SEMANTIC_MANIFEST
-            .split(';')
-            .chain(SCHEMA_INDEXING_JOBS.split(';'))
-            .chain(SCHEMA_FRAME_DECISIONS.split(';'))
-            .chain(SCHEMA_INDEXING_JOB_LIFECYCLE.split(';'))
-            .chain(SCHEMA_DECISION_EVALUATION_JOBS.split(';'))
-            .chain(SCHEMA_SEMANTIC_STAGE_SCHEDULES.split(';'))
-            .chain(SCHEMA_EMBEDDING_CONFIG_IDENTITY.split(';'))
-        {
-            let statement = statement.trim();
-            if statement.is_empty() {
-                continue;
-            }
-            sqlx::query(statement)
-                .execute(self.sqlite_pool())
-                .await
-                .map_err(db_error)?;
-        }
-        Ok(())
-    }
-
-    async fn migrate_semantic_embedding_vectors(&self) -> Result<(), A2aLabError> {
-        let exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM pragma_table_info('semantic_frame_embeddings')
-             WHERE name = 'embedding_vector' LIMIT 1",
-        )
-        .fetch_optional(self.sqlite_pool())
-        .await
-        .map_err(db_error)?;
-        if exists.is_none() {
-            sqlx::query("ALTER TABLE semantic_frame_embeddings ADD COLUMN embedding_vector BLOB")
-                .execute(self.sqlite_pool())
-                .await
-                .map_err(db_error)?;
-        }
-        Ok(())
-    }
-
-    async fn migrate_embedding_config_generation(&self) -> Result<(), A2aLabError> {
-        let exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM pragma_table_info('semantic_embedding_config_identity')
-             WHERE name = 'model_space_generation' LIMIT 1",
-        )
-        .fetch_optional(self.sqlite_pool())
-        .await
-        .map_err(db_error)?;
-        if exists.is_some() {
-            return Ok(());
-        }
-        for statement in SCHEMA_EMBEDDING_CONFIG_GENERATION.split(';') {
-            let statement = statement.trim();
-            if statement.is_empty() {
-                continue;
-            }
-            sqlx::query(statement)
-                .execute(self.sqlite_pool())
-                .await
-                .map_err(db_error)?;
-        }
-        Ok(())
-    }
-
-    async fn migrate_indexing_job_priority(&self) -> Result<(), A2aLabError> {
-        let exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM pragma_table_info('semantic_indexing_jobs')
-             WHERE name = 'enqueue_priority' LIMIT 1",
-        )
-        .fetch_optional(self.sqlite_pool())
-        .await
-        .map_err(db_error)?;
-        if exists.is_some() {
-            return Ok(());
-        }
-        for statement in SCHEMA_INDEXING_JOB_PRIORITY.split(';') {
-            let statement = statement.trim();
-            if statement.is_empty() {
-                continue;
-            }
-            sqlx::query(statement)
-                .execute(self.sqlite_pool())
-                .await
-                .map_err(db_error)?;
-        }
-        Ok(())
-    }
-
-    async fn backfill_indexing_job_runtime(&self) -> Result<(), A2aLabError> {
-        sqlx::query(
-            "INSERT INTO semantic_indexing_job_runtime (job_id)
-             SELECT job_id FROM semantic_indexing_jobs
-             WHERE job_id NOT IN (SELECT job_id FROM semantic_indexing_job_runtime)",
-        )
-        .execute(self.sqlite_pool())
-        .await
-        .map_err(db_error)?;
         Ok(())
     }
 
@@ -523,7 +419,15 @@ impl IndexedVideoDvr {
             None,
         )?;
         let registered_at = crate::time::now()?;
-        let mut tx = self.sqlite_pool().begin().await.map_err(db_error)?;
+        let create_indexing_job = self.permits_indexing_source(frame.source_id().as_str())
+            && self
+                .indexing_job_needed_for_frame(
+                    frame.source_id().as_str(),
+                    frame.track_id().as_str(),
+                    frame.start().as_micros(),
+                )
+                .await?;
+        let mut tx = self.semantic_pool().begin().await.map_err(db_error)?;
         self.register_manifest_revision_tx(
             &mut tx,
             &saved,
@@ -532,7 +436,7 @@ impl IndexedVideoDvr {
             registered_at.as_micros(),
         )
         .await?;
-        if self.permits_indexing_source(frame.source_id().as_str()) {
+        if create_indexing_job {
             commit_indexing_job_tx(
                 &mut tx,
                 saved.frame_id().as_str(),
@@ -589,7 +493,7 @@ impl IndexedVideoDvr {
         .bind(codec_label(codec))
         .bind::<&[u8]>(&[])
         .bind(i64::try_from(frame_period_us).unwrap_or(i64::MAX))
-        .execute(self.sqlite_pool())
+        .execute(self.media_pool())
         .await
         .map_err(db_error)?;
         let end =
@@ -648,7 +552,7 @@ impl IndexedVideoDvr {
         .bind(end.as_micros())
         .bind(i64::from(keyframe))
         .bind(&relpath)
-        .execute(self.sqlite_pool())
+        .execute(self.media_pool())
         .await
         .map_err(db_error)?;
         Ok(())
@@ -670,7 +574,7 @@ impl IndexedVideoDvr {
         .bind(source_id.as_str())
         .bind(track_id.as_str())
         .bind(key)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.media_pool())
         .await
         .map_err(db_error)?;
         frame.ok_or_else(|| {
@@ -694,7 +598,7 @@ impl IndexedVideoDvr {
         .bind(source_id.as_str())
         .bind(track_id.as_str())
         .bind(key)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.media_pool())
         .await
         .map_err(db_error)?;
         let frame = sqlx::query(
@@ -706,7 +610,7 @@ impl IndexedVideoDvr {
         .bind(source_id.as_str())
         .bind(track_id.as_str())
         .bind(key)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.media_pool())
         .await
         .map_err(db_error)?;
         let mut candidates = Vec::with_capacity(2);
@@ -802,10 +706,96 @@ impl IndexedVideoDvr {
         read_payload_range(&path, offset, length, expected_crc32).await
     }
 
-    #[doc(hidden)]
+    /// DVR media metadata. Semantic tables are not in this database.
     #[must_use]
-    pub fn sqlite_pool(&self) -> &SqlitePool {
-        self.chunk.pool()
+    pub fn media_pool(&self) -> &SqlitePool {
+        self.chunk.media_pool()
+    }
+
+    /// Semantic jobs, manifests, embeddings, and decisions.
+    #[must_use]
+    pub fn semantic_pool(&self) -> &SqlitePool {
+        self.semantic.pool()
+    }
+
+    pub(crate) async fn list_ready_media_keys(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String, i64)>, A2aLabError> {
+        self.chunk.list_ready_media_keys(limit).await
+    }
+
+    pub(crate) async fn retained_media_keys(
+        &self,
+        keys: &[(String, String, i64)],
+    ) -> Result<std::collections::HashSet<(String, String, i64)>, A2aLabError> {
+        self.chunk.retained_media_keys(keys).await
+    }
+
+    pub(crate) async fn current_semantic_revision_keys(
+        &self,
+        keys: &[(String, String, i64)],
+    ) -> Result<std::collections::HashSet<(String, String, i64)>, A2aLabError> {
+        self.semantic.current_revision_keys(keys).await
+    }
+
+    /// Attaches resolved semantic-indexing schedules for schedule-aware job registration.
+    pub fn set_semantic_indexing_config(&self, config: SemanticIndexingConfig) {
+        *self
+            .semantic_indexing
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config);
+    }
+
+    pub(crate) fn semantic_indexing_config(&self) -> Option<SemanticIndexingConfig> {
+        self.semantic_indexing
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether a durable indexing job is needed for one saved frame key.
+    pub(crate) async fn indexing_job_needed_for_frame(
+        &self,
+        source_id: &str,
+        track_id: &str,
+        start_us: i64,
+    ) -> Result<bool, A2aLabError> {
+        let Some(config) = self.semantic_indexing_config() else {
+            return Ok(true);
+        };
+        if config.embeddings.is_none() {
+            let schedule = config.schedule_for(source_id);
+            return self
+                .select_semantic_stage_frame(
+                    source_id,
+                    track_id,
+                    SemanticIndexingStage::Description.id(),
+                    start_us,
+                    schedule.description(),
+                )
+                .await;
+        }
+        let schedule = config.schedule_for(source_id);
+        let description_due = self
+            .select_semantic_stage_frame(
+                source_id,
+                track_id,
+                SemanticIndexingStage::Description.id(),
+                start_us,
+                schedule.description(),
+            )
+            .await?;
+        let embedding_due = self
+            .select_semantic_stage_frame(
+                source_id,
+                track_id,
+                SemanticIndexingStage::Embeddings.id(),
+                start_us,
+                schedule.embeddings(),
+            )
+            .await?;
+        Ok(description_due || embedding_due)
     }
 
     pub fn set_indexed_source_filter(&self, filter: IndexedSourceFilter) {
@@ -884,7 +874,7 @@ impl IndexedVideoDvr {
             .bind(source_id.as_str())
             .bind(track_id.as_str())
             .bind(at)
-            .fetch_optional(self.sqlite_pool())
+            .fetch_optional(self.media_pool())
             .await
             .map_err(db_error)
     }
@@ -907,7 +897,7 @@ impl IndexedVideoDvr {
     #[doc(hidden)]
     pub async fn query_plan(&self, sql: &str) -> Result<Vec<String>, A2aLabError> {
         let rows = sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
-            .fetch_all(self.sqlite_pool())
+            .fetch_all(self.media_pool())
             .await
             .map_err(db_error)?;
         rows.into_iter()

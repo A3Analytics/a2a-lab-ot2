@@ -1,5 +1,7 @@
 //! Durable indexing job leases, retries, and compare-and-set completion.
 
+use std::fmt::Write;
+
 use a2a_lab_dev_kit::{A2aLabError, SemanticSchedule, SemanticWorkerLimits};
 use sqlx::Row;
 use sqlx::{Sqlite, Transaction};
@@ -130,23 +132,6 @@ pub struct IndexingWorkerQueueStats {
     pub backlog_over_limit: bool,
 }
 
-/// True when a ready DVR row exists at the manifest frame key (legacy segment or chunk frame).
-const RETAINED_DVR_PAYLOAD_EXISTS: &str = "\
-     EXISTS (
-       SELECT 1 FROM dvr_frames df
-       WHERE df.source_id = f.source_id
-         AND df.track_id = f.track_id
-         AND df.start_us = f.start_us
-         AND df.payload_ready = 1
-     )
-     OR EXISTS (
-       SELECT 1 FROM dvr_segments ds
-       WHERE ds.source_id = f.source_id
-         AND ds.track_id = f.track_id
-         AND ds.start_us = f.start_us
-         AND ds.payload_ready = 1
-     )";
-
 pub(crate) async fn ensure_job_runtime_tx(
     tx: &mut Transaction<'_, Sqlite>,
     job_id: &str,
@@ -180,7 +165,7 @@ impl IndexedVideoDvr {
         let interval_us = i64::try_from(interval_us).map_err(|_| {
             A2aLabError::invalid("semantic_indexing.schedules", "interval is too large")
         })?;
-        let mut tx = self.sqlite_pool().begin().await.map_err(db_error)?;
+        let mut tx = self.semantic_pool().begin().await.map_err(db_error)?;
         sqlx::query(
             "INSERT INTO semantic_indexing_stage_schedules
              (source_id, track_id, stage, interval_us, next_due_us)
@@ -247,7 +232,7 @@ impl IndexedVideoDvr {
         )
         .bind(job_id)
         .bind(worker_id)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(())
@@ -268,7 +253,7 @@ impl IndexedVideoDvr {
              WHERE j.job_id = ?1",
         )
         .bind(job_id)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?;
         let Some(row) = row else {
@@ -302,7 +287,7 @@ impl IndexedVideoDvr {
                  )
                )",
         )
-        .fetch_one(self.sqlite_pool())
+        .fetch_one(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(u64::try_from(count.max(0)).unwrap_or(0))
@@ -335,33 +320,77 @@ impl IndexedVideoDvr {
         batch: u32,
     ) -> Result<u32, A2aLabError> {
         let limit = i64::from(batch.max(1));
-        let result = sqlx::query(&format!(
+        let rows = sqlx::query(
+            "SELECT r.job_id, f.source_id, f.track_id, f.start_us
+             FROM semantic_indexing_job_runtime r
+             JOIN semantic_indexing_jobs j ON j.job_id = r.job_id
+             JOIN semantic_frame_revisions f ON f.frame_id = j.frame_id
+             WHERE f.search_current = 1
+               AND f.retained_state = 'retained'
+               AND r.job_state IN ('pending', 'retryable_failed', 'described')
+               AND (r.lease_expires_at_us IS NULL OR r.lease_expires_at_us < ?1)
+               AND r.next_retry_at_us <= ?1
+             ORDER BY j.created_at_us ASC, j.job_id ASC
+             LIMIT ?2",
+        )
+        .bind(now_us)
+        .bind(limit)
+        .fetch_all(self.semantic_pool())
+        .await
+        .map_err(db_error)?;
+        let keys = rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("source_id").map_err(db_error)?,
+                    row.try_get::<String, _>("track_id").map_err(db_error)?,
+                    row.try_get::<i64, _>("start_us").map_err(db_error)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, A2aLabError>>()?;
+        let retained = self.retained_media_keys(&keys).await?;
+        let missing: Vec<String> = rows
+            .into_iter()
+            .filter_map(|row| {
+                let key = (
+                    row.try_get::<String, _>("source_id").ok()?,
+                    row.try_get::<String, _>("track_id").ok()?,
+                    row.try_get::<i64, _>("start_us").ok()?,
+                );
+                if retained.contains(&key) {
+                    None
+                } else {
+                    row.try_get("job_id").ok()
+                }
+            })
+            .collect();
+        if missing.is_empty() {
+            return Ok(0);
+        }
+        let mut sql = String::from(
             "UPDATE semantic_indexing_job_runtime
              SET job_state = 'expired',
                  lease_owner = NULL,
                  lease_expires_at_us = NULL,
                  completed_at_us = ?1,
                  last_retry_reason = 'frame_expired'
-             WHERE job_id IN (
-               SELECT r.job_id
-               FROM semantic_indexing_job_runtime r
-               JOIN semantic_indexing_jobs j ON j.job_id = r.job_id
-               JOIN semantic_frame_revisions f ON f.frame_id = j.frame_id
-               WHERE f.search_current = 1
-                 AND f.retained_state = 'retained'
-                 AND r.job_state IN ('pending', 'retryable_failed', 'described')
-                 AND (r.lease_expires_at_us IS NULL OR r.lease_expires_at_us < ?1)
-                 AND r.next_retry_at_us <= ?1
-                 AND NOT ({RETAINED_DVR_PAYLOAD_EXISTS})
-               ORDER BY j.created_at_us ASC, j.job_id ASC
-               LIMIT ?2
-             )"
-        ))
-        .bind(now_us)
-        .bind(limit)
-        .execute(self.sqlite_pool())
-        .await
-        .map_err(db_error)?;
+             WHERE job_id IN (",
+        );
+        for index in 0..missing.len() {
+            if index > 0 {
+                sql.push(',');
+            }
+            let _ = write!(sql, "?{}", index + 2);
+        }
+        sql.push(')');
+        let mut query = sqlx::query(&sql).bind(now_us);
+        for job_id in &missing {
+            query = query.bind(job_id);
+        }
+        let result = query
+            .execute(self.semantic_pool())
+            .await
+            .map_err(db_error)?;
         Ok(u32::try_from(result.rows_affected()).unwrap_or(0))
     }
 
@@ -382,7 +411,7 @@ impl IndexedVideoDvr {
                AND lease_expires_at_us <= ?1",
         )
         .bind(now_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(u32::try_from(result.rows_affected()).unwrap_or(0))
@@ -469,9 +498,9 @@ impl IndexedVideoDvr {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        sqlx::query(&format!(
-            "SELECT j.job_id, j.frame_id
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = sqlx::query(
+            "SELECT j.job_id, j.frame_id, f.source_id, f.track_id, f.start_us
              FROM semantic_indexing_jobs j
              JOIN semantic_indexing_job_runtime r ON r.job_id = j.job_id
              JOIN semantic_frame_revisions f ON f.frame_id = j.frame_id
@@ -495,25 +524,45 @@ impl IndexedVideoDvr {
                      AND length(emb.embedding_vector) > 0
                  )
                )
-             ORDER BY
-               CASE WHEN {RETAINED_DVR_PAYLOAD_EXISTS} THEN 0 ELSE 1 END ASC,
-               j.created_at_us ASC,
-               j.job_id ASC
-             LIMIT ?2"
-        ))
+             ORDER BY j.created_at_us ASC, j.job_id ASC
+             LIMIT ?2",
+        )
         .bind(now_us)
-        .bind(limit)
+        .bind(limit_i64.saturating_mul(2).max(limit_i64))
         .bind(i64::from(enqueue_priority))
-        .fetch_all(self.sqlite_pool())
+        .fetch_all(self.semantic_pool())
         .await
-        .map_err(db_error)?
-        .into_iter()
-        .map(|row| {
-            let job_id: String = row.try_get("job_id").map_err(db_error)?;
-            let frame_id: String = row.try_get("frame_id").map_err(db_error)?;
-            Ok((job_id, frame_id))
-        })
-        .collect()
+        .map_err(db_error)?;
+        let keys = rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("source_id").map_err(db_error)?,
+                    row.try_get::<String, _>("track_id").map_err(db_error)?,
+                    row.try_get::<i64, _>("start_us").map_err(db_error)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, A2aLabError>>()?;
+        let retained = self.retained_media_keys(&keys).await?;
+        let mut ranked = rows
+            .into_iter()
+            .map(|row| {
+                let key = (
+                    row.try_get::<String, _>("source_id").map_err(db_error)?,
+                    row.try_get::<String, _>("track_id").map_err(db_error)?,
+                    row.try_get::<i64, _>("start_us").map_err(db_error)?,
+                );
+                let job_id: String = row.try_get("job_id").map_err(db_error)?;
+                let frame_id: String = row.try_get("frame_id").map_err(db_error)?;
+                Ok((usize::from(!retained.contains(&key)), job_id, frame_id))
+            })
+            .collect::<Result<Vec<_>, A2aLabError>>()?;
+        ranked.sort_by_key(|(missing, _, _)| *missing);
+        Ok(ranked
+            .into_iter()
+            .take(limit)
+            .map(|(_, job_id, frame_id)| (job_id, frame_id))
+            .collect())
     }
 
     pub(crate) async fn try_claim_one_job(
@@ -528,7 +577,7 @@ impl IndexedVideoDvr {
             "SELECT revision_seq FROM semantic_frame_revisions WHERE frame_id = ?1",
         )
         .bind(frame_id)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?
         .unwrap_or(0);
@@ -552,7 +601,7 @@ impl IndexedVideoDvr {
         .bind(lease_deadline_us)
         .bind(revision)
         .bind(now_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         if result.rows_affected() == 0 {
@@ -593,7 +642,7 @@ impl IndexedVideoDvr {
         .bind(worker_id)
         .bind(i64::from(revision_generation))
         .bind(i64::try_from(description_generation).unwrap_or(i64::MAX))
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         if result.rows_affected() == 0 {
@@ -634,7 +683,7 @@ impl IndexedVideoDvr {
         .bind(worker_id)
         .bind(i64::from(revision_generation))
         .bind(now_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(result.rows_affected() > 0)
@@ -656,7 +705,7 @@ impl IndexedVideoDvr {
              FROM semantic_indexing_job_runtime WHERE job_id = ?1",
         )
         .bind(job_id)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?
         .unwrap_or(0);
@@ -686,7 +735,7 @@ impl IndexedVideoDvr {
         .bind(reason)
         .bind(next_retry_at_us)
         .bind(now_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(())
@@ -708,7 +757,7 @@ impl IndexedVideoDvr {
         )
         .bind(job_id)
         .bind(now_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(())
@@ -723,7 +772,7 @@ impl IndexedVideoDvr {
         )
         .bind(key)
         .bind(value)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(())
@@ -768,7 +817,7 @@ impl IndexedVideoDvr {
             "SELECT meta_value FROM semantic_indexing_worker_meta WHERE meta_key = ?1",
         )
         .bind(key)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)
     }
@@ -781,7 +830,7 @@ impl IndexedVideoDvr {
         )
         .bind(key)
         .bind(value)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(())

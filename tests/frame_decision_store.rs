@@ -475,7 +475,7 @@ async fn restart_concurrent_append_and_tombstones() {
         "UPDATE semantic_frame_revisions SET retained_state = 'expired' WHERE frame_id = ?1",
     )
     .bind(saved.frame_id().as_str())
-    .execute(reopened.sqlite_pool())
+    .execute(reopened.semantic_pool())
     .await
     .unwrap();
     reopened

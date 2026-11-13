@@ -113,7 +113,7 @@ async fn dual_storage_uses_legacy_when_chunk_checksum_metadata_is_wrong() {
     sqlx::query("UPDATE dvr_frames SET payload_crc32 = 0 WHERE source_id = ?1 AND start_us = ?2")
         .bind(source.as_str())
         .bind(capture.as_micros())
-        .execute(store.sqlite_pool())
+        .execute(store.media_pool())
         .await
         .unwrap();
     let played = store

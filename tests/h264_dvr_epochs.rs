@@ -75,7 +75,7 @@ async fn unchanged_init_reuses_one_epoch() {
         "SELECT COUNT(DISTINCT h264_epoch_id) FROM dvr_frames WHERE source_id = ?1",
     )
     .bind(source.as_str())
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.media_pool())
     .await
     .unwrap();
     assert_eq!(epochs, 1);
@@ -111,7 +111,7 @@ async fn changed_init_opens_distinct_epochs_and_list_tracks() {
         "SELECT COUNT(DISTINCT h264_epoch_id) FROM dvr_frames WHERE source_id = ?1",
     )
     .bind(source.as_str())
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.media_pool())
     .await
     .unwrap();
     assert_eq!(epochs, 2);
@@ -148,7 +148,7 @@ async fn cutover_clears_h264_rows_but_not_mjpeg() {
         .await
         .unwrap();
     sqlx::query("DELETE FROM dvr_store_meta WHERE meta_key = 'h264_epoch_storage_cutover'")
-        .execute(store.sqlite_pool())
+        .execute(store.media_pool())
         .await
         .unwrap();
     drop(store);
@@ -157,13 +157,13 @@ async fn cutover_clears_h264_rows_but_not_mjpeg() {
         "SELECT COUNT(*) FROM dvr_frames WHERE source_id = ?1 AND track_id = 'h264'",
     )
     .bind(source.as_str())
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.media_pool())
     .await
     .unwrap();
     assert_eq!(h264_frames, 0);
     assert!(store.media_coverage(&source).await.is_ok());
     let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM semantic_indexing_jobs")
-        .fetch_one(store.sqlite_pool())
+        .fetch_one(store.media_pool())
         .await
         .unwrap();
     assert!(jobs >= 0);
@@ -255,7 +255,7 @@ async fn retention_keeps_adjacent_epochs_independently() {
     let epochs: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM dvr_h264_epochs WHERE source_id = ?1")
             .bind(source.as_str())
-            .fetch_one(store.sqlite_pool())
+            .fetch_one(store.media_pool())
             .await
             .unwrap();
     assert_eq!(epochs, 1);

@@ -19,8 +19,9 @@ use a2a_lab_dev_kit::{
 };
 use a2a_lab_ot2::videos::dvr::{
     AnnotationQueueWorker, AnnotationQueueWorkerBundle, AnyIndexingAnnotationWorker,
-    DEFAULT_SEMANTIC_STORE_NAMESPACE, DeterministicIndexingWorker, DvrFrameDecisionLedger,
-    IndexingWorkerFaults, IndexingWorkerLane,
+    DEFAULT_SEMANTIC_STORE_NAMESPACE, DeterministicDescriptionOnlyWorker,
+    DeterministicEmbeddingOnlyWorker, DvrFrameDecisionLedger, IndexingWorkerFaults,
+    IndexingWorkerLane, SemanticAnnotationWorkers,
 };
 use a2a_lab_ot2::videos::semantic_indexing::{
     SemanticServeInjections, build_deterministic_providers, description_provider_config,
@@ -126,30 +127,60 @@ async fn deterministic_semantic_injections(
     let providers = build_deterministic_providers(&semantic.config)
         .await
         .unwrap();
-    let live = DeterministicIndexingWorker::new(
-        providers.clone(),
+    let desc_live = DeterministicDescriptionOnlyWorker::new(
+        providers.description.clone(),
         semantic.config.limits.worker.clone(),
-        "fixture-worker-live",
+        "fixture-desc-live",
         IndexingWorkerFaults::new(),
     )
     .with_lane(IndexingWorkerLane::Live);
-    let backfill = DeterministicIndexingWorker::new(
-        providers,
+    let desc_backfill = DeterministicDescriptionOnlyWorker::new(
+        providers.description.clone(),
         semantic.config.limits.worker.clone(),
-        "fixture-worker-backfill",
+        "fixture-desc-backfill",
+        IndexingWorkerFaults::new(),
+    )
+    .with_lane(IndexingWorkerLane::Backfill);
+    let embed_live = DeterministicEmbeddingOnlyWorker::new(
+        providers.embedding.clone(),
+        semantic.config.limits.worker.clone(),
+        "fixture-embed-live",
+        IndexingWorkerFaults::new(),
+    )
+    .with_lane(IndexingWorkerLane::Live);
+    let embed_backfill = DeterministicEmbeddingOnlyWorker::new(
+        providers.embedding,
+        semantic.config.limits.worker.clone(),
+        "fixture-embed-backfill",
         IndexingWorkerFaults::new(),
     )
     .with_lane(IndexingWorkerLane::Backfill);
     SemanticServeInjections {
-        workers: Some(AnnotationQueueWorkerBundle::new(
-            AnnotationQueueWorker::new(
-                AnyIndexingAnnotationWorker::Deterministic(Arc::new(live)),
-                semantic.config.clone(),
+        workers: Some(SemanticAnnotationWorkers::new(
+            AnnotationQueueWorkerBundle::new(
+                AnnotationQueueWorker::new(
+                    AnyIndexingAnnotationWorker::DeterministicDescriptionOnly(Arc::new(desc_live)),
+                    semantic.config.clone(),
+                ),
+                AnnotationQueueWorker::new(
+                    AnyIndexingAnnotationWorker::DeterministicDescriptionOnly(Arc::new(
+                        desc_backfill,
+                    )),
+                    semantic.config.clone(),
+                ),
             ),
-            AnnotationQueueWorker::new(
-                AnyIndexingAnnotationWorker::Deterministic(Arc::new(backfill)),
-                semantic.config.clone(),
-            ),
+            Some(AnnotationQueueWorkerBundle::new(
+                AnnotationQueueWorker::new(
+                    AnyIndexingAnnotationWorker::DeterministicEmbeddingOnly(Arc::new(embed_live)),
+                    semantic.config.clone(),
+                ),
+                AnnotationQueueWorker::new(
+                    AnyIndexingAnnotationWorker::DeterministicEmbeddingOnly(Arc::new(
+                        embed_backfill,
+                    )),
+                    semantic.config.clone(),
+                ),
+            )),
         )),
         force_deterministic_worker: true,
         ..SemanticServeInjections::default()

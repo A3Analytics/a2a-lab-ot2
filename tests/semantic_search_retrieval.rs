@@ -117,6 +117,7 @@ async fn provider_for(store: IndexedVideoDvr) -> DvrSemanticSearchProvider {
     let indexed = ResolvedSemanticIndexing {
         config: semantic.clone(),
         vector_index_path: temp_root("vector").join("index"),
+        sqlite_path: temp_root("vector").join("semantic.sqlite"),
         indexed_source_ids: HashSet::from(["camera".to_owned()]),
     };
     DvrSemanticSearchProvider::new(store, &indexed, embedder).unwrap()

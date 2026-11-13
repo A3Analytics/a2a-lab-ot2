@@ -862,7 +862,7 @@ async fn serve(
     bootstrap: Option<&LabConfigBootstrap>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let images = prepare_images(cli, config_inputs, bootstrap)?;
-    let videos = prepare_serve_videos(cli, config_inputs, bootstrap).await?;
+    let videos = Box::pin(prepare_serve_videos(cli, config_inputs, bootstrap)).await?;
     let still_cache = videos.as_ref().map(DeclarativeVideoServe::still_cache);
     let (catalog, _history_maintenance, capture_pump) =
         prepare_serve_images(&lab, cli, &images, still_cache).await?;

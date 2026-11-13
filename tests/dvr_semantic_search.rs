@@ -40,6 +40,7 @@ fn resolved_semantic(source: &str) -> ResolvedSemanticIndexing {
     ResolvedSemanticIndexing {
         config,
         vector_index_path: std::path::PathBuf::from("./state/semantic-index"),
+        sqlite_path: std::path::PathBuf::from("./state/semantic.sqlite"),
         indexed_source_ids: HashSet::from([source.to_owned()]),
     }
 }
@@ -338,7 +339,7 @@ async fn stale_search_current_revision_is_not_retrieved() {
         .unwrap();
     sqlx::query("UPDATE semantic_frame_revisions SET search_current = 0 WHERE frame_id = ?1")
         .bind(stale.frame_id().as_str())
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     let scope = scope_for(

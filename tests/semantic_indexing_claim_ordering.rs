@@ -62,7 +62,7 @@ async fn seed_stale_and_playable(store: &IndexedVideoDvr) -> (String, String, St
     sqlx::query("DELETE FROM dvr_segments WHERE source_id = ?1 AND start_us = ?2")
         .bind(source.as_str())
         .bind(stale_capture.as_micros())
-        .execute(store.sqlite_pool())
+        .execute(store.media_pool())
         .await
         .unwrap();
     store

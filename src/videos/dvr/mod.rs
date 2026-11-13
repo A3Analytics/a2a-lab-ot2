@@ -11,6 +11,7 @@ mod decision_evaluation_queue;
 mod decision_evaluation_worker;
 mod decision_worker_faults;
 mod dvr_frame_decision_ledger;
+mod embedding_worker;
 mod epoch_playback;
 mod frame_decision_store;
 pub mod frame_evidence;
@@ -21,17 +22,21 @@ pub mod indexing_registration;
 pub mod inventory;
 mod provider;
 mod semantic_persist_hook;
+mod stage_batch;
 mod store;
 mod worker_faults;
 
 pub use annotation_queue::{
     ANNOTATION_RECONCILE_INTERVAL, AnnotationQueueWorker, AnnotationQueueWorkerBundle,
-    VideoDvrAnnotationQueue,
+    SemanticAnnotationWorkers, VideoDvrAnnotationQueue,
 };
 pub use annotation_worker::{
-    AnyIndexingAnnotationWorker, DeterministicDescriptionOnlyWorker, DeterministicIndexingWorker,
-    IndexingAnnotationWorker, IndexingWorkerBatchReport, LiveDescriptionOnlyWorker,
-    LiveIndexingWorker,
+    AnyIndexingAnnotationWorker, DescriptionOnlyAnnotationWorker,
+    DeterministicDescriptionOnlyWorker, DeterministicIndexingWorker, IndexingAnnotationWorker,
+    IndexingWorkerBatchReport, LiveDescriptionOnlyWorker, LiveIndexingWorker,
+};
+pub use embedding_worker::{
+    DeterministicEmbeddingOnlyWorker, EmbeddingOnlyAnnotationWorker, LiveEmbeddingOnlyWorker,
 };
 pub mod semantic_search;
 pub use semantic_search::{DvrSearchEmbedder, DvrSemanticSearchProvider};

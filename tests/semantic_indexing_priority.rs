@@ -70,15 +70,15 @@ async fn seed_backfill_jobs(store: &IndexedVideoDvr, count: usize) {
             .unwrap();
     }
     sqlx::query("DELETE FROM semantic_indexing_job_runtime")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     sqlx::query("DELETE FROM semantic_indexing_jobs")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     sqlx::query("DELETE FROM semantic_frame_revisions")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     let report = store
@@ -102,15 +102,15 @@ async fn reconcile_discovers_frames_and_legacy_segments() {
         .await
         .unwrap();
     sqlx::query("DELETE FROM semantic_indexing_job_runtime")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     sqlx::query("DELETE FROM semantic_indexing_jobs")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     sqlx::query("DELETE FROM semantic_frame_revisions")
-        .execute(store.sqlite_pool())
+        .execute(store.semantic_pool())
         .await
         .unwrap();
     let report = store
@@ -240,7 +240,7 @@ async fn worker_makes_concurrent_live_and_backfill_progress() {
     let ready: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM semantic_indexing_job_runtime WHERE job_state = 'ready'",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert!(
@@ -271,7 +271,7 @@ async fn restart_preserves_priority_and_resumes_claims() {
         .bind(source.as_str())
         .bind(capture.as_micros())
         .bind(i64::from(INDEXING_PRIORITY_LIVE))
-        .fetch_one(store.sqlite_pool())
+        .fetch_one(store.semantic_pool())
         .await
         .unwrap();
         live_job = job_id;
@@ -308,7 +308,7 @@ async fn expired_lease_on_backfill_job_reclaims_and_completes() {
         "SELECT job_id FROM semantic_indexing_jobs WHERE enqueue_priority = ?1 LIMIT 1",
     )
     .bind(i64::from(INDEXING_PRIORITY_BACKFILL))
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     let now_us = a2a_lab_ot2::time::now().unwrap().as_micros();
@@ -322,7 +322,7 @@ async fn expired_lease_on_backfill_job_reclaims_and_completes() {
     )
     .bind(now_us.saturating_sub(1))
     .bind(&job_id)
-    .execute(store.sqlite_pool())
+    .execute(store.semantic_pool())
     .await
     .unwrap();
     let resume = a2a_lab_ot2::time::now().unwrap().as_micros();
@@ -421,7 +421,7 @@ async fn atomic_model_space_cutover_wipes_vectors_before_requeue() {
     assert!(store.count_nonempty_embedding_vectors().await.unwrap() > 0);
     assert!(store.count_searchable_embedding_vectors().await.unwrap() > 0);
     let provenance_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM semantic_frame_embeddings")
-        .fetch_one(store.sqlite_pool())
+        .fetch_one(store.semantic_pool())
         .await
         .unwrap();
     assert_eq!(provenance_rows, 2);
@@ -435,20 +435,20 @@ async fn atomic_model_space_cutover_wipes_vectors_before_requeue() {
         "SELECT COUNT(*) FROM semantic_frame_revisions
          WHERE embedding_checkpoint = 'ready' AND search_current = 1",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(ready_embedding, 0);
     let ready_jobs: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM semantic_indexing_job_runtime WHERE job_state = 'ready'",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(ready_jobs, 0);
     let provenance_after: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM semantic_frame_embeddings")
-            .fetch_one(store.sqlite_pool())
+            .fetch_one(store.semantic_pool())
             .await
             .unwrap();
     assert_eq!(provenance_after, provenance_rows);
@@ -487,7 +487,7 @@ async fn model_space_rebuild_requeues_all_retained_frames_for_reembedding() {
     let ready_before: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM semantic_indexing_job_runtime WHERE job_state = 'ready'",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(ready_before, 2);
@@ -501,7 +501,7 @@ async fn model_space_rebuild_requeues_all_retained_frames_for_reembedding() {
     let ready_after: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM semantic_indexing_job_runtime WHERE job_state = 'ready'",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(ready_after, 0);
@@ -509,14 +509,14 @@ async fn model_space_rebuild_requeues_all_retained_frames_for_reembedding() {
         "SELECT COUNT(*) FROM semantic_frame_revisions
          WHERE embedding_checkpoint = 'pending' AND search_current = 1",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(pending_embedding, 2);
     let null_vectors: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM semantic_frame_embeddings WHERE embedding_vector IS NULL",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(null_vectors, 2);
@@ -650,7 +650,7 @@ async fn count_ready_jobs(store: &IndexedVideoDvr) -> u64 {
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM semantic_indexing_job_runtime WHERE job_state = 'ready'",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     u64::try_from(count.max(0)).unwrap_or(0)
@@ -850,7 +850,7 @@ async fn parallel_worker_batches_make_progress_under_load() {
     let leased: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM semantic_indexing_job_runtime WHERE job_state = 'leased'",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(leased, 0);
@@ -884,7 +884,7 @@ async fn worker_drain_increments_ready_under_backfill_load() {
     let pending: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM semantic_indexing_job_runtime WHERE job_state = 'pending'",
     )
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.semantic_pool())
     .await
     .unwrap();
     assert_eq!(pending, 0);

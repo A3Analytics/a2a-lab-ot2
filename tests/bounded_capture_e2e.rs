@@ -228,7 +228,7 @@ async fn count_dvr_h264(store: &a2a_lab_ot2::IndexedVideoDvr, source: &str) -> u
          WHERE source_id = ?1 AND track_id = 'h264' AND payload_ready = 1",
     )
     .bind(source)
-    .fetch_one(store.sqlite_pool())
+    .fetch_one(store.media_pool())
     .await
     .unwrap()
 }

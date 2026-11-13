@@ -22,7 +22,7 @@ async fn cutover_complete(store: &IndexedVideoDvr) -> Result<bool, A2aLabError> 
     let value: Option<String> =
         sqlx::query_scalar("SELECT meta_value FROM dvr_store_meta WHERE meta_key = ?1")
             .bind(CUT_OVER_KEY)
-            .fetch_optional(store.sqlite_pool())
+            .fetch_optional(store.media_pool())
             .await
             .map_err(db_error)?;
     Ok(value.as_deref() == Some("1"))
@@ -34,7 +34,7 @@ async fn mark_cutover_complete(store: &IndexedVideoDvr) -> Result<(), A2aLabErro
          ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value",
     )
     .bind(CUT_OVER_KEY)
-    .execute(store.sqlite_pool())
+    .execute(store.media_pool())
     .await
     .map_err(db_error)?;
     Ok(())
@@ -45,15 +45,15 @@ async fn scoped_h264_cutover_delete(store: &IndexedVideoDvr) -> Result<(), A2aLa
         "SELECT DISTINCT chunk_relpath FROM dvr_frames
          WHERE track_id = 'h264' AND chunk_relpath != ''",
     )
-    .fetch_all(store.sqlite_pool())
+    .fetch_all(store.media_pool())
     .await
     .map_err(db_error)?;
     sqlx::query("DELETE FROM dvr_frames WHERE track_id = 'h264'")
-        .execute(store.sqlite_pool())
+        .execute(store.media_pool())
         .await
         .map_err(db_error)?;
     sqlx::query("DELETE FROM dvr_chunks WHERE track_id = 'h264'")
-        .execute(store.sqlite_pool())
+        .execute(store.media_pool())
         .await
         .map_err(db_error)?;
     sqlx::query(
@@ -63,15 +63,15 @@ async fn scoped_h264_cutover_delete(store: &IndexedVideoDvr) -> Result<(), A2aLa
                 SELECT source_id, track_id FROM dvr_tracks WHERE track_id = 'h264'
             )",
     )
-    .execute(store.sqlite_pool())
+    .execute(store.media_pool())
     .await
     .map_err(db_error)?;
     sqlx::query("DELETE FROM dvr_tracks WHERE track_id = 'h264'")
-        .execute(store.sqlite_pool())
+        .execute(store.media_pool())
         .await
         .map_err(db_error)?;
     sqlx::query("DELETE FROM dvr_h264_epochs")
-        .execute(store.sqlite_pool())
+        .execute(store.media_pool())
         .await
         .map_err(db_error)?;
     remove_chunk_paths(store.root(), &chunks).await?;

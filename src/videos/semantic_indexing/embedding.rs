@@ -7,8 +7,9 @@ use std::sync::{
 };
 
 use a2a_lab_dev_kit::videos::{
-    KeyedTextEmbedding, SemanticIndexingFailure, TextEmbeddingLimits, TextEmbeddingProvider,
-    TextEmbeddingProviderConfig, TextEmbeddingRequest, validate_embedding_batch,
+    KeyedTextEmbedding, SemanticIndexingFailure, TextEmbeddingKey, TextEmbeddingLimits,
+    TextEmbeddingProvider, TextEmbeddingProviderConfig, TextEmbeddingRequest,
+    validate_embedding_batch,
 };
 use a2a_lab_dev_kit::{CredentialReference, EmbeddingMetric, VectorNormalization};
 use fastembed::{
@@ -22,11 +23,18 @@ use rig::providers::openai::embedding::EmbeddingModel as OpenAiEmbeddingModel;
 use tokio::time::timeout;
 
 use super::bedrock::{load_bedrock_sdk_config, map_bedrock_invoke_failure};
+use super::cohere::{cohere_bedrock_client, cohere_embed_texts};
 use super::credentials::{credential_env_configured, redacted_credential_env};
+use aws_sdk_bedrockruntime::Client as BedrockRuntimeClient;
 
 enum TextEmbeddingBackend {
     Bedrock {
         sdk: Box<aws_config::SdkConfig>,
+        model: String,
+        dims: usize,
+    },
+    Cohere {
+        client: BedrockRuntimeClient,
         model: String,
         dims: usize,
     },
@@ -41,6 +49,25 @@ impl TextEmbeddingBackend {
                 let client = bedrock_client(sdk);
                 let embedding = client.embedding_model_with_ndims(model, *dims);
                 embed_rig_texts(&embedding, text).await
+            }
+            Self::Cohere {
+                client,
+                model,
+                dims,
+            } => {
+                let mut vectors = cohere_embed_texts(
+                    client,
+                    model,
+                    *dims,
+                    std::slice::from_ref(&text),
+                    "search_document",
+                )
+                .await?;
+                vectors
+                    .pop()
+                    .ok_or_else(|| SemanticIndexingFailure::PartialResponse {
+                        message: "Cohere returned no vectors".to_owned(),
+                    })
             }
             Self::OpenAi(model) => embed_rig_texts(model, text).await,
             Self::LocalBge(model) => {
@@ -112,9 +139,17 @@ async fn build_embedding_backend(
     if provider.eq_ignore_ascii_case("bedrock") {
         let sdk = load_bedrock_sdk_config().await?;
         let dims = usize::try_from(config.model_space().dimensions()).unwrap_or(0);
+        let model = config.model().to_owned();
+        if model.starts_with("cohere.") {
+            return Ok(TextEmbeddingBackend::Cohere {
+                client: cohere_bedrock_client(&sdk),
+                model,
+                dims,
+            });
+        }
         return Ok(TextEmbeddingBackend::Bedrock {
             sdk: Box::new(sdk),
-            model: config.model().to_owned(),
+            model,
             dims,
         });
     }
@@ -232,6 +267,35 @@ impl TextEmbeddingProvider for ConfiguredTextEmbeddingProvider {
 }
 
 impl ConfiguredTextEmbeddingProvider {
+    async fn embed_cohere_batch(
+        &self,
+        client: &BedrockRuntimeClient,
+        model: &str,
+        dims: usize,
+        requests: &[TextEmbeddingRequest],
+    ) -> Result<Vec<KeyedTextEmbedding>, SemanticIndexingFailure> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(SemanticIndexingFailure::Cancelled);
+        }
+        let input_type = match requests.first().map(TextEmbeddingRequest::key) {
+            Some(TextEmbeddingKey::SearchQuery(_)) => "search_query",
+            _ => "search_document",
+        };
+        let texts: Vec<&str> = requests.iter().map(TextEmbeddingRequest::text).collect();
+        let vectors = cohere_embed_texts(client, model, dims, &texts, input_type).await?;
+        let mut responses = Vec::with_capacity(requests.len());
+        for (request, values) in requests.iter().zip(vectors) {
+            let adjusted = adjust_vector(values, self.config.model_space().normalization())?;
+            responses.push(KeyedTextEmbedding::new(
+                self.config(),
+                request.key().clone(),
+                request.text(),
+                adjusted,
+            )?);
+        }
+        Ok(responses)
+    }
+
     async fn embed_texts_inner(
         &self,
         requests: Vec<TextEmbeddingRequest>,
@@ -239,21 +303,32 @@ impl ConfiguredTextEmbeddingProvider {
         if self.cancelled.load(Ordering::SeqCst) {
             return Err(SemanticIndexingFailure::Cancelled);
         }
-        let mut responses = Vec::with_capacity(requests.len());
-        for request in &requests {
-            if self.cancelled.load(Ordering::SeqCst) {
-                return Err(SemanticIndexingFailure::Cancelled);
+        let responses = if let TextEmbeddingBackend::Cohere {
+            client,
+            model,
+            dims,
+        } = &self.backend
+        {
+            self.embed_cohere_batch(client, model, *dims, &requests)
+                .await?
+        } else {
+            let mut responses = Vec::with_capacity(requests.len());
+            for request in &requests {
+                if self.cancelled.load(Ordering::SeqCst) {
+                    return Err(SemanticIndexingFailure::Cancelled);
+                }
+                let values = self.backend.embed_one(request.text()).await?;
+                let adjusted = adjust_vector(values, self.config.model_space().normalization())?;
+                let keyed = KeyedTextEmbedding::new(
+                    self.config(),
+                    request.key().clone(),
+                    request.text(),
+                    adjusted,
+                )?;
+                responses.push(keyed);
             }
-            let values = self.backend.embed_one(request.text()).await?;
-            let adjusted = adjust_vector(values, self.config.model_space().normalization())?;
-            let keyed = KeyedTextEmbedding::new(
-                self.config(),
-                request.key().clone(),
-                request.text(),
-                adjusted,
-            )?;
-            responses.push(keyed);
-        }
+            responses
+        };
         validate_embedding_batch(self.config(), self.limits, &requests, &responses)
     }
 }

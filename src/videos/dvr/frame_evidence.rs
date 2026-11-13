@@ -256,7 +256,7 @@ impl IndexedVideoDvr {
         let row =
             sqlx::query("SELECT retained_state FROM semantic_frame_revisions WHERE frame_id = ?1")
                 .bind(frame.frame_id().as_str())
-                .fetch_optional(self.sqlite_pool())
+                .fetch_optional(self.semantic_pool())
                 .await
                 .map_err(|error| db_failure(error.to_string()))?;
         if let Some(row) = row {
@@ -284,7 +284,7 @@ impl IndexedVideoDvr {
         )
         .bind(source_id.as_str())
         .bind(track_id.as_str())
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.media_pool())
         .await
         .map_err(|error| db_failure(error.to_string()))?;
         let Some(row) = row else {
@@ -303,7 +303,7 @@ impl IndexedVideoDvr {
             .map_err(|error| db_failure(error.to_string()))?;
         if codec == VideoCodec::H264 {
             let epoch_init = super::h264_epoch::codec_init_for_frame(
-                self.sqlite_pool(),
+                self.media_pool(),
                 source_id,
                 track_id,
                 frame.captured_at(),

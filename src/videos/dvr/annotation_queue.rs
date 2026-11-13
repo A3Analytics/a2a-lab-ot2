@@ -66,6 +66,26 @@ impl AnnotationQueueWorkerBundle {
     }
 }
 
+/// Independent description and embedding worker queues (live + backfill each).
+#[derive(Clone)]
+pub struct SemanticAnnotationWorkers {
+    pub description: AnnotationQueueWorkerBundle,
+    pub embedding: Option<AnnotationQueueWorkerBundle>,
+}
+
+impl SemanticAnnotationWorkers {
+    #[must_use]
+    pub fn new(
+        description: AnnotationQueueWorkerBundle,
+        embedding: Option<AnnotationQueueWorkerBundle>,
+    ) -> Self {
+        Self {
+            description,
+            embedding,
+        }
+    }
+}
+
 async fn run_worker_batch(
     worker: &AnnotationQueueWorker,
     catalog: &VideoDvrCatalog,
@@ -86,7 +106,7 @@ impl VideoDvrCatalog {
     pub fn maintain_annotation_jobs(
         &self,
         mut stop: watch::Receiver<bool>,
-        workers: Option<AnnotationQueueWorkerBundle>,
+        workers: Option<SemanticAnnotationWorkers>,
     ) -> VideoDvrAnnotationQueue {
         let catalog = self.clone();
         let store_ns = DvrStoreNamespace::new(DEFAULT_SEMANTIC_STORE_NAMESPACE).unwrap_or_else(
@@ -114,25 +134,39 @@ impl VideoDvrCatalog {
                         if tokio::time::Instant::now() >= drain_deadline {
                             break;
                         }
-                        let (live_result, backfill_result) = tokio::join!(
-                            run_worker_batch(&workers.live, &catalog),
-                            run_worker_batch(&workers.backfill, &catalog),
+                        let (desc_live, desc_backfill) = tokio::join!(
+                            run_worker_batch(&workers.description.live, &catalog),
+                            run_worker_batch(&workers.description.backfill, &catalog),
                         );
-                        let live_claimed = match &live_result {
-                            Ok(report) => report.claimed(),
-                            Err(error) => {
-                                log_worker_error("live", error);
-                                0
-                            }
-                        };
-                        let backfill_claimed = match &backfill_result {
-                            Ok(report) => report.claimed(),
-                            Err(error) => {
-                                log_worker_error("backfill", error);
-                                0
-                            }
-                        };
-                        if live_claimed == 0 && backfill_claimed == 0 {
+                        let mut claimed = [desc_live, desc_backfill]
+                            .iter()
+                            .map(|result| match result {
+                                Ok(report) => report.claimed(),
+                                Err(error) => {
+                                    log_worker_error("description", error);
+                                    0
+                                }
+                            })
+                            .sum::<u32>();
+                        if let Some(embedding) = workers.embedding.as_ref() {
+                            let (embed_live, embed_backfill) = tokio::join!(
+                                run_worker_batch(&embedding.live, &catalog),
+                                run_worker_batch(&embedding.backfill, &catalog),
+                            );
+                            claimed = claimed.saturating_add(
+                                [embed_live, embed_backfill]
+                                    .iter()
+                                    .map(|result| match result {
+                                        Ok(report) => report.claimed(),
+                                        Err(error) => {
+                                            log_worker_error("embedding", error);
+                                            0
+                                        }
+                                    })
+                                    .sum::<u32>(),
+                            );
+                        }
+                        if claimed == 0 {
                             break;
                         }
                     }

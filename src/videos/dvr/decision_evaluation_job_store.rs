@@ -241,7 +241,7 @@ impl IndexedVideoDvr {
         .bind(producer_revision)
         .bind(coverage_policy)
         .bind(created_at_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         if result.rows_affected() == 0 {
@@ -253,7 +253,7 @@ impl IndexedVideoDvr {
              ON CONFLICT(job_id) DO NOTHING",
         )
         .bind(job_id)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(true)
@@ -279,7 +279,7 @@ impl IndexedVideoDvr {
              WHERE j.job_id = ?1",
         )
         .bind(job_id)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?;
         let Some(row) = row else {
@@ -305,7 +305,7 @@ impl IndexedVideoDvr {
                AND lease_expires_at_us <= ?1",
         )
         .bind(now_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(u32::try_from(result.rows_affected()).unwrap_or(0))
@@ -336,7 +336,7 @@ impl IndexedVideoDvr {
         )
         .bind(now_us)
         .bind(batch)
-        .fetch_all(self.sqlite_pool())
+        .fetch_all(self.semantic_pool())
         .await
         .map_err(db_error)?
         .into_iter()
@@ -377,7 +377,7 @@ impl IndexedVideoDvr {
             "SELECT revision_seq FROM semantic_frame_revisions WHERE frame_id = ?1",
         )
         .bind(frame_id)
-        .fetch_optional(self.sqlite_pool())
+        .fetch_optional(self.semantic_pool())
         .await
         .map_err(db_error)?
         .unwrap_or(0);
@@ -398,7 +398,7 @@ impl IndexedVideoDvr {
         .bind(lease_deadline_us)
         .bind(revision)
         .bind(now_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         if result.rows_affected() == 0 {
@@ -444,7 +444,7 @@ impl IndexedVideoDvr {
         .bind(idempotency_key)
         .bind(decision_id)
         .bind(now_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(result.rows_affected() > 0)
@@ -470,7 +470,7 @@ impl IndexedVideoDvr {
         .bind(coverage_s)
         .bind(reason)
         .bind(now_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(u32::try_from(result.rows_affected()).unwrap_or(u32::MAX))
@@ -493,7 +493,7 @@ impl IndexedVideoDvr {
             "SELECT evaluation_attempts FROM frame_decision_evaluation_job_runtime WHERE job_id = ?1",
         )
         .bind(job_id)
-        .fetch_one(self.sqlite_pool())
+        .fetch_one(self.semantic_pool())
         .await
         .map_err(db_error)?;
         let terminal = u32::try_from(attempts.max(0)).unwrap_or(u32::MAX) >= max_attempts;
@@ -525,7 +525,7 @@ impl IndexedVideoDvr {
         .bind(state)
         .bind(now_us)
         .bind(next_retry_at_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(result.rows_affected() > 0)
@@ -551,7 +551,7 @@ impl IndexedVideoDvr {
         )
         .bind(job_id)
         .bind(now_us)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(result.rows_affected() > 0)
@@ -619,7 +619,7 @@ impl IndexedVideoDvr {
             query_builder = query_builder.bind(frame_id);
         }
         let rows = query_builder
-            .fetch_all(self.sqlite_pool())
+            .fetch_all(self.semantic_pool())
             .await
             .map_err(db_error)?;
         let mut report = DecisionEvaluationCoverageReport {

@@ -6,6 +6,7 @@ use a2a_lab_dev_kit::{
     TextEmbeddingProviderConfig, VectorNormalization,
 };
 
+use super::cohere::DEFAULT_COHERE_EMBED_DIMENSIONS;
 use super::prompt::{description_preprocessing_digest, description_prompt_digest};
 
 /// Default local BGE model and its immutable retrieval-space contract.
@@ -46,6 +47,15 @@ pub fn embedding_provider_config_for_model(
 ) -> Result<TextEmbeddingProviderConfig, A2aLabError> {
     let model = model.unwrap_or_else(|| embeddings.model());
     let space = embeddings.space();
+    if embeddings.provider().eq_ignore_ascii_case("bedrock")
+        && model.starts_with("cohere.")
+        && space.dimensions != DEFAULT_COHERE_EMBED_DIMENSIONS
+    {
+        return Err(A2aLabError::invalid(
+            "semantic_indexing.embeddings.space.dimensions",
+            "Cohere Bedrock embeddings require 1024 dimensions",
+        ));
+    }
     if embeddings.provider().eq_ignore_ascii_case("local_bge")
         && (model != DEFAULT_LOCAL_BGE_MODEL
             || space.dimensions != 384
@@ -80,7 +90,6 @@ pub fn default_open_luna_description_provider() -> FrameDescriptionProviderConfi
     .expect("bedrock luna defaults")
 }
 
-/// Convenience: minimal embedding config for contract tests.
 pub fn default_open_luna_embedding_provider(
     semantic: &SemanticIndexingConfig,
 ) -> Result<TextEmbeddingProviderConfig, A2aLabError> {
@@ -89,4 +98,35 @@ pub fn default_open_luna_embedding_provider(
         .as_ref()
         .ok_or_else(|| A2aLabError::invalid("semantic_indexing.mode", "embeddings are disabled"))?;
     embedding_provider_config(embeddings)
+}
+
+/// Convenience: minimal embedding config for contract tests.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use a2a_lab_dev_kit::A2aLabConfig;
+
+    #[test]
+    fn cohere_space_requires_1024_dimensions() {
+        let document = r#"{"schema_version":2,"semantic_indexing":{
+            "embeddings":{"provider":"bedrock","model":"cohere.embed-english-v3","space":{"dimensions":384,"normalization":"l2_unit","metric":"cosine","generation":1}},
+            "limits":{
+                "worker":{"max_batch_items":1,"max_concurrency":1,"max_queue_backlog":1,"max_retry_attempts":1,"job_deadline":"30s","retry_backoff":"5s"},
+                "search":{"top_k":1,"candidate_limit":1,"max_neighbor_frames":1,"query_window":"1h"},
+                "roi":{"min_edge_pixels":280,"max_edge_pixels":1568,"max_rois_per_frame":1},
+                "storage":{"vector_index_path":"./semantic","max_disk_bytes":1024},
+                "decisions":{"max_batch_items":1,"max_concurrency":1,"job_deadline":"45s","coverage_policy":"on_demand"}
+            }
+        }}"#;
+        let config = A2aLabConfig::parse(document).unwrap();
+        let embeddings = config
+            .semantic_indexing
+            .as_ref()
+            .unwrap()
+            .embeddings
+            .as_ref()
+            .unwrap();
+        let error = embedding_provider_config(embeddings).unwrap_err();
+        assert!(error.to_string().contains("1024"));
+    }
 }

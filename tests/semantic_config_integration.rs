@@ -548,8 +548,8 @@ async fn live_semantic_gate_stays_deterministic_without_credentials() {
             .await
             .expect("deterministic bundle");
     let workers = bundle.workers.expect("workers");
-    assert!(!workers.live.uses_live_adapters());
-    assert!(!workers.backfill.uses_live_adapters());
+    assert!(!workers.description.live.uses_live_adapters());
+    assert!(!workers.description.backfill.uses_live_adapters());
     let embedder = build_deterministic_search_embedder(&semantic.config)
         .await
         .expect("deterministic embedder");

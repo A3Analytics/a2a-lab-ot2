@@ -26,6 +26,7 @@ fn resolved_semantic(config: SemanticIndexingConfig) -> ResolvedSemanticIndexing
     ResolvedSemanticIndexing {
         config,
         vector_index_path: std::path::PathBuf::from("./state/semantic-index"),
+        sqlite_path: std::path::PathBuf::from("./state/semantic.sqlite"),
         indexed_source_ids: HashSet::from(["camera".to_owned()]),
     }
 }
@@ -54,10 +55,7 @@ fn isolate_aws_env_for_missing_prerequisites() {
         ] {
             std::env::remove_var(key);
         }
-        std::env::set_var(
-            "AWS_CONFIG_FILE",
-            "/nonexistent/a2a-lab-test-aws-config",
-        );
+        std::env::set_var("AWS_CONFIG_FILE", "/nonexistent/a2a-lab-test-aws-config");
         std::env::set_var(
             "AWS_SHARED_CREDENTIALS_FILE",
             "/nonexistent/a2a-lab-test-aws-credentials",
@@ -94,8 +92,8 @@ async fn live_bedrock_semantic_indexing_gate_contract() {
                 .await
                 .expect("deterministic bundle");
         let workers = bundle.workers.expect("workers");
-        assert!(!workers.live.uses_live_adapters());
-        assert!(!workers.backfill.uses_live_adapters());
+        assert!(!workers.description.live.uses_live_adapters());
+        assert!(!workers.description.backfill.uses_live_adapters());
         let embedder = build_deterministic_search_embedder(&semantic.config)
             .await
             .expect("deterministic embedder");
@@ -114,8 +112,15 @@ async fn live_bedrock_semantic_indexing_gate_contract() {
                 .await
                 .expect("live bundle");
         let workers = bundle.workers.expect("live workers");
-        assert!(workers.live.uses_live_adapters());
-        assert!(workers.backfill.uses_live_adapters());
+        assert!(workers.description.live.uses_live_adapters());
+        assert!(
+            workers
+                .embedding
+                .as_ref()
+                .expect("embedding workers")
+                .live
+                .uses_live_adapters()
+        );
         assert!(bundle.search.is_some());
         unsafe {
             std::env::remove_var("A2ALAB_SEMANTIC_INDEXING_LIVE");

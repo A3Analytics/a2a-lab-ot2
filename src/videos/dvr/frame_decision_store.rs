@@ -30,7 +30,7 @@ impl IndexedVideoDvr {
              ON CONFLICT(frame_id) DO NOTHING",
         )
         .bind(now)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         let marked = sqlx::query(
@@ -39,7 +39,7 @@ impl IndexedVideoDvr {
              WHERE frame_id IN (SELECT frame_id FROM frame_decision_tombstones)
                AND tombstoned = 0",
         )
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(result.rows_affected() + marked.rows_affected())
@@ -65,7 +65,7 @@ impl IndexedVideoDvr {
         let subject_digest = subject_digest(record.subject())?;
 
         let mut tx = self
-            .sqlite_pool()
+            .semantic_pool()
             .begin()
             .await
             .map_err(append_validation)?;
@@ -216,7 +216,7 @@ impl IndexedVideoDvr {
         .bind(predicate_id)
         .bind(label_json)
         .bind(labeled_at)
-        .execute(self.sqlite_pool())
+        .execute(self.semantic_pool())
         .await
         .map_err(db_error)?;
         Ok(())
@@ -271,7 +271,7 @@ impl IndexedVideoDvr {
             .bind(start)
             .bind(end)
             .bind(frame_id)
-            .fetch_all(self.sqlite_pool())
+            .fetch_all(self.semantic_pool())
             .await
             .map_err(db_error)?
         } else {
@@ -284,7 +284,7 @@ impl IndexedVideoDvr {
             .bind(scope.source_id().as_str())
             .bind(start)
             .bind(end)
-            .fetch_all(self.sqlite_pool())
+            .fetch_all(self.semantic_pool())
             .await
             .map_err(db_error)?
         };
@@ -297,7 +297,7 @@ impl IndexedVideoDvr {
         let exists: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM frame_decision_tombstones WHERE frame_id = ?1")
                 .bind(frame_id.as_str())
-                .fetch_optional(self.sqlite_pool())
+                .fetch_optional(self.semantic_pool())
                 .await
                 .map_err(db_error)?;
         Ok(exists.is_some())
