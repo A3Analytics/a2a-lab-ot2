@@ -7,9 +7,10 @@ pub use embedder::DvrSearchEmbedder;
 
 use a2a_lab_dev_kit::{
     A2aLabError, FrameVectorIndexAttachment, GetSemanticIndexingCoverageRequest,
-    ModelSpaceIdentity, SearchSemanticFramesRequest, SemanticFrameSearchResult,
-    SemanticIndexingCoverage, SemanticIndexingFreshness, SemanticIndexingStateCounts,
-    SemanticProvenanceSelector, SemanticVideoSearchProvider, TimeRange,
+    ModelSpaceIdentity, ProvenanceGeneration, SearchSemanticFramesRequest,
+    SemanticFrameSearchResult, SemanticIndexingCoverage, SemanticIndexingFreshness,
+    SemanticIndexingStateCounts, SemanticProvenanceSelector, SemanticVideoSearchProvider,
+    TimeRange,
 };
 use async_trait::async_trait;
 use sqlx::Row;
@@ -34,7 +35,6 @@ fn candidate_micros_bounds(range: Option<TimeRange>) -> (i64, i64) {
 #[derive(Clone)]
 pub struct DvrSemanticSearchProvider {
     dvr: IndexedVideoDvr,
-    model_space: ModelSpaceIdentity,
     active_provenance: SemanticProvenanceSelector,
     source_filter: IndexedSourceFilter,
     embedder: DvrSearchEmbedder,
@@ -52,10 +52,14 @@ impl DvrSemanticSearchProvider {
             .embeddings
             .as_ref()
             .ok_or_else(|| A2aLabError::unavailable("semantic vector search is disabled"))?;
+        embeddings.model_space_identity()?;
+        let active_provenance = SemanticProvenanceSelector::new(
+            embedder.config().model_space().clone(),
+            ProvenanceGeneration::new(1)?,
+        )?;
         Ok(Self {
             dvr,
-            model_space: embeddings.model_space_identity()?,
-            active_provenance: semantic.config.active_search_provenance()?,
+            active_provenance,
             source_filter: IndexedSourceFilter::allow_only(semantic.indexed_source_ids.clone()),
             embedder,
         })
@@ -70,7 +74,6 @@ impl SemanticVideoSearchProvider for DvrSemanticSearchProvider {
     ) -> Result<SemanticFrameSearchResult, A2aLabError> {
         request.check()?;
         self.ensure_configured_scope(request.scope().source_id().as_str())?;
-        self.ensure_active_model_space(request.provenance())?;
         let incomplete_indexing = self
             .incomplete_indexing(
                 request.scope().source_id().as_str(),
@@ -78,9 +81,13 @@ impl SemanticVideoSearchProvider for DvrSemanticSearchProvider {
             )
             .await?;
         let query = resolve_query_vector(&self.dvr, &self.embedder, &request).await?;
+        let selector = SemanticProvenanceSelector::new(
+            self.embedder.config().model_space().clone(),
+            request.provenance().description_generation(),
+        )?;
         let filter = ManifestSearchCandidateFilter {
-            description_generation: request.provenance().description_generation().get(),
-            model_space: request.provenance().model_space().clone(),
+            description_generation: selector.description_generation().get(),
+            model_space: selector.model_space().clone(),
         };
         let (range_start_us, range_end_us) = candidate_micros_bounds(request.scope().range());
         let scan = self
@@ -93,9 +100,12 @@ impl SemanticVideoSearchProvider for DvrSemanticSearchProvider {
                 request.limits().candidate_limit(),
             )
             .await?;
-        let ranked = rank_candidates(&request, &query, scan.records, |record| {
-            attachment_for_candidate(record, request.provenance())
-        })?;
+        let ranked = rank_candidates(
+            selector.model_space().metric(),
+            &query,
+            scan.records,
+            |record| attachment_for_candidate(record, &selector),
+        )?;
         let candidate_budget_exhausted = scan.truncated;
         let ranked = ranked
             .into_iter()
@@ -114,7 +124,6 @@ impl SemanticVideoSearchProvider for DvrSemanticSearchProvider {
         request: GetSemanticIndexingCoverageRequest,
     ) -> Result<SemanticIndexingCoverage, A2aLabError> {
         self.ensure_configured_scope(request.scope().source_id().as_str())?;
-        self.ensure_active_model_space(request.provenance())?;
         let (counts, freshness, scope_complete) = self
             .coverage_snapshot(
                 request.scope().source_id().as_str(),
@@ -141,25 +150,6 @@ impl DvrSemanticSearchProvider {
             return Err(A2aLabError::invalid(
                 "scope.source_id",
                 "source is outside configured semantic indexing scope",
-            ));
-        }
-        Ok(())
-    }
-
-    fn ensure_active_model_space(
-        &self,
-        provenance: &SemanticProvenanceSelector,
-    ) -> Result<(), A2aLabError> {
-        if provenance.model_space() != &self.model_space {
-            return Err(A2aLabError::invalid(
-                "provenance.model_space",
-                "does not match the configured semantic embedding model space",
-            ));
-        }
-        if self.embedder.config().model_space() != provenance.model_space() {
-            return Err(A2aLabError::invalid(
-                "provenance.model_space",
-                "does not match the active query embedding provider model space",
             ));
         }
         Ok(())
@@ -272,15 +262,25 @@ pub(crate) fn attachment_for_candidate(
     let Some(vector) = embedding.vector() else {
         return Ok(None);
     };
+    if !embedding
+        .provenance()
+        .matches_model_space(selector.model_space())
+    {
+        return Ok(None);
+    }
+    let stored_space = ModelSpaceIdentity::new(
+        embedding.provenance().provider(),
+        embedding.provenance().model(),
+        embedding.provenance().dimensions(),
+        embedding.provenance().normalization(),
+        embedding.provenance().metric(),
+        embedding.provenance().generation(),
+    )?;
     let attachment = FrameVectorIndexAttachment::new(
-        selector.model_space().clone(),
+        stored_space,
         description.provenance().clone(),
         embedding.provenance().clone(),
         vector.clone(),
     )?;
-    if selector.accepts_attachment(&attachment) {
-        Ok(Some(attachment))
-    } else {
-        Ok(None)
-    }
+    Ok(Some(attachment))
 }

@@ -11,7 +11,6 @@ use super::bedrock::{ensure_live_bedrock_description, ensure_live_bedrock_ready}
 use super::bundle::SemanticIndexingProviders;
 use super::config::{
     description_provider_config, description_provider_config_for_model, embedding_provider_config,
-    embedding_provider_config_for_model,
 };
 use super::description::LunaFrameDescriptionProvider;
 use super::embedding::ConfiguredTextEmbeddingProvider;
@@ -103,8 +102,7 @@ pub async fn build_deterministic_providers_for_source(
             "embeddings are disabled",
         )
     })?;
-    let embedding_config =
-        embedding_provider_config_for_model(embeddings, schedule.embedding_model())?;
+    let embedding_config = linked_embedding_config(embeddings, schedule.embedding_model())?;
     Ok(SemanticIndexingProviders::new(
         FakeFrameDescriptionProvider::new(
             description_config,
@@ -187,8 +185,7 @@ pub async fn build_live_providers_for_source<M: FrameDescriptionMedia + Send + S
             "embeddings are disabled",
         )
     })?;
-    let embedding_config =
-        embedding_provider_config_for_model(embeddings, schedule.embedding_model())?;
+    let embedding_config = linked_embedding_config(embeddings, schedule.embedding_model())?;
     ensure_live_bedrock_ready(&description_config, &embedding_config)
         .await
         .map_err(map_indexing_failure)?;
@@ -228,6 +225,22 @@ pub async fn build_live_description_provider<M: FrameDescriptionMedia + Send + S
     )
     .await
     .map_err(map_indexing_failure)
+}
+
+fn linked_embedding_config(
+    embeddings: &a2a_lab_dev_kit::SemanticEmbeddingsConfig,
+    model_override: Option<&str>,
+) -> Result<a2a_lab_dev_kit::TextEmbeddingProviderConfig, a2a_lab_dev_kit::A2aLabError> {
+    if model_override.is_some_and(|model| model != embeddings.model()) {
+        return Err(a2a_lab_dev_kit::A2aLabError::invalid(
+            "videos.sources.semantic_indexing.embedding_model",
+            format!(
+                "must match semantic_indexing.embeddings.model ({})",
+                embeddings.model()
+            ),
+        ));
+    }
+    embedding_provider_config(embeddings)
 }
 
 fn map_indexing_failure(

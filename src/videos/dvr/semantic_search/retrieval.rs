@@ -60,14 +60,13 @@ pub(crate) async fn resolve_query_vector(
 }
 
 pub(crate) fn rank_candidates(
-    request: &SearchSemanticFramesRequest,
+    metric: EmbeddingMetric,
     query: &FrameEmbeddingVector,
     records: Vec<SemanticFrameManifestRecord>,
     mut attachment_for: impl FnMut(
         &SemanticFrameManifestRecord,
     ) -> Result<Option<FrameVectorIndexAttachment>, A2aLabError>,
 ) -> Result<Vec<RankedCandidate>, A2aLabError> {
-    let metric = request.provenance().model_space().metric();
     let query_values = query.values();
     let mut ranked = Vec::new();
     for record in records {

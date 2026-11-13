@@ -429,7 +429,6 @@ impl IndexedVideoDvr {
         }
         let space = &filter.model_space;
         let generation = i64::try_from(filter.description_generation).unwrap_or(i64::MAX);
-        let space_generation = i64::try_from(space.generation().get()).unwrap_or(i64::MAX);
         let fetch_limit = i64::from(scan_limit.saturating_add(1));
         let rows = sqlx::query(
             "SELECT rev.frame_id, rev.store_namespace, rev.source_id, rev.track_id, rev.start_us,
@@ -452,11 +451,10 @@ impl IndexedVideoDvr {
                AND emb.dimensions = ?7
                AND emb.normalization = ?8
                AND emb.metric = ?9
-               AND emb.model_space_generation = ?10
                AND emb.embedding_vector IS NOT NULL
                AND length(emb.embedding_vector) > 0
              ORDER BY rev.start_us ASC, rev.frame_id ASC
-             LIMIT ?11",
+             LIMIT ?10",
         )
         .bind(source_id)
         .bind(range_start_us)
@@ -467,7 +465,6 @@ impl IndexedVideoDvr {
         .bind(i64::from(space.dimensions()))
         .bind(normalization_label(space.normalization()))
         .bind(metric_label(space.metric()))
-        .bind(space_generation)
         .bind(fetch_limit)
         .fetch_all(self.semantic_pool())
         .await

@@ -367,7 +367,7 @@ async fn stale_search_current_revision_is_not_retrieved() {
 }
 
 #[tokio::test]
-async fn mismatched_model_space_is_rejected() {
+async fn changed_embedding_generation_searches_stored_vectors() {
     let (dir, store) = open_store("mismatch").await;
     let source = VideoSourceId::new("cam-a").unwrap();
     let provider = provider(&store, "cam-a");
@@ -394,7 +394,7 @@ async fn mismatched_model_space_is_rejected() {
         frame.captured_at(),
         frame.captured_at().saturating_add_micros(5_000_000),
     );
-    let err = provider
+    let result = provider
         .search_semantic_frames(
             SearchSemanticFramesRequest::new(
                 scope,
@@ -410,8 +410,12 @@ async fn mismatched_model_space_is_rejected() {
             .unwrap(),
         )
         .await
-        .unwrap_err();
-    assert!(err.to_string().contains("model space"));
+        .unwrap();
+    assert_eq!(result.hits().items().len(), 1);
+    assert_eq!(
+        result.hits().items()[0].frame().frame_id(),
+        frame.frame_id()
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

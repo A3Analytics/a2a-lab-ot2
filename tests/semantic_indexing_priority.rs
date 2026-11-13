@@ -387,7 +387,7 @@ fn alternate_embedding_config() -> SemanticEmbeddingsConfig {
         env!("CARGO_MANIFEST_DIR"),
         "/../a2a-lab-dev-kit-rs/tests/fixtures/a2a-lab-v2-semantic-valid.json"
     )),);
-    let json = BASE.replace("operator-text-embed-v1", "operator-text-embed-v2");
+    let json = BASE.replace("cohere.embed-english-v3", "cohere.embed-english-v3-next");
     A2aLabConfig::parse(&json)
         .unwrap()
         .semantic_indexing

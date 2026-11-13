@@ -15,18 +15,19 @@ pub const DEFAULT_COHERE_EMBED_DIMENSIONS: u32 = 1024;
 struct CohereEmbedRequest<'a> {
     texts: &'a [&'a str],
     input_type: &'a str,
-    embedding_types: &'static [&'static str],
+    truncate: &'a str,
 }
 
 #[derive(Deserialize)]
 struct CohereEmbedResponse {
-    embeddings: Vec<CohereEmbeddingBlock>,
+    embeddings: CohereEmbeddings,
 }
 
 #[derive(Deserialize)]
-struct CohereEmbeddingBlock {
-    #[serde(default)]
-    float: Vec<Vec<f32>>,
+#[serde(untagged)]
+enum CohereEmbeddings {
+    Floats(Vec<Vec<f32>>),
+    ByType { float: Vec<Vec<f32>> },
 }
 
 /// Embeds one batch of texts through Bedrock Cohere embed.
@@ -45,7 +46,7 @@ pub async fn cohere_embed_texts(
     let body = serde_json::to_vec(&CohereEmbedRequest {
         texts,
         input_type,
-        embedding_types: &["float"],
+        truncate: "END",
     })
     .map_err(|error| SemanticIndexingFailure::ProviderUnavailable {
         message: format!("Cohere request encode failed: {error}"),
@@ -58,28 +59,39 @@ pub async fn cohere_embed_texts(
         .body(Blob::new(body))
         .send()
         .await
-        .map_err(|error| super::bedrock::map_bedrock_invoke_failure(&error.to_string()))?;
-    let parsed: CohereEmbedResponse =
-        serde_json::from_slice(response.body().as_ref()).map_err(|error| {
-            SemanticIndexingFailure::PartialResponse {
-                message: format!("Cohere response decode failed: {error}"),
-            }
+        .map_err(|error| {
+            let detail = error
+                .as_service_error()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| error.to_string());
+            super::bedrock::map_bedrock_invoke_failure(&detail)
         })?;
-    let Some(block) = parsed.embeddings.first() else {
-        return Err(SemanticIndexingFailure::PartialResponse {
-            message: "Cohere response missing embeddings".to_owned(),
-        });
+    vectors_from_cohere_body(response.body().as_ref(), expected_dims, texts.len())
+}
+
+fn vectors_from_cohere_body(
+    body: &[u8],
+    expected_dims: usize,
+    text_count: usize,
+) -> Result<Vec<Vec<f32>>, SemanticIndexingFailure> {
+    let parsed: CohereEmbedResponse =
+        serde_json::from_slice(body).map_err(|error| SemanticIndexingFailure::PartialResponse {
+            message: format!("Cohere response decode failed: {error}"),
+        })?;
+    let vectors = match parsed.embeddings {
+        CohereEmbeddings::Floats(vectors) => vectors,
+        CohereEmbeddings::ByType { float } => float,
     };
-    if block.float.len() != texts.len() {
+    if vectors.len() != text_count {
         return Err(SemanticIndexingFailure::PartialResponse {
             message: format!(
                 "Cohere returned {} vectors for {} inputs",
-                block.float.len(),
-                texts.len()
+                vectors.len(),
+                text_count
             ),
         });
     }
-    for vector in &block.float {
+    for vector in &vectors {
         if vector.len() != expected_dims {
             return Err(SemanticIndexingFailure::InvalidVector {
                 message: format!(
@@ -95,7 +107,7 @@ pub async fn cohere_embed_texts(
             });
         }
     }
-    Ok(block.float.clone())
+    Ok(vectors)
 }
 
 #[must_use]
@@ -111,5 +123,16 @@ mod tests {
     fn default_model_constants_match_v3_english() {
         assert_eq!(DEFAULT_COHERE_EMBED_MODEL, "cohere.embed-english-v3");
         assert_eq!(DEFAULT_COHERE_EMBED_DIMENSIONS, 1024);
+    }
+
+    #[test]
+    fn parses_v3_float_array_and_typed_object() {
+        let array = br#"{"embeddings":[[0.25,0.5]],"response_type":"embeddings_floats"}"#;
+        let typed =
+            br#"{"embeddings":{"float":[[0.25,0.5]]},"response_type":"embeddings_by_type"}"#;
+        for body in [array.as_slice(), typed.as_slice()] {
+            let vectors = vectors_from_cohere_body(body, 2, 1).expect("vectors");
+            assert_eq!(vectors, vec![vec![0.25, 0.5]]);
+        }
     }
 }
