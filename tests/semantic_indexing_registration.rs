@@ -2,12 +2,47 @@
 
 use std::time::Duration;
 
+use a2a_lab_dev_kit::videos::{
+    AdvertisedCaptureProfile, CaptureFormat, CaptureMode, CaptureRate, ColorCamera,
+    RawCameraSample, SelectedCaptureProfile,
+};
 use a2a_lab_dev_kit::{DvrStoreNamespace, DvrTrackId, MemoryVideos, VideoSourceId};
 use a2a_lab_ot2::videos::dvr::{
     DEFAULT_RECONCILE_BATCH, DEFAULT_SEMANTIC_STORE_NAMESPACE, MediaPayloadStatus,
     RegisterManifestOutcome,
 };
-use a2a_lab_ot2::{IndexedVideoDvr, LiveVideoInjections, start_live_video_catalog};
+use a2a_lab_ot2::{
+    IndexedVideoDvr, LiveVideoInjections, LiveVideoSourceDescriptor,
+    start_fixture_declarative_serve,
+};
+
+struct IdleCamera;
+
+impl ColorCamera for IdleCamera {
+    fn advertised(
+        &mut self,
+    ) -> Result<Vec<AdvertisedCaptureProfile>, a2a_lab_dev_kit::A2aLabError> {
+        Ok(vec![AdvertisedCaptureProfile::new(
+            CaptureMode::new(CaptureFormat::Mjpeg, 4, 4).expect("mode"),
+            CaptureRate::fps(5).expect("rate"),
+        )])
+    }
+
+    fn open(
+        &mut self,
+        selected: &SelectedCaptureProfile,
+    ) -> Result<SelectedCaptureProfile, a2a_lab_dev_kit::A2aLabError> {
+        Ok(*selected)
+    }
+
+    fn raw_frame(&mut self) -> Result<RawCameraSample, a2a_lab_dev_kit::A2aLabError> {
+        Ok(RawCameraSample::new(CaptureFormat::Mjpeg, 4, 4, 0, jpeg(0)))
+    }
+
+    fn stop(&mut self) -> Result<(), a2a_lab_dev_kit::A2aLabError> {
+        Ok(())
+    }
+}
 fn temp_root(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "a2a-lab-ot2-indexing-{name}-{}",
@@ -260,15 +295,15 @@ async fn open_does_not_synchronously_backfill_indexing_jobs() {
 async fn live_catalog_annotation_queue_backfills_and_survives_restart() {
     const FRAMES: usize = 12;
     let dir = seed_retained_frames_missing_jobs(FRAMES).await;
-    let catalog = start_live_video_catalog(
-        &[],
+    let catalog = start_fixture_declarative_serve(
+        vec![LiveVideoSourceDescriptor::legacy_camera(0)],
         5,
         60,
         86_400,
         &dir,
         2_000_000,
         None,
-        LiveVideoInjections::none(),
+        LiveVideoInjections::none().with_color_camera("camera", Box::new(IdleCamera)),
     )
     .await
     .unwrap();
@@ -287,15 +322,15 @@ async fn live_catalog_annotation_queue_backfills_and_survives_restart() {
     let persisted = catalog.dvr().count_indexing_jobs().await.unwrap();
     catalog.shutdown();
     drop(catalog);
-    let reopened = start_live_video_catalog(
-        &[],
+    let reopened = start_fixture_declarative_serve(
+        vec![LiveVideoSourceDescriptor::legacy_camera(0)],
         5,
         60,
         86_400,
         &dir,
         2_000_000,
         None,
-        LiveVideoInjections::none(),
+        LiveVideoInjections::none().with_color_camera("camera", Box::new(IdleCamera)),
     )
     .await
     .unwrap();

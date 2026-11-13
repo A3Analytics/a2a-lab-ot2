@@ -22,14 +22,14 @@ use a2a_lab_ot2::{
     ClapValueSource, ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS,
     DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_IMAGE_RETENTION_PER_SOURCE, DEFAULT_SILA_PORT,
     DEFAULT_SILA_UUID, DEFAULT_SYNC_CHUNK_ROOT, DEFAULT_SYNC_DB, DEFAULT_VIDEO_DVR_ROOT,
-    DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, ExplicitSetting, FixtureConfig, FixtureServer,
-    FixtureVariant, ImageHistoryMaintenance, ImageServeConfig, LabAgent, LabConfigBootstrap,
-    LabConfigCliValues, LabConfigInputs, LiveImageCatalog, LiveVideoCatalog, LiveVideoInjections,
-    ModelProvider, OidcConfig, OpentronsLab, ServeChatLegacyInputs, SilaConfig, VideoServeConfig,
-    bootstrap_lab_config, build_serve_lab_agent, image_catalog, open_image_catalog,
-    open_resolved_video_catalog_with_semantic, open_video_catalog, prepare_sila,
-    resolve_lab_config, resolved_lab_config, resolved_video_summary, selected_config_path,
-    sila_server, uses_resolved_video_configuration, with_oidc,
+    DEFAULT_VIDEO_FPS, DEFAULT_VIDEO_RETENTION_SECS, DeclarativeVideoServe, ExplicitSetting,
+    FixtureConfig, FixtureServer, FixtureVariant, ImageHistoryMaintenance, ImageServeConfig,
+    LabAgent, LabConfigBootstrap, LabConfigCliValues, LabConfigInputs, LiveImageCatalog,
+    LiveVideoInjections, ModelProvider, OidcConfig, OpentronsLab, ServeChatLegacyInputs,
+    SilaConfig, VideoServeConfig, bootstrap_lab_config, build_serve_lab_agent, image_catalog,
+    open_image_catalog, open_resolved_video_catalog_with_semantic, open_video_catalog,
+    prepare_sila, resolve_lab_config, resolved_lab_config, resolved_video_summary,
+    selected_config_path, sila_server, uses_resolved_video_configuration, with_oidc,
 };
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -812,18 +812,16 @@ async fn open_frame_sets(
 async fn prepare_serve_images(
     lab: &OpentronsLab,
     cli: &Cli,
-    config_inputs: &LabConfigInputs,
-    bootstrap: Option<&LabConfigBootstrap>,
+    images: &ImageServeConfig,
+    still_cache: Option<&a2a_lab_dev_kit::videos::WarmStillCache>,
 ) -> Result<
     (
-        ImageServeConfig,
         LiveImageCatalog,
         Option<ImageHistoryMaintenance>,
         Option<a2a_lab_ot2::SessionPump>,
     ),
     Box<dyn std::error::Error>,
 > {
-    let images = prepare_images(cli, config_inputs, bootstrap)?;
     let opentrons = format!("opentrons robot-server at {}", cli.opentrons_url);
     lab.client()
         .health()
@@ -843,11 +841,17 @@ async fn prepare_serve_images(
     let orbbec_capture = pump
         .as_ref()
         .map(|pump| Arc::clone(&pump.session) as Arc<dyn a2a_lab_ot2::orbbec::OrbbecCapture>);
-    let catalog = open_image_catalog(&cli.opentrons_url, &images, None, orbbec_capture)
-        .await
-        .map_err(|error| startup_error("images", error))?;
+    let catalog = open_image_catalog(
+        &cli.opentrons_url,
+        images,
+        None,
+        orbbec_capture,
+        still_cache,
+    )
+    .await
+    .map_err(|error| startup_error("images", error))?;
     let maintenance = catalog.maintain_history();
-    Ok((images, catalog, maintenance, pump))
+    Ok((catalog, maintenance, pump))
 }
 
 #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
@@ -857,9 +861,11 @@ async fn serve(
     config_inputs: &LabConfigInputs,
     bootstrap: Option<&LabConfigBootstrap>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (images, catalog, _history_maintenance, capture_pump) =
-        prepare_serve_images(&lab, cli, config_inputs, bootstrap).await?;
+    let images = prepare_images(cli, config_inputs, bootstrap)?;
     let videos = prepare_serve_videos(cli, config_inputs, bootstrap).await?;
+    let still_cache = videos.as_ref().map(DeclarativeVideoServe::still_cache);
+    let (catalog, _history_maintenance, capture_pump) =
+        prepare_serve_images(&lab, cli, &images, still_cache).await?;
     let frame_sets = open_frame_sets(
         &images,
         &catalog,
@@ -924,6 +930,9 @@ async fn serve(
     let mut a2a = A2aServer::new(&service)
         .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>)
         .with_web_ui();
+    if let Some(videos) = videos.as_ref() {
+        a2a = a2a.with_capture_settings(videos.settings_handle());
+    }
     let a2a_listener = TcpListener::bind(format!("{}:31000", cli.a2alab_listen_host))
         .await
         .map_err(|error| startup_error("a2a", error))?;
@@ -977,7 +986,7 @@ async fn prepare_serve_videos(
     cli: &Cli,
     inputs: &LabConfigInputs,
     bootstrap: Option<&LabConfigBootstrap>,
-) -> Result<Option<LiveVideoCatalog>, Box<dyn std::error::Error>> {
+) -> Result<Option<DeclarativeVideoServe>, Box<dyn std::error::Error>> {
     if uses_resolved_video_configuration(inputs)? {
         let resolved = resolved_lab_config(bootstrap, inputs)?;
         return open_resolved_video_catalog_with_semantic(
@@ -1005,7 +1014,7 @@ fn merged_video_config(cli: &Cli) -> Result<VideoServeConfig, a2a_lab_dev_kit::A
 
 fn share_with_videos(
     service: A2aLabService<OpentronsLab, OpentronsLab, OpentronsLab, LiveImageCatalog>,
-    videos: Option<&LiveVideoCatalog>,
+    videos: Option<&DeclarativeVideoServe>,
 ) -> Arc<dyn A2aLabApi> {
     match videos {
         Some(videos) => {
@@ -1323,6 +1332,7 @@ fn camera_catalog(cli: &Cli) -> Result<a2a_lab_ot2::LiveImageCatalog, Box<dyn st
         &image_config(cli)?,
         None,
         None,
+        None,
     )?)
 }
 
@@ -1347,7 +1357,8 @@ async fn get_current_image(
     source: &str,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None, None).await?;
+    let catalog =
+        open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None, None, None).await?;
     let image = catalog
         .get_current_image(GetCurrentImageRequest::new(ImageSourceId::new(source)?))
         .await?;
@@ -1375,7 +1386,8 @@ async fn get_stored_image(
     id: &str,
     output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let catalog = open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None, None).await?;
+    let catalog =
+        open_image_catalog(&cli.opentrons_url, &image_config(cli)?, None, None, None).await?;
     let image = catalog
         .get_image(GetImageRequest::new(ImageId::new(id)?))
         .await?;

@@ -1,4 +1,5 @@
 //! Retained interval and gap derivation from indexed segment starts.
+#![expect(dead_code)]
 
 use a2a_lab_dev_kit::{A2aLabError, TimeRange, UtcTimestamp};
 

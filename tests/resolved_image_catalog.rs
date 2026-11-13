@@ -8,8 +8,7 @@ use a2a_lab_ot2::{
 };
 
 fn example_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".mise/examples/videos-only.json")
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".mise/examples/videos-only.json")
 }
 
 fn jpeg() -> Vec<u8> {
@@ -30,7 +29,7 @@ async fn configured_video_sources_register_custom_image_sources() {
     let config = ImageServeConfig::new(None, None, 64 * 1024, 10_000, 30)
         .unwrap()
         .with_native_video_sources(&resolved.video.sources);
-    let catalog = image_catalog("http://127.0.0.1:31950", &config, None, None).unwrap();
+    let catalog = image_catalog("http://127.0.0.1:31950", &config, None, None, None).unwrap();
     let page = catalog
         .list_image_sources(
             ListImageSourcesRequest::new(PageRequest::new(None, 20).unwrap()).unwrap(),
@@ -50,8 +49,10 @@ async fn configured_video_sources_register_custom_image_sources() {
 #[tokio::test]
 async fn custom_source_stills_are_isolated() {
     a2a_lab_ot2::camera::clear_all_live_stills();
-    let built_in = PumpLinkedStill::new("mac-built-in", "Mac built-in", 64 * 1024).unwrap();
-    let usb = PumpLinkedStill::new("usb-webcam", "USB webcam", 64 * 1024).unwrap();
+    let cache = a2a_lab_dev_kit::videos::WarmStillCache::new();
+    let built_in =
+        PumpLinkedStill::new("mac-built-in", "Mac built-in", 64 * 1024, cache.clone()).unwrap();
+    let usb = PumpLinkedStill::new("usb-webcam", "USB webcam", 64 * 1024, cache).unwrap();
     let frame = jpeg();
     remember_live_still("mac-built-in", frame.clone());
     let built_in_frame = built_in.capture().await.expect("built-in still");

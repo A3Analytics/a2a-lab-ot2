@@ -62,11 +62,15 @@ Omitted `fps`, live retention, DVR retention, and storage path keep the current 
 
 ## Video sources
 
-`videos` may be omitted. When it is present, `sources` is required. An empty list means no file-configured capture. Each source needs a unique id, `format`, and `device_index`. Ids are the stable name for discovery, live media, and retained DVR. Reordering entries does not change that identity. `device_index` is the local capture-library index, including zero. That number depends on the backend and is not portable across machines or stable after reconnects and enumeration changes. Check it on each deployment. Keep the same id when the index changes so existing DVR rows stay with that source.
+`videos` may be omitted. When it is present, `sources` is required. An empty list means no file-configured capture. Each source needs a unique id and `format`. Prefer `camera_id` (integer index or stable text id discovered by the devkit enumerator) over legacy `device_index`; when both are set they must agree or validation fails. Ids are the stable name for discovery, live media, retained DVR, and the runtime warm still cache. Reordering entries does not change that identity.
 
-`format` is the camera input. `mjpeg` requests JPEG frames from the device. `yuy2` requests packed YUY2 bytes. `yuyv` is an alias of `yuy2`. Input format does not choose the output codec. `external-camera` stays on the existing H.264 delivery path. `camera` and other ids stay on the existing MJPEG delivery path. There is no `output_format` or `backend` field. A device that cannot provide the requested mode fails that source only. Validation does not open the device, so it cannot prove the camera supports the mode.
+`format` is the camera input. `auto` lets the declarative runtime negotiate MJPEG or YUY2 at the configured width, height, and `capture_rate`. `mjpeg` requests JPEG frames. `yuy2` requests packed YUY2 bytes; `yuyv` is an alias. Input format does not select the output codec: live follow and DVR recording use the devkit color pipeline (H.264 for configured native sources). There is no `output_format` or `backend` field. Validation does not open the device, so it cannot prove the camera supports the mode; a missing or busy camera fails that source at runtime without stopping other sources.
 
-Still images for `external-camera` and `camera` stay on the existing image history path. The OT-2 onboard camera and Orbbec frame sets are separate and are not entries in this file.
+Legacy `--external-camera-index`, `--camera-index`, and matching environment variables still add or replace `external-camera` and `camera` with MJPEG input mapped into the same declarative `VideoConfig` as file entries. When a configuration file is selected, `serve` starts only the declarative runtime path—there is no separate OT-2 capture pump.
+
+Still images for file-configured video sources use the runtime `still_cache` when the source is enabled on `serve`; the separate `opentrons-camera` image history path is unchanged. OT-2 onboard robot pictures and Orbbec frame sets are not `videos.sources` entries.
+
+While `serve` runs, A2A exposes the runtime capture-settings document through `A2aServer::with_capture_settings` (same settings surface as the devkit web UI capture view). Changing capture parameters follows the devkit settings-watch contract; edits are not written back to the JSON file.
 
 ## Chat
 

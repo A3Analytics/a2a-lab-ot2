@@ -7,6 +7,15 @@ description = "Example lab agent wrapping an Opentrons OT-2 robot-server simulat
 publish = false
 default-run = "a2a-lab-ot2"
 
+[profile.dev.package.openh264]
+opt-level = 3
+
+[profile.dev.package.yuv]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 3
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 cognitive_complexity = "warn"
@@ -20,6 +29,7 @@ a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", r
     "web-ui",
     "yuv",
     "openh264",
+    "nokhwa",
 ] }
 async-trait = "0.1"
 base64 = "0.22.1"
@@ -41,7 +51,10 @@ fastembed = { version = "7.7.0", default-features = false, features = [
     "ort-download-binaries-rustls-tls",
     "hf-hub-rustls-tls",
 ] }
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25.10", default-features = false, features = [
+    "png",
+    "jpeg",
+] }
 yuv = { version = "0.8.20", default-features = false, features = ["sse"] }
 openh264 = { version = "0.9.9", features = ["source"] }
 jiff = { version = "0.2.37", features = ["serde"] }

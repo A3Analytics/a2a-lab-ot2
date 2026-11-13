@@ -3,6 +3,10 @@
 use std::collections::HashSet;
 
 use a2a_lab_dev_kit::A2aLabError;
+use a2a_lab_dev_kit::CameraSelector;
+use a2a_lab_dev_kit::VideoInputFormat;
+use a2a_lab_dev_kit::VideoSourceConfig;
+use a2a_lab_dev_kit::VideoSourceId;
 use a2a_lab_dev_kit::videos::{CaptureFormatPreference, CaptureProfileRequest, CaptureRate};
 
 use crate::camera::{
@@ -48,14 +52,22 @@ pub struct LiveVideoSourceDescriptor {
     pub id: String,
     pub name: String,
     pub description: String,
-    /// Deployment-specific capture-library index.
-    pub device_index: u32,
+    /// Declarative selector from file or legacy index flags.
+    pub camera_id: Option<CameraSelector>,
+    /// Capture-library index when [`Self::camera_id`] is index-based.
+    pub device_index: Option<u32>,
     pub input: LiveCameraInputFormat,
     pub width: Option<u32>,
     pub height: Option<u32>,
     /// Optional capture frame rate. Independent of live output `videos.fps`.
     pub capture_rate: Option<u32>,
     pub delivery: LiveVideoDelivery,
+}
+
+/// Index-based `camera_id` fields for fixtures and manual descriptors.
+#[must_use]
+pub fn index_camera_fields(index: u32) -> (Option<CameraSelector>, Option<u32>) {
+    (Some(CameraSelector::Index(index)), Some(index))
 }
 
 impl LiveVideoSourceDescriptor {
@@ -66,7 +78,8 @@ impl LiveVideoSourceDescriptor {
             id: EXTERNAL_CAMERA_SOURCE_ID.to_owned(),
             name: "External camera".to_owned(),
             description: description.into(),
-            device_index: index,
+            camera_id: Some(CameraSelector::Index(index)),
+            device_index: Some(index),
             input: LiveCameraInputFormat::Mjpeg,
             width: Some(EXTERNAL_CAMERA_WIDTH),
             height: Some(EXTERNAL_CAMERA_HEIGHT),
@@ -82,7 +95,8 @@ impl LiveVideoSourceDescriptor {
             id: CAMERA_SOURCE_ID.to_owned(),
             name: "Camera".to_owned(),
             description: "Live MJPEG from the configured camera.".to_owned(),
-            device_index: index,
+            camera_id: Some(CameraSelector::Index(index)),
+            device_index: Some(index),
             input: LiveCameraInputFormat::Mjpeg,
             width: Some(1280),
             height: Some(720),
@@ -101,6 +115,50 @@ impl LiveVideoSourceDescriptor {
             CaptureRate::fps(output_fps.max(1))?,
             capture_rate,
         )
+    }
+
+    /// Declarative devkit source entry for [`DeclarativeVideoRuntime`].
+    pub fn to_video_source_config(&self) -> Result<VideoSourceConfig, A2aLabError> {
+        Ok(VideoSourceConfig {
+            id: VideoSourceId::new(&self.id)?,
+            name: Some(self.name.clone()),
+            description: Some(self.description.clone()),
+            format: match self.input {
+                LiveCameraInputFormat::Auto => VideoInputFormat::Auto,
+                LiveCameraInputFormat::Mjpeg => VideoInputFormat::Mjpeg,
+                LiveCameraInputFormat::Yuy2 => VideoInputFormat::Yuy2,
+            },
+            camera_id: self.camera_id.clone(),
+            width: self.width,
+            height: self.height,
+            capture_rate: self.capture_rate,
+            semantic_indexing: None,
+        })
+    }
+
+    /// Resolved camera label for logs and operator diagnostics.
+    #[must_use]
+    pub fn camera_id_label(&self) -> String {
+        match &self.camera_id {
+            Some(CameraSelector::Text(text)) => text.clone(),
+            Some(CameraSelector::Index(index)) => index.to_string(),
+            None => self
+                .device_index
+                .map_or_else(|| "default".to_owned(), |index| index.to_string()),
+        }
+    }
+
+    /// Capture-library index for native open. Text selectors fail here until runtime resolution.
+    pub fn index_for_capture(&self) -> Result<u32, A2aLabError> {
+        self.device_index.ok_or_else(|| {
+            A2aLabError::invalid(
+                "video",
+                format!(
+                    "source `{}` requires an index-based camera_id for native capture",
+                    self.id
+                ),
+            )
+        })
     }
 
     /// Returns true for configuration-defined ids (not legacy schema defaults).
@@ -132,13 +190,12 @@ pub fn validate_live_sources(sources: &[LiveVideoSourceDescriptor]) -> Result<()
                 format!("duplicate live video source id `{}`", source.id),
             ));
         }
-        if !devices.insert(source.device_index) {
+        if let Some(index) = source.device_index
+            && !devices.insert(index)
+        {
             return Err(A2aLabError::invalid(
                 "video",
-                format!(
-                    "device index {} is already assigned to another live video source",
-                    source.device_index
-                ),
+                format!("device index {index} is already assigned to another live video source"),
             ));
         }
     }

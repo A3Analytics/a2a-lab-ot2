@@ -7,14 +7,14 @@
         "name": "External camera",
         "description": "Still frame from the configured external camera.",
         "format": "mjpeg",
-        "device_index": 4
+        "camera_id": 4
       },
       {
         "id": "camera",
         "name": "Camera",
         "description": "Live MJPEG from the configured camera.",
         "format": "yuy2",
-        "device_index": 0
+        "camera_id": 0
       }
     ],
     "live_retention": "5s",

@@ -5,12 +5,12 @@
       {
         "id": "external-camera",
         "format": "mjpeg",
-        "device_index": 4
+        "camera_id": 4
       },
       {
         "id": "camera",
         "format": "yuy2",
-        "device_index": 0
+        "camera_id": 0
       }
     ],
     "fps": 5,

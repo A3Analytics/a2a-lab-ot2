@@ -225,10 +225,18 @@ fn file_names_survive_explicit_device_indexes() {
         .find(|source| source.id == "external-camera")
         .unwrap();
     assert_eq!(camera.name, "orbbec");
-    assert_eq!(camera.device_index, 12);
+    assert_eq!(camera.device_index, Some(12));
+    assert_eq!(
+        camera.camera_id,
+        Some(a2a_lab_dev_kit::CameraSelector::Index(12))
+    );
     assert_eq!(camera.delivery, crate::videos::LiveVideoDelivery::H264);
     assert_eq!(external.name, "emeet");
-    assert_eq!(external.device_index, 4);
+    assert_eq!(external.device_index, Some(4));
+    assert_eq!(
+        external.camera_id,
+        Some(a2a_lab_dev_kit::CameraSelector::Index(4))
+    );
     assert_eq!(
         external.description,
         "Still frame from the configured external camera."
@@ -248,7 +256,11 @@ fn explicit_camera_index_enables_source_from_empty_file_list() {
     let resolved = resolve(&inputs, Some(&loaded)).unwrap();
     assert_eq!(resolved.video.sources.len(), 1);
     assert_eq!(resolved.video.sources[0].id, "camera");
-    assert_eq!(resolved.video.sources[0].device_index, 2);
+    assert_eq!(resolved.video.sources[0].device_index, Some(2));
+    assert_eq!(
+        resolved.video.sources[0].camera_id,
+        Some(a2a_lab_dev_kit::CameraSelector::Index(2))
+    );
 }
 
 #[test]
@@ -263,6 +275,102 @@ fn description_override_does_not_enable_external_source() {
     };
     let resolved = resolve(&inputs, Some(&loaded)).unwrap();
     assert!(resolved.video.sources.is_empty());
+}
+
+#[test]
+fn file_camera_id_integer_and_text_map_to_declarative_sources() {
+    let dir = std::env::temp_dir().join(format!("a2a-lab-ot2-camera-id-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a2a-lab.json");
+    let loaded = load_config_file(
+        r#"{"schema_version":1,"videos":{"sources":[
+            {"id":"index-src","format":"auto","camera_id":3,"width":640,"height":480},
+            {"id":"text-src","format":"auto","camera_id":"emeet-webcam","width":1280,"height":720}
+        ]}}"#,
+        &path,
+    );
+    let resolved = resolve(&LabConfigInputs::default(), Some(&loaded)).unwrap();
+    let index = resolved
+        .video
+        .sources
+        .iter()
+        .find(|source| source.id == "index-src")
+        .unwrap();
+    let text = resolved
+        .video
+        .sources
+        .iter()
+        .find(|source| source.id == "text-src")
+        .unwrap();
+    assert_eq!(index.input, crate::videos::LiveCameraInputFormat::Auto);
+    assert_eq!(
+        index.camera_id,
+        Some(a2a_lab_dev_kit::CameraSelector::Index(3))
+    );
+    assert_eq!(index.device_index, Some(3));
+    assert_eq!(text.input, crate::videos::LiveCameraInputFormat::Auto);
+    assert_eq!(
+        text.camera_id,
+        Some(a2a_lab_dev_kit::CameraSelector::Text(
+            "emeet-webcam".to_owned()
+        ))
+    );
+    assert_eq!(text.device_index, None);
+}
+
+#[test]
+fn env_camera_index_matches_file_camera_id_entry() {
+    let dir = std::env::temp_dir().join(format!("a2a-lab-ot2-env-camera-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a2a-lab.json");
+    let loaded = load_config_file(
+        r#"{"schema_version":1,"videos":{"sources":[
+            {"id":"camera","format":"yuy2","camera_id":5}
+        ]}}"#,
+        &path,
+    );
+    let from_file = resolve(&LabConfigInputs::default(), Some(&loaded)).unwrap();
+    let from_env = resolve(
+        &LabConfigInputs {
+            camera_index: ExplicitSetting::env(Some(5)),
+            ..LabConfigInputs::default()
+        },
+        Some(&load_config_file(
+            r#"{"schema_version":1,"videos":{"sources":[]}}"#,
+            &path,
+        )),
+    )
+    .unwrap();
+    assert_eq!(
+        from_file.video.sources[0].camera_id,
+        from_env.video.sources[0].camera_id
+    );
+    assert_eq!(
+        from_file.video.sources[0].device_index,
+        from_env.video.sources[0].device_index
+    );
+    assert_eq!(
+        from_env.video.sources[0].input,
+        crate::videos::LiveCameraInputFormat::Mjpeg
+    );
+}
+
+#[test]
+fn conflicting_camera_id_and_device_index_fails_at_load() {
+    let dir = std::env::temp_dir().join(format!(
+        "a2a-lab-ot2-camera-conflict-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a2a-lab.json");
+    fs::write(
+        &path,
+        r#"{"schema_version":1,"videos":{"sources":[
+            {"id":"cam","camera_id":1,"device_index":2,"format":"mjpeg","width":640,"height":480}
+        ]}}"#,
+    )
+    .unwrap();
+    assert!(LoadedLabConfig::load(&path).is_err());
 }
 
 #[test]

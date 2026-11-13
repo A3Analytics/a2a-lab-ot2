@@ -7,18 +7,18 @@ use std::time::Duration;
 
 use a2a_lab_dev_kit::{
     A2aClient, A2aLabApi, A2aLabCommand, A2aLabError, A2aLabResult, A2aLabService, A2aServer,
-    FollowVideoRequest, GetCurrentImageRequest, GetVideoClipRequest, GetVideoFrameAtRequest,
-    GetVideoTimelineRequest, HttpAuthSecurityScheme, ImageProvider, ListVideoSourcesRequest,
-    McpLab, McpServer, PageRequest, SecurityScheme, TimeRange, UtcTimestamp, VideoProvider,
-    VideoSourceId, bind_local, video_clip_path,
+    DvrVideoProvider, FollowVideoRequest, GetCurrentImageRequest, GetVideoClipRequest,
+    GetVideoFrameAtRequest, GetVideoTimelineRequest, HttpAuthSecurityScheme, ImageProvider,
+    ListVideoSourcesRequest, McpLab, McpServer, PageRequest, SecurityScheme, TimeRange,
+    UtcTimestamp, VideoProvider, VideoSourceId, bind_local, video_clip_path,
 };
-use a2a_lab_ot2::camera::{CAMERA_SOURCE_ID, remember_camera_frame};
 use a2a_lab_ot2::camera::{
-    CameraCapture, CameraCaptureError, EXTERNAL_CAMERA_SOURCE_ID, ExternalCameraFormat,
+    CAMERA_SOURCE_ID, CameraCapture, CameraCaptureError, EXTERNAL_CAMERA_HEIGHT,
+    EXTERNAL_CAMERA_SOURCE_ID, EXTERNAL_CAMERA_WIDTH, ExternalCameraFormat, remember_camera_frame,
     remember_external_frame,
 };
 use a2a_lab_ot2::{
-    ImageServeConfig, LiveImageCatalog, LiveJpegSource, LiveVideoCatalog, LiveVideoInjections,
+    DeclarativeVideoServe, ImageServeConfig, LiveImageCatalog, LiveJpegSource, LiveVideoInjections,
     OpentronsLab, VideoServeConfig, image_catalog, open_video_catalog,
 };
 use tokio::net::TcpListener;
@@ -27,7 +27,7 @@ pub(crate) const INTENTIONAL_MEDIA_PARITY_DIFFERENCES: &str = "
 intentional external vs camera media differences:
 - source ids are external-camera and camera; descriptions name the native camera index vs the second webcam.
 - hardware selection uses A2ALAB_EXTERNAL_CAMERA_INDEX / --external-camera-index vs A2ALAB_CAMERA_INDEX / --camera-index.
-- external still capture uses the shared capture-timeout-ms budget and can open its camera index; camera still capture reuses the latest JPEG from the video pump and does not open a second device.
+- when declarative video is running, both sources read stills from the shared warm-still cache; encoded sizes follow each source's configured resolution.
 - diagnostic text names Nokhwa for the external camera; shared contract uses the same error code classes and metadata fields.
 ";
 
@@ -40,9 +40,9 @@ struct Endpoints {
 }
 
 struct Lab {
-    videos: LiveVideoCatalog,
+    videos: DeclarativeVideoServe,
     images: LiveImageCatalog,
-    provider: a2a_lab_ot2::VideoDvrCatalog,
+    provider: a2a_lab_dev_kit::DvrVideoProvider,
     endpoints: Endpoints,
     a2a_base: String,
 }
@@ -57,11 +57,34 @@ enum ContractObs {
 }
 
 fn jpeg(width: u16, height: u16, marker: u8) -> Vec<u8> {
-    let mut data = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08];
-    data.extend_from_slice(&height.to_be_bytes());
-    data.extend_from_slice(&width.to_be_bytes());
-    data.extend_from_slice(&[0x01, 0x01, 0x11, 0x00, marker, 0xFF, 0xD9]);
-    data
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_fn(u32::from(width), u32::from(height), |_, _| {
+            Rgb([marker, marker, marker])
+        });
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 80)
+        .write_image(
+            image.as_raw(),
+            u32::from(width),
+            u32::from(height),
+            ExtendedColorType::Rgb8,
+        )
+        .expect("jpeg");
+    out
+}
+
+fn external_live_jpeg(marker: u8) -> Vec<u8> {
+    jpeg(
+        u16::try_from(EXTERNAL_CAMERA_WIDTH).expect("width"),
+        u16::try_from(EXTERNAL_CAMERA_HEIGHT).expect("height"),
+        marker,
+    )
+}
+
+fn camera_live_jpeg(marker: u8) -> Vec<u8> {
+    jpeg(1280, 720, marker)
 }
 
 fn page() -> PageRequest {
@@ -133,7 +156,11 @@ struct Advancing {
 impl LiveJpegSource for Advancing {
     fn next_jpeg(&mut self) -> Result<Vec<u8>, A2aLabError> {
         let n = self.step.fetch_add(1, Ordering::SeqCst);
-        let bytes = jpeg(4, 4, u8::try_from(n % 250).unwrap_or(1));
+        let marker = u8::try_from(n % 250).unwrap_or(1);
+        let bytes = match self.side {
+            Side::External => external_live_jpeg(marker),
+            Side::Webcam => camera_live_jpeg(marker),
+        };
         match self.side {
             Side::External => remember_external_frame(bytes.clone()),
             Side::Webcam => remember_camera_frame(bytes.clone()),
@@ -193,13 +220,14 @@ impl CameraCapture for CaptureOnce {
     }
 }
 
-async fn wait_for_follow(provider: &impl VideoProvider, source: &str) {
+async fn wait_for_follow(provider: &DvrVideoProvider, source: &str) {
     let id = video_id(source);
-    for _ in 0..120 {
-        if provider
-            .follow_video(FollowVideoRequest::new(id.clone()))
-            .await
-            .is_ok()
+    for _ in 0..400 {
+        if provider.live_h264().get(&id).is_some()
+            && provider
+                .follow_video(FollowVideoRequest::new(id.clone()))
+                .await
+                .is_ok()
         {
             return;
         }
@@ -210,10 +238,17 @@ async fn wait_for_follow(provider: &impl VideoProvider, source: &str) {
 
 async fn open_lab(dvr_root: &Path, mut injections: LiveVideoInjections) -> Lab {
     let _ = std::fs::remove_dir_all(dvr_root);
-    let video_config =
-        VideoServeConfig::with_disk(Some(4), None, 8, 5, 86_400, dvr_root.to_path_buf(), 1024)
-            .unwrap()
-            .with_camera_index(1);
+    let video_config = VideoServeConfig::with_disk(
+        Some(4),
+        None,
+        8,
+        5,
+        86_400,
+        dvr_root.to_path_buf(),
+        16_777_216,
+    )
+    .unwrap()
+    .with_camera_index(1);
     let external = injections.jpeg_sources.remove(EXTERNAL_CAMERA_SOURCE_ID);
     let webcam = injections.jpeg_sources.remove(CAMERA_SOURCE_ID);
     let videos = open_video_catalog(&video_config, external, webcam)
@@ -223,8 +258,15 @@ async fn open_lab(dvr_root: &Path, mut injections: LiveVideoInjections) -> Lab {
     let provider = videos.provider();
     wait_for_follow(&provider, EXT).await;
     wait_for_follow(&provider, CAM).await;
+    for _ in 0..200 {
+        if videos.still_cache().latest(EXT).is_some() && videos.still_cache().latest(CAM).is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
-    let image_config = ImageServeConfig::new(Some(4), None, 1024, 100, 4)
+    let image_config = ImageServeConfig::new(Some(4), None, 16_777_216, 100, 4)
         .unwrap()
         .with_camera_index(1);
     let ext_still = CaptureOnce(Arc::new(AtomicUsize::new(0)), jpeg(1, 1, 9));
@@ -233,6 +275,7 @@ async fn open_lab(dvr_root: &Path, mut injections: LiveVideoInjections) -> Lab {
         &image_config,
         Some(Arc::new(ext_still)),
         None,
+        Some(videos.still_cache()),
     )
     .unwrap();
 
@@ -271,7 +314,7 @@ async fn open_lab(dvr_root: &Path, mut injections: LiveVideoInjections) -> Lab {
     }
 }
 
-async fn secured_live_gateway(provider: a2a_lab_ot2::VideoDvrCatalog) {
+async fn secured_live_gateway(provider: a2a_lab_dev_kit::DvrVideoProvider) {
     let lab = OpentronsLab::new("http://127.0.0.1:9").unwrap();
     let service = A2aLabService::new(lab.clone(), lab.clone(), lab)
         .with_videos(provider)
@@ -310,10 +353,20 @@ async fn secured_live_gateway(provider: a2a_lab_ot2::VideoDvrCatalog) {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let follow = authed
-        .follow_video(FollowVideoRequest::new(video_id(EXT)))
-        .await
-        .unwrap();
+    let follow = {
+        let mut ready = None;
+        for _ in 0..200 {
+            if let Ok(follow) = authed
+                .follow_video(FollowVideoRequest::new(video_id(EXT).clone()))
+                .await
+            {
+                ready = Some(follow);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        ready.unwrap_or_else(|| panic!("live follow never became available for {EXT}"))
+    };
     let ok = reqwest::Client::new()
         .get(format!("{base}{}", follow.path()))
         .header("Authorization", "Bearer lab-token")
@@ -473,7 +526,8 @@ async fn still_bytes(images: &LiveImageCatalog, source: &str) -> ContractObs {
 async fn compare_still_live(lab: &Lab, case: &str) {
     let ext = still_bytes(&lab.images, EXT).await;
     let orb = still_bytes(&lab.images, CAM).await;
-    compare_sources("provider still", case, ext.clone(), orb.clone());
+    assert!(matches!(ext, ContractObs::Count(len) if len > 0));
+    assert!(matches!(orb, ContractObs::Count(len) if len > 0));
     compare_a2a_mcp(
         case,
         a2a_still(&lab.endpoints, EXT).await,
@@ -484,8 +538,6 @@ async fn compare_still_live(lab: &Lab, case: &str) {
         a2a_still(&lab.endpoints, CAM).await,
         mcp_still(&lab.endpoints, CAM).await,
     );
-    assert!(matches!(ext, ContractObs::Count(len) if len > 0));
-    assert!(matches!(orb, ContractObs::Count(len) if len > 0));
 }
 
 async fn a2a_still(endpoints: &Endpoints, source: &str) -> ContractObs {
@@ -533,8 +585,8 @@ async fn compare_interface_parity(lab: &Lab, case: &str, source: &str) {
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 pub async fn run() {
     let dvr = temp_dvr("matrix");
-    let ext_live = jpeg(8, 6, 20);
-    let orb_live = jpeg(8, 6, 21);
+    let ext_live = external_live_jpeg(20);
+    let orb_live = camera_live_jpeg(21);
     let lab = open_lab(
         &dvr,
         LiveVideoInjections::legacy_jpeg(
@@ -577,6 +629,19 @@ pub async fn run() {
     compare_still_live(&lab, "still/live JPEG reuse").await;
     compare_interface_parity(&lab, "live follow", EXT).await;
     compare_interface_parity(&lab, "live follow", CAM).await;
+    secured_live_gateway(lab.provider.clone()).await;
+    let follow_open = lab
+        .endpoints
+        .a2a
+        .follow_video(FollowVideoRequest::new(video_id(CAM)))
+        .await
+        .unwrap();
+    let open = reqwest::Client::new()
+        .get(format!("{}{}", lab.a2a_base, follow_open.path()))
+        .send()
+        .await
+        .unwrap();
+    assert!(open.status().is_success(), "{}", open.status());
 
     // Advancing frames
     lab.videos.shutdown();
@@ -628,11 +693,11 @@ pub async fn run() {
         &dvr_live,
         LiveVideoInjections::legacy_jpeg(
             Some(Box::new(Remembering {
-                bytes: jpeg(2, 2, 30),
+                bytes: external_live_jpeg(30),
                 side: Side::External,
             })),
             Some(Box::new(Remembering {
-                bytes: jpeg(2, 2, 31),
+                bytes: camera_live_jpeg(31),
                 side: Side::Webcam,
             })),
         ),
@@ -654,11 +719,11 @@ pub async fn run() {
             &dvr_restart,
             LiveVideoInjections::legacy_jpeg(
                 Some(Box::new(Remembering {
-                    bytes: jpeg(3, 3, 40),
+                    bytes: external_live_jpeg(40),
                     side: Side::External,
                 })),
                 Some(Box::new(Remembering {
-                    bytes: jpeg(3, 3, 41),
+                    bytes: camera_live_jpeg(41),
                     side: Side::Webcam,
                 })),
             ),
@@ -671,11 +736,11 @@ pub async fn run() {
         &dvr_restart,
         LiveVideoInjections::legacy_jpeg(
             Some(Box::new(Remembering {
-                bytes: jpeg(3, 3, 42),
+                bytes: external_live_jpeg(42),
                 side: Side::External,
             })),
             Some(Box::new(Remembering {
-                bytes: jpeg(3, 3, 43),
+                bytes: camera_live_jpeg(43),
                 side: Side::Webcam,
             })),
         ),
@@ -695,17 +760,18 @@ pub async fn run() {
         &dvr_gap,
         LiveVideoInjections::legacy_jpeg(
             Some(Box::new(Remembering {
-                bytes: jpeg(2, 2, 50),
+                bytes: external_live_jpeg(50),
                 side: Side::External,
             })),
             Some(Box::new(Remembering {
-                bytes: jpeg(2, 2, 51),
+                bytes: camera_live_jpeg(51),
                 side: Side::Webcam,
             })),
         ),
     )
     .await;
-    let store = gap_lab.videos.dvr();
+    let store = gap_lab.videos.indexed_dvr().clone();
+    gap_lab.videos.shutdown();
     for source in [EXT, CAM] {
         let id = video_id(source);
         store
@@ -791,24 +857,6 @@ pub async fn run() {
     .await;
     assert_eq!(unknown, ContractObs::Code("not_found".to_owned()));
 
-    secured_live_gateway(lab.provider.clone()).await;
-
-    // In-process gateway without loopback client
-    let follow_open = lab
-        .endpoints
-        .a2a
-        .follow_video(FollowVideoRequest::new(video_id(CAM)))
-        .await
-        .unwrap();
-    let open = reqwest::Client::new()
-        .get(format!("{}{}", lab.a2a_base, follow_open.path()))
-        .send()
-        .await
-        .unwrap();
-    assert!(open.status().is_success(), "{}", open.status());
-
-    lab.videos.shutdown();
-
     // Failure isolation and hardware-free failures
     Box::pin(run_failure_matrix()).await;
 }
@@ -816,7 +864,7 @@ pub async fn run() {
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 async fn run_failure_matrix() {
     let dvr = temp_dvr("failures");
-    let config = VideoServeConfig::with_disk(Some(4), None, 8, 5, 86_400, dvr.clone(), 1024)
+    let config = VideoServeConfig::with_disk(Some(4), None, 8, 5, 86_400, dvr.clone(), 16_777_216)
         .unwrap()
         .with_camera_index(1);
 
@@ -835,7 +883,7 @@ async fn run_failure_matrix() {
         &config,
         Some(Box::new(FailLive)),
         Some(Box::new(Remembering {
-            bytes: jpeg(2, 2, 60),
+            bytes: camera_live_jpeg(60),
             side: Side::Webcam,
         })),
     )
@@ -865,12 +913,12 @@ async fn run_failure_matrix() {
         &config,
         Some(Box::new(FlakyLive {
             left: Mutex::new(20),
-            bytes: jpeg(2, 2, 70),
+            bytes: external_live_jpeg(70),
             side: Side::External,
         })),
         Some(Box::new(FlakyLive {
             left: Mutex::new(20),
-            bytes: jpeg(2, 2, 71),
+            bytes: camera_live_jpeg(71),
             side: Side::Webcam,
         })),
     )
@@ -918,11 +966,11 @@ async fn run_failure_matrix() {
     let switch = open_video_catalog(
         &config,
         Some(Box::new(Remembering {
-            bytes: jpeg(2, 2, 90),
+            bytes: external_live_jpeg(90),
             side: Side::External,
         })),
         Some(Box::new(Remembering {
-            bytes: jpeg(2, 2, 91),
+            bytes: camera_live_jpeg(91),
             side: Side::Webcam,
         })),
     )

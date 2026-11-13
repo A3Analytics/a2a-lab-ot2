@@ -6,12 +6,13 @@ use std::process::Command;
 use std::time::Duration;
 
 use a2a_lab_dev_kit::{
-    A2aClient, A2aLabApi, A2aLabCommand, A2aLabResult, A2aLabService, FollowVideoRequest,
-    GetVideoTimelineRequest, ListVideoSourcesRequest, McpLab, McpServer, PageRequest,
-    VideoProvider, VideoSourceId, bind_local,
+    A2aClient, A2aLabApi, A2aLabCommand, A2aLabResult, A2aLabService, DvrVideoProvider,
+    FollowVideoRequest, GetVideoTimelineRequest, ListVideoSourcesRequest, McpLab, McpServer,
+    PageRequest, VideoProvider, VideoSourceId, bind_local,
 };
-use a2a_lab_ot2::camera::CAMERA_SOURCE_ID;
-use a2a_lab_ot2::camera::EXTERNAL_CAMERA_SOURCE_ID;
+use a2a_lab_ot2::camera::{
+    CAMERA_SOURCE_ID, EXTERNAL_CAMERA_HEIGHT, EXTERNAL_CAMERA_SOURCE_ID, EXTERNAL_CAMERA_WIDTH,
+};
 use a2a_lab_ot2::{
     DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_VIDEO_DVR_ROOT, ImageServeConfig, LiveJpegSource,
     OpentronsLab, VideoServeConfig, image_catalog, open_video_catalog,
@@ -26,12 +27,36 @@ fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_a2a-lab-ot2"))
 }
 
+const MAX_VIDEO_FRAME_BYTES: u64 = 16_777_216;
+
 fn jpeg(width: u16, height: u16) -> Vec<u8> {
-    let mut data = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08];
-    data.extend_from_slice(&height.to_be_bytes());
-    data.extend_from_slice(&width.to_be_bytes());
-    data.extend_from_slice(&[0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9]);
-    data
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_fn(u32::from(width), u32::from(height), |_, _| {
+            Rgb([40, 40, 40])
+        });
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 80)
+        .write_image(
+            image.as_raw(),
+            u32::from(width),
+            u32::from(height),
+            ExtendedColorType::Rgb8,
+        )
+        .expect("jpeg");
+    out
+}
+
+fn external_live_jpeg() -> Vec<u8> {
+    jpeg(
+        u16::try_from(EXTERNAL_CAMERA_WIDTH).expect("width"),
+        u16::try_from(EXTERNAL_CAMERA_HEIGHT).expect("height"),
+    )
+}
+
+fn camera_live_jpeg() -> Vec<u8> {
+    jpeg(1280, 720)
 }
 
 struct Repeat(Vec<u8>);
@@ -109,7 +134,7 @@ fn startup_summary_names_memory_disk_and_dvr_path() {
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&output.stdout);
-    assert!(out.contains("external-camera index 4"));
+    assert!(out.contains("external-camera camera_id 4"));
     assert!(out.contains("memory 5s"));
     assert!(out.contains("disk 3600s"));
     assert!(out.contains(&format!("dvr {}", dvr.display())));
@@ -124,7 +149,7 @@ fn camera_only_startup_lists_video_without_external_index() {
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&output.stdout);
-    assert!(out.contains("camera index 2"));
+    assert!(out.contains("camera camera_id 2"));
     assert!(out.contains("memory 5s"));
     assert!(out.contains(&format!("disk {DEFAULT_DISK_VIDEO_RETENTION_SECS}s")));
 }
@@ -134,14 +159,22 @@ async fn serve_stack_lists_the_same_sources_on_a2a_and_mcp() {
     let mock = Mock::new();
     let (url, _) = mock.bind().await;
     let image_config = ImageServeConfig::new(Some(4), None, 1024, 1_000, 4).unwrap();
-    let video_config =
-        VideoServeConfig::with_disk(Some(4), None, 4, 5, 86_400, temp_dvr("stack"), 1024).unwrap();
-    let bytes = jpeg(2, 2);
+    let video_config = VideoServeConfig::with_disk(
+        Some(4),
+        None,
+        4,
+        5,
+        86_400,
+        temp_dvr("stack"),
+        MAX_VIDEO_FRAME_BYTES,
+    )
+    .unwrap();
+    let bytes = external_live_jpeg();
     let videos = open_video_catalog(&video_config, Some(Box::new(Repeat(bytes))), None)
         .await
         .unwrap()
         .expect("videos on");
-    let images = image_catalog(&url, &image_config, None, None).unwrap();
+    let images = image_catalog(&url, &image_config, None, None, None).unwrap();
     let lab = OpentronsLab::new(&url).unwrap();
     let service = A2aLabService::new(lab.clone(), lab.clone(), lab)
         .with_images(images)
@@ -201,10 +234,17 @@ async fn serve_stack_lists_the_same_sources_on_a2a_and_mcp() {
 async fn live_gateway_uses_the_in_process_service_not_a_loopback_client() {
     let mock = Mock::new();
     let (url, _) = mock.bind().await;
-    let video_config =
-        VideoServeConfig::with_disk(Some(4), None, 30, 5, 86_400, temp_dvr("gateway"), 1024)
-            .unwrap();
-    let bytes = jpeg(3, 3);
+    let video_config = VideoServeConfig::with_disk(
+        Some(4),
+        None,
+        30,
+        5,
+        86_400,
+        temp_dvr("gateway"),
+        MAX_VIDEO_FRAME_BYTES,
+    )
+    .unwrap();
+    let bytes = external_live_jpeg();
     let videos = open_video_catalog(&video_config, Some(Box::new(Repeat(bytes.clone()))), None)
         .await
         .unwrap()
@@ -240,11 +280,18 @@ async fn live_gateway_uses_the_in_process_service_not_a_loopback_client() {
 
 #[tokio::test]
 async fn one_live_pump_failure_does_not_remove_the_other_source() {
-    let video_config =
-        VideoServeConfig::with_disk(Some(4), None, 30, 5, 86_400, temp_dvr("isolation"), 1024)
-            .unwrap()
-            .with_camera_index(1);
-    let camera_bytes = jpeg(4, 4);
+    let video_config = VideoServeConfig::with_disk(
+        Some(4),
+        None,
+        30,
+        5,
+        86_400,
+        temp_dvr("isolation"),
+        MAX_VIDEO_FRAME_BYTES,
+    )
+    .unwrap()
+    .with_camera_index(1);
+    let camera_bytes = camera_live_jpeg();
     let videos = open_video_catalog(
         &video_config,
         Some(Box::new(FailExternal)),
@@ -265,7 +312,7 @@ async fn one_live_pump_failure_does_not_remove_the_other_source() {
 
 async fn wait_for_live(client: &A2aClient, source_id: &str) {
     let source = VideoSourceId::new(source_id).unwrap();
-    for _ in 0..50 {
+    for _ in 0..400 {
         if client
             .follow_video(FollowVideoRequest::new(source.clone()))
             .await
@@ -273,22 +320,23 @@ async fn wait_for_live(client: &A2aClient, source_id: &str) {
         {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("live follow never became available for {source_id}");
 }
 
-async fn wait_for_live_provider(provider: &a2a_lab_ot2::VideoDvrCatalog, source_id: &str) {
+async fn wait_for_live_provider(provider: &DvrVideoProvider, source_id: &str) {
     let source = VideoSourceId::new(source_id).unwrap();
-    for _ in 0..50 {
-        if provider
-            .follow_video(FollowVideoRequest::new(source.clone()))
-            .await
-            .is_ok()
+    for _ in 0..400 {
+        if provider.live_h264().get(&source).is_some()
+            && provider
+                .follow_video(FollowVideoRequest::new(source.clone()))
+                .await
+                .is_ok()
         {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("live follow never became available for {source_id}");
 }

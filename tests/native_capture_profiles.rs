@@ -7,11 +7,13 @@ use a2a_lab_ot2::videos::{
 };
 
 fn custom_source() -> LiveVideoSourceDescriptor {
+    let (camera_id, device_index) = a2a_lab_ot2::videos::index_camera_fields(0);
     LiveVideoSourceDescriptor {
         id: "mac-built-in".to_owned(),
         name: "Mac built-in".to_owned(),
         description: "test".to_owned(),
-        device_index: 0,
+        camera_id,
+        device_index,
         input: LiveCameraInputFormat::Mjpeg,
         width: Some(1280),
         height: Some(720),

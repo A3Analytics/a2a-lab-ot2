@@ -4,12 +4,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use a2a_lab_dev_kit::videos::WarmStillCache;
 use a2a_lab_dev_kit::{A2aLabError, ImageSource, ImageSourceId, ImageTransportConfig};
 
 use crate::camera::{
     CAMERA_SOURCE_ID, CameraCapture, CameraStill, ConfiguredNativeStill,
     DEFAULT_EXTERNAL_CAMERA_DESCRIPTION, EXTERNAL_CAMERA_SOURCE_ID, ExternalCamera,
-    camera_source_named, configured_still_image_source, external_camera_source_named,
+    PumpLinkedStill, camera_source_named, configured_still_image_source,
+    external_camera_source_named,
 };
 use crate::images::{
     DEFAULT_IMAGE_HISTORY_DB, IMAGE_HISTORY_MAX_AGE, ImageCapture, ImageCatalogConfig,
@@ -196,15 +198,19 @@ impl ImageServeConfig {
                 .map(|source| {
                     if source.id == EXTERNAL_CAMERA_SOURCE_ID {
                         format!(
-                            "{} index {} description {}",
-                            source.id, source.device_index, source.description
+                            "{} camera_id {} description {}",
+                            source.id,
+                            source.camera_id_label(),
+                            source.description
                         )
                     } else if source.id == CAMERA_SOURCE_ID {
-                        format!("{} index {}", source.id, source.device_index)
+                        format!("{} camera_id {}", source.id, source.camera_id_label())
                     } else {
                         format!(
-                            "{} index {} ({})",
-                            source.id, source.device_index, source.name
+                            "{} camera_id {} ({})",
+                            source.id,
+                            source.camera_id_label(),
+                            source.name
                         )
                     }
                 })
@@ -249,6 +255,7 @@ pub fn image_catalog(
     config: &ImageServeConfig,
     external_capture: Option<Arc<dyn CameraCapture>>,
     orbbec_capture: Option<Arc<dyn OrbbecCapture>>,
+    still_cache: Option<&WarmStillCache>,
 ) -> Result<LiveImageCatalog, A2aLabError> {
     let opentrons = OpentronsCamera::new(
         opentrons_url,
@@ -259,14 +266,42 @@ pub fn image_catalog(
         vec![(opentrons_camera_source()?, Arc::new(opentrons))];
     if config.uses_resolved_native_sources() {
         for descriptor in &config.native_video_sources {
-            sources.push((
-                configured_still_image_source(descriptor)?,
-                Arc::new(ConfiguredNativeStill::from_descriptor(
+            let still = match &still_cache {
+                Some(cache) => Arc::new(PumpLinkedStill::new(
+                    &descriptor.id,
+                    &descriptor.name,
+                    config.max_image_bytes(),
+                    (*cache).clone(),
+                )?) as Arc<dyn ImageCapture>,
+                None => Arc::new(ConfiguredNativeStill::from_descriptor(
                     descriptor,
                     config.capture_timeout(),
                     config.max_image_bytes(),
                     external_capture.clone(),
-                )?),
+                    None,
+                )?) as Arc<dyn ImageCapture>,
+            };
+            sources.push((configured_still_image_source(descriptor)?, still));
+        }
+    } else if let Some(cache) = still_cache {
+        if config.camera_index().is_some() {
+            sources.push((
+                external_camera_source_named(&config.description, &config.external_name)?,
+                Arc::new(PumpLinkedStill::new(
+                    crate::camera::EXTERNAL_CAMERA_SOURCE_ID,
+                    &config.description,
+                    config.max_image_bytes(),
+                    (*cache).clone(),
+                )?) as Arc<dyn ImageCapture>,
+            ));
+        }
+        if config.camera_enabled() {
+            sources.push((
+                camera_source_named(&config.webcam_name)?,
+                Arc::new(CameraStill::with_still_cache(
+                    config.max_image_bytes(),
+                    (*cache).clone(),
+                )?) as Arc<dyn ImageCapture>,
             ));
         }
     } else {
@@ -322,8 +357,15 @@ pub async fn open_image_catalog(
     config: &ImageServeConfig,
     external_capture: Option<Arc<dyn CameraCapture>>,
     orbbec_capture: Option<Arc<dyn OrbbecCapture>>,
+    still_cache: Option<&WarmStillCache>,
 ) -> Result<LiveImageCatalog, A2aLabError> {
-    let catalog = image_catalog(opentrons_url, config, external_capture, orbbec_capture)?;
+    let catalog = image_catalog(
+        opentrons_url,
+        config,
+        external_capture,
+        orbbec_capture,
+        still_cache,
+    )?;
     let mut sources = vec![ImageSourceId::new(OPENTRONS_CAMERA_SOURCE_ID)?];
     if config.uses_resolved_native_sources() {
         for descriptor in &config.native_video_sources {

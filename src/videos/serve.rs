@@ -5,14 +5,18 @@ use std::path::{Path, PathBuf};
 use a2a_lab_dev_kit::A2aLabError;
 
 use crate::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
-use crate::lab_config::{LabConfigInputs, ResolvedSemanticIndexing, ResolvedVideoSettings};
-use crate::videos::catalog::{
-    ExternalVideoConfig, LiveVideoCatalog, LiveVideoInjections, WebcamVideoConfig,
-    start_live_video_catalog_with_semantic, start_live_videos,
+use crate::lab_config::{
+    LabConfigInputs, ResolvedDvrStorage, ResolvedSemanticIndexing, ResolvedVideoSettings,
+    SettingProvenance,
+};
+use crate::videos::declarative_serve::{
+    DeclarativeVideoServe, start_legacy_declarative_serve, start_resolved_declarative_serve,
 };
 use crate::videos::dvr::DEFAULT_DISK_VIDEO_RETENTION_SECS;
 use crate::videos::external::LiveJpegSource;
+use crate::videos::injections::{ExternalVideoConfig, LiveVideoInjections, WebcamVideoConfig};
 use crate::videos::semantic_indexing::SemanticServeInjections;
+use crate::videos::source::LiveVideoSourceDescriptor;
 use crate::videos::source::{LiveCameraInputFormat, LiveVideoDelivery};
 
 /// Default live catalog frame rate.
@@ -137,6 +141,22 @@ impl VideoServeConfig {
         self.live_retention_secs
     }
 
+    #[must_use]
+    pub const fn fps(&self) -> u32 {
+        self.fps
+    }
+
+    #[must_use]
+    pub const fn max_image_bytes(&self) -> u64 {
+        self.max_image_bytes
+    }
+
+    /// Advertised description for legacy `external-camera`.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
     /// One startup line.
     #[must_use]
     pub fn summary(&self) -> String {
@@ -185,8 +205,10 @@ pub fn resolved_video_summary(settings: &ResolvedVideoSettings) -> String {
                 LiveVideoDelivery::H264 => "h264",
             };
             format!(
-                "{} index {} input {input} delivery {delivery} name {}",
-                source.id, source.device_index, source.name
+                "{} camera_id {} input {input} delivery {delivery} name {}",
+                source.id,
+                source.camera_id_label(),
+                source.name
             )
         })
         .collect::<Vec<_>>();
@@ -200,21 +222,50 @@ pub fn resolved_video_summary(settings: &ResolvedVideoSettings) -> String {
     )
 }
 
-/// Starts the live catalog from resolved configuration when any source is listed.
+/// Starts declarative runtime for injected integration tests.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_fixture_declarative_serve(
+    sources: Vec<LiveVideoSourceDescriptor>,
+    fps: u32,
+    live_retention_secs: u64,
+    disk_retention_secs: u64,
+    disk_root: &Path,
+    max_image_bytes: u64,
+    dvr_save_interval_nanos: Option<u64>,
+    injections: LiveVideoInjections,
+) -> Result<DeclarativeVideoServe, A2aLabError> {
+    let settings = ResolvedVideoSettings {
+        sources,
+        fps,
+        live_retention_secs,
+        disk_retention_secs,
+        dvr_save_interval_nanos,
+        dvr_storage: ResolvedDvrStorage {
+            path: disk_root.to_path_buf(),
+            provenance: SettingProvenance::ApplicationDefault,
+        },
+        max_image_bytes,
+    };
+    open_resolved_video_catalog(&settings, injections)
+        .await?
+        .ok_or_else(|| A2aLabError::invalid("video", "no live video sources configured"))
+}
+
+/// Starts declarative runtime from resolved configuration when any source is listed.
 pub async fn open_resolved_video_catalog(
     settings: &ResolvedVideoSettings,
     injections: LiveVideoInjections,
-) -> Result<Option<LiveVideoCatalog>, A2aLabError> {
+) -> Result<Option<DeclarativeVideoServe>, A2aLabError> {
     open_resolved_video_catalog_with_semantic(settings, injections, None, None).await
 }
 
-/// Starts the live catalog and wires optional v2 semantic indexing before capture pumps run.
+/// Starts declarative runtime and wires optional v2 semantic indexing before capture runs.
 pub async fn open_resolved_video_catalog_with_semantic(
     settings: &ResolvedVideoSettings,
     injections: LiveVideoInjections,
     inputs: Option<&LabConfigInputs>,
     semantic_injections: Option<SemanticServeInjections>,
-) -> Result<Option<LiveVideoCatalog>, A2aLabError> {
+) -> Result<Option<DeclarativeVideoServe>, A2aLabError> {
     if settings.sources.is_empty() {
         return Ok(None);
     }
@@ -223,14 +274,8 @@ pub async fn open_resolved_video_catalog_with_semantic(
         None => None,
     };
     Ok(Some(
-        start_live_video_catalog_with_semantic(
-            &settings.sources,
-            settings.fps,
-            settings.live_retention_secs,
-            settings.disk_retention_secs,
-            &settings.dvr_storage.path,
-            settings.max_image_bytes,
-            settings.dvr_save_interval_nanos,
+        start_resolved_declarative_serve(
+            settings,
             injections,
             semantic.as_ref(),
             semantic_injections.unwrap_or_default(),
@@ -247,29 +292,50 @@ pub async fn resolve_serve_semantic_indexing(
     crate::lab_config::resolve_semantic_indexing(inputs, settings)
 }
 
-/// Starts the live catalog when at least one camera source is configured.
+/// Legacy two-slot declarative startup for integration tests.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_legacy_fixture_videos(
+    external: Option<ExternalVideoConfig<'_>>,
+    webcam: Option<WebcamVideoConfig>,
+    fps: u32,
+    live_retention_secs: u64,
+    disk_retention_secs: u64,
+    disk_root: &Path,
+    max_image_bytes: u64,
+    injections: LiveVideoInjections,
+) -> Result<DeclarativeVideoServe, A2aLabError> {
+    let mut config = VideoServeConfig::with_disk(
+        external.as_ref().map(|entry| entry.index),
+        external.as_ref().map(|entry| entry.description),
+        fps,
+        live_retention_secs,
+        disk_retention_secs,
+        disk_root.to_path_buf(),
+        max_image_bytes,
+    )?;
+    if let Some(webcam) = webcam {
+        config = config.with_camera_index(webcam.index);
+    }
+    start_legacy_declarative_serve(&config, injections).await
+}
+
+/// Starts declarative runtime when at least one camera source is configured.
 pub async fn open_video_catalog(
     config: &VideoServeConfig,
     external_source: Option<Box<dyn LiveJpegSource>>,
     webcam_source: Option<Box<dyn LiveJpegSource>>,
-) -> Result<Option<LiveVideoCatalog>, A2aLabError> {
+) -> Result<Option<DeclarativeVideoServe>, A2aLabError> {
     let external = config.camera_index.map(|index| ExternalVideoConfig {
         index,
-        description: &config.description,
+        description: config.description(),
     });
     let webcam = config.webcam_index.map(|index| WebcamVideoConfig { index });
     if external.is_none() && webcam.is_none() {
         return Ok(None);
     }
     Ok(Some(
-        start_live_videos(
-            external,
-            webcam,
-            config.fps,
-            config.live_retention_secs,
-            config.disk_retention_secs,
-            &config.disk_root,
-            config.max_image_bytes,
+        start_legacy_declarative_serve(
+            config,
             LiveVideoInjections::legacy_jpeg(external_source, webcam_source),
         )
         .await?,

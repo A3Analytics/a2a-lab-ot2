@@ -20,11 +20,13 @@ fn jpeg() -> Vec<u8> {
 }
 
 fn descriptor(id: &str) -> LiveVideoSourceDescriptor {
+    let (camera_id, device_index) = a2a_lab_ot2::index_camera_fields(7);
     LiveVideoSourceDescriptor {
         id: id.to_owned(),
         name: format!("Name {id}"),
         description: format!("Description {id}"),
-        device_index: 7,
+        camera_id,
+        device_index,
         input: LiveCameraInputFormat::Mjpeg,
         width: Some(4),
         height: Some(4),
@@ -63,6 +65,7 @@ async fn configured_still_reuses_live_buffer_without_opening_device() {
             calls: Arc::clone(&calls),
             bytes: jpeg(),
         })),
+        None,
     )
     .unwrap();
     let captured = still.capture().await.unwrap();
@@ -80,9 +83,10 @@ async fn configured_still_reports_unavailable_when_pump_and_device_fail() {
             calls: Arc::new(AtomicUsize::new(0)),
             bytes: vec![0xFF, 0xD8, 0xFF, 0xD9],
         })),
+        None,
     )
     .unwrap();
     let error = still.capture().await.unwrap_err().to_string();
     assert!(error.contains("usb-webcam"));
-    assert!(error.contains("device index 7"));
+    assert!(error.contains("camera_id 7"));
 }

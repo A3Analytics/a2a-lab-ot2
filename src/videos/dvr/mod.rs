@@ -20,6 +20,7 @@ mod indexing_job_store;
 pub mod indexing_registration;
 pub mod inventory;
 mod provider;
+mod semantic_persist_hook;
 mod store;
 mod worker_faults;
 

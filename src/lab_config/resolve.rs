@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use a2a_lab_dev_kit::{
-    A2aLabError, ChatProvider, LoadedLabConfig, VideoInputFormat, VideoSourceConfig,
+    A2aLabError, CameraSelector, ChatProvider, ConfigDuration, LoadedLabConfig,
+    SaveIntervalDuration, VideoConfig, VideoDvrConfig, VideoInputFormat, VideoSourceConfig,
 };
 
 use crate::agent::{ModelProvider, selected_model};
@@ -45,6 +46,39 @@ pub struct ResolvedVideoSettings {
     pub dvr_save_interval_nanos: Option<u64>,
     pub dvr_storage: ResolvedDvrStorage,
     pub max_image_bytes: u64,
+}
+
+impl ResolvedVideoSettings {
+    /// Maps resolved OT-2 settings into declarative devkit [`VideoConfig`].
+    pub fn declarative_video_config(&self) -> Result<VideoConfig, A2aLabError> {
+        let sources = self
+            .sources
+            .iter()
+            .map(LiveVideoSourceDescriptor::to_video_source_config)
+            .collect::<Result<Vec<_>, _>>()?;
+        let live_retention = ConfigDuration::parse(
+            "videos.live_retention",
+            &format!("{}s", self.live_retention_secs),
+        )?;
+        let disk_retention = ConfigDuration::parse(
+            "videos.dvr.retention",
+            &format!("{}s", self.disk_retention_secs),
+        )?;
+        let save_interval = self
+            .dvr_save_interval_nanos
+            .map(SaveIntervalDuration::from_nanos)
+            .transpose()?;
+        Ok(VideoConfig {
+            sources,
+            fps: Some(self.fps),
+            live_retention: Some(live_retention),
+            dvr: Some(VideoDvrConfig {
+                retention: Some(disk_retention),
+                save_interval,
+                storage_path: None,
+            }),
+        })
+    }
 }
 
 /// Validated chat and video settings after precedence merge.
@@ -211,12 +245,14 @@ fn descriptor_from_file_source(
 ) -> Result<LiveVideoSourceDescriptor, A2aLabError> {
     let input = input_format(source.format);
     let id = source.id.as_str();
+    let (camera_id, device_index) = declarative_camera_fields(source);
     match id {
         EXTERNAL_CAMERA_SOURCE_ID => Ok(LiveVideoSourceDescriptor {
             id: EXTERNAL_CAMERA_SOURCE_ID.to_owned(),
             name: source.display_name().to_owned(),
             description: source.display_description().to_owned(),
-            device_index: source.device_index,
+            camera_id,
+            device_index,
             input,
             width: Some(EXTERNAL_CAMERA_WIDTH),
             height: Some(EXTERNAL_CAMERA_HEIGHT),
@@ -227,7 +263,8 @@ fn descriptor_from_file_source(
             id: CAMERA_SOURCE_ID.to_owned(),
             name: source.display_name().to_owned(),
             description: source.display_description().to_owned(),
-            device_index: source.device_index,
+            camera_id,
+            device_index,
             input,
             width: Some(1280),
             height: Some(720),
@@ -239,7 +276,8 @@ fn descriptor_from_file_source(
                 id: id.to_owned(),
                 name: source.display_name().to_owned(),
                 description: source.display_description().to_owned(),
-                device_index: source.device_index,
+                camera_id,
+                device_index,
                 input,
                 width: source.width,
                 height: source.height,
@@ -250,6 +288,12 @@ fn descriptor_from_file_source(
             Ok(descriptor)
         }
     }
+}
+
+fn declarative_camera_fields(source: &VideoSourceConfig) -> (Option<CameraSelector>, Option<u32>) {
+    let camera_id = source.camera_id.clone();
+    let device_index = source.device_index();
+    (camera_id, device_index)
 }
 
 fn apply_legacy_source_upserts(
@@ -266,7 +310,8 @@ fn apply_legacy_source_upserts(
         {
             let existing = sources[position].clone();
             sources[position] = LiveVideoSourceDescriptor {
-                device_index: index,
+                camera_id: Some(CameraSelector::Index(index)),
+                device_index: Some(index),
                 input: existing.input,
                 ..existing
             };
@@ -289,7 +334,8 @@ fn apply_legacy_source_upserts(
         {
             let existing = sources[position].clone();
             sources[position] = LiveVideoSourceDescriptor {
-                device_index: index,
+                camera_id: Some(CameraSelector::Index(index)),
+                device_index: Some(index),
                 input: existing.input,
                 ..existing
             };
@@ -343,7 +389,8 @@ fn legacy_external_descriptor(
         id: EXTERNAL_CAMERA_SOURCE_ID.to_owned(),
         name: "External camera".to_owned(),
         description,
-        device_index: index,
+        camera_id: Some(CameraSelector::Index(index)),
+        device_index: Some(index),
         input,
         width: Some(EXTERNAL_CAMERA_WIDTH),
         height: Some(EXTERNAL_CAMERA_HEIGHT),
@@ -357,7 +404,8 @@ fn legacy_camera_descriptor(index: u32, input: LiveCameraInputFormat) -> LiveVid
         id: CAMERA_SOURCE_ID.to_owned(),
         name: "Camera".to_owned(),
         description: "Live MJPEG from the configured camera.".to_owned(),
-        device_index: index,
+        camera_id: Some(CameraSelector::Index(index)),
+        device_index: Some(index),
         input,
         width: Some(1280),
         height: Some(720),
@@ -410,7 +458,8 @@ mod tests {
             id: CAMERA_SOURCE_ID.to_owned(),
             name: "Camera".to_owned(),
             description: "from file".to_owned(),
-            device_index: 1,
+            camera_id: Some(CameraSelector::Index(1)),
+            device_index: Some(1),
             input: LiveCameraInputFormat::Yuy2,
             width: Some(1280),
             height: Some(720),
@@ -423,7 +472,8 @@ mod tests {
         };
         apply_legacy_source_upserts(&inputs, &mut sources).unwrap();
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].device_index, 9);
+        assert_eq!(sources[0].device_index, Some(9));
+        assert_eq!(sources[0].camera_id, Some(CameraSelector::Index(9)));
         assert_eq!(sources[0].input, LiveCameraInputFormat::Yuy2);
     }
 }

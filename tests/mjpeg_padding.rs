@@ -8,10 +8,8 @@ use a2a_lab_dev_kit::videos::{
     AdvertisedCaptureProfile, CaptureFormat, CaptureMode, CaptureRate, ColorCamera,
     RawCameraSample, SelectedCaptureProfile,
 };
-use a2a_lab_ot2::camera::CameraStill;
-use a2a_lab_ot2::images::ImageCapture;
-use a2a_lab_ot2::videos::{
-    LiveVideoInjections, LiveVideoSourceDescriptor, start_live_video_catalog,
+use a2a_lab_ot2::{
+    LiveVideoInjections, LiveVideoSourceDescriptor, start_fixture_declarative_serve,
 };
 
 fn jpeg() -> Vec<u8> {
@@ -72,9 +70,21 @@ impl ColorCamera for PaddedCamera {
     }
 }
 
-async fn still_bytes(capture: impl ImageCapture, expected: &[u8]) -> Vec<u8> {
-    for _ in 0..40 {
-        if let Ok(frame) = capture.capture().await
+async fn still_from_runtime(
+    catalog: &a2a_lab_ot2::DeclarativeVideoServe,
+    expected: &[u8],
+) -> Vec<u8> {
+    use a2a_lab_ot2::ImageCapture;
+    use a2a_lab_ot2::camera::{CAMERA_SOURCE_ID, PumpLinkedStill};
+    let still = PumpLinkedStill::new(
+        CAMERA_SOURCE_ID,
+        "Camera",
+        64 * 1024,
+        catalog.still_cache().clone(),
+    )
+    .unwrap();
+    for _ in 0..80 {
+        if let Ok(frame) = still.capture().await
             && frame.data() == expected
         {
             return frame.data().to_vec();
@@ -91,18 +101,18 @@ async fn padded_mjpeg_reaches_stills_live_h264_input_and_dvr() {
     let _ = std::fs::remove_dir_all(&root);
     a2a_lab_ot2::camera::clear_camera_frame();
     let mut camera = LiveVideoSourceDescriptor::legacy_camera(12);
-    camera.width = 4;
-    camera.height = 4;
+    camera.width = Some(4);
+    camera.height = Some(4);
     let injections = LiveVideoInjections::none().with_color_camera(
         camera.id.clone(),
         Box::new(PaddedCamera {
             bytes: padded(&exact),
-            width: camera.width,
-            height: camera.height,
+            width: camera.width.unwrap(),
+            height: camera.height.unwrap(),
         }),
     );
-    let catalog = start_live_video_catalog(
-        &[camera.clone()],
+    let catalog = start_fixture_declarative_serve(
+        vec![camera.clone()],
         5,
         5,
         3_600,
@@ -114,7 +124,7 @@ async fn padded_mjpeg_reaches_stills_live_h264_input_and_dvr() {
     .await
     .unwrap();
 
-    let camera_still = still_bytes(CameraStill::new(exact.len() as u64).unwrap(), &exact).await;
+    let camera_still = still_from_runtime(&catalog, &exact).await;
     assert_eq!(camera_still, exact);
 
     catalog.shutdown();

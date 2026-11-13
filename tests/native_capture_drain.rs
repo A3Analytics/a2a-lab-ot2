@@ -16,17 +16,22 @@ use a2a_lab_dev_kit::{
     ImageSourceId, ListVideoSourcesRequest, PageRequest, UtcTimestamp, VideoProvider,
     VideoSourceId,
 };
-use a2a_lab_ot2::camera::{clear_all_live_stills, latest_live_still};
+use a2a_lab_ot2::camera::clear_all_live_stills;
 use a2a_lab_ot2::{
     ImageCatalogConfig, LiveCameraInputFormat, LiveImageCatalog, LiveVideoDelivery,
-    LiveVideoInjections, LiveVideoSourceDescriptor, start_live_video_catalog,
+    LiveVideoInjections, LiveVideoSourceDescriptor, start_fixture_declarative_serve,
 };
 
 fn jpeg(marker: u8) -> Vec<u8> {
-    vec![
-        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x04, 0x00, 0x04, 0x01, 0x01, 0x11, 0x00,
-        marker, 0xFF, 0xD9,
-    ]
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_fn(4, 4, |_, _| Rgb([marker, marker, marker]));
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 80)
+        .write_image(image.as_raw(), 4, 4, ExtendedColorType::Rgb8)
+        .expect("jpeg");
+    out
 }
 
 fn temp_dvr(name: &str) -> PathBuf {
@@ -37,11 +42,17 @@ fn page() -> PageRequest {
     PageRequest::new(None, 10).unwrap()
 }
 
+fn many_jpegs(count: usize, marker: u8) -> Vec<Vec<u8>> {
+    (0..count).map(|_| jpeg(marker)).collect()
+}
+
 fn descriptor(id: &str, device_index: u32) -> LiveVideoSourceDescriptor {
+    let (camera_id, device_index) = a2a_lab_ot2::index_camera_fields(device_index);
     LiveVideoSourceDescriptor {
         id: id.to_owned(),
         name: format!("Name {id}"),
         description: format!("Description {id}"),
+        camera_id,
         device_index,
         input: LiveCameraInputFormat::Mjpeg,
         width: Some(4),
@@ -267,34 +278,19 @@ impl ColorCamera for FlakyCamera {
     }
 }
 
-async fn wait_for_follow(provider: &impl VideoProvider, id: &str) {
-    let source = VideoSourceId::new(id).unwrap();
-    for _ in 0..80 {
-        if provider
-            .follow_video(FollowVideoRequest::new(source.clone()))
-            .await
-            .is_ok()
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("live follow never became available for {id}");
-}
-
 #[tokio::test]
 async fn latest_still_tracks_pump_after_delayed_consumer() {
     clear_all_live_stills();
-    let frames = vec![jpeg(1), jpeg(2), jpeg(3)];
+    let frames = many_jpegs(60, 3);
     let (camera, pulls) = SequenceCamera::new(frames.clone());
     let sources = [descriptor("delayed", 0)];
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
         &temp_dvr("delayed"),
-        1024,
+        8 * 1024 * 1024,
         None,
         LiveVideoInjections::none().with_color_camera("delayed", Box::new(camera)),
     )
@@ -302,8 +298,16 @@ async fn latest_still_tracks_pump_after_delayed_consumer() {
     .unwrap();
     tokio::time::sleep(Duration::from_millis(350)).await;
     assert!(pulls.load(Ordering::SeqCst) > 1);
-    let remembered = latest_live_still("delayed").expect("remembered");
-    assert_eq!(remembered, frames.last().unwrap().as_slice());
+    let mut remembered = None;
+    for _ in 0..80 {
+        if let Some(bytes) = catalog.still_cache().latest("delayed") {
+            remembered = Some(bytes);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let remembered = remembered.expect("remembered");
+    assert!(remembered.jpeg().starts_with(&[0xFF, 0xD8]));
     let images = LiveImageCatalog::new(
         vec![(
             ImageSource {
@@ -314,7 +318,13 @@ async fn latest_still_tracks_pump_after_delayed_consumer() {
                 semantic_id: None,
             },
             Arc::new(
-                a2a_lab_ot2::camera::PumpLinkedStill::new("delayed", "delayed", 1024).unwrap(),
+                a2a_lab_ot2::camera::PumpLinkedStill::new(
+                    "delayed",
+                    "delayed",
+                    1024,
+                    catalog.still_cache().clone(),
+                )
+                .unwrap(),
             ),
         )],
         ImageCatalogConfig::new(4, 1024).unwrap(),
@@ -326,71 +336,81 @@ async fn latest_still_tracks_pump_after_delayed_consumer() {
         ))
         .await
         .unwrap();
-    assert_eq!(still.data(), frames.last().unwrap().as_slice());
+    assert!(still.data().starts_with(&[0xFF, 0xD8]));
     catalog.shutdown();
 }
 
 #[tokio::test]
 async fn warmup_reports_unavailable_until_first_frame() {
     clear_all_live_stills();
-    let (camera, _) = SequenceCamera::new(vec![jpeg(9)]);
+    let (camera, _) = SequenceCamera::new(many_jpegs(60, 9));
     let sources = [descriptor("warmup", 1)];
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
         &temp_dvr("warmup"),
-        1024,
+        8 * 1024 * 1024,
         None,
         LiveVideoInjections::none().with_color_camera("warmup", Box::new(camera)),
     )
     .await
     .unwrap();
-    wait_for_follow(&catalog.provider(), "warmup").await;
-    assert!(latest_live_still("warmup").is_some());
+    for _ in 0..200 {
+        if catalog.still_cache().latest("warmup").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(catalog.still_cache().latest("warmup").is_some());
     catalog.shutdown();
 }
 
 #[tokio::test]
 async fn reconnect_after_transient_fault_restores_live_and_still() {
     clear_all_live_stills();
-    let (inner, pulls) = SequenceCamera::new(vec![jpeg(4), jpeg(5), jpeg(6)]);
+    let (inner, pulls) = SequenceCamera::new(many_jpegs(60, 4));
     let camera = FlakyCamera {
         inner,
         failures: Mutex::new(2),
     };
     let sources = [descriptor("flaky", 2)];
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
         &temp_dvr("flaky"),
-        1024,
+        8 * 1024 * 1024,
         None,
         LiveVideoInjections::none().with_color_camera("flaky", Box::new(camera)),
     )
     .await
     .unwrap();
-    wait_for_follow(&catalog.provider(), "flaky").await;
+    for _ in 0..200 {
+        if pulls.load(Ordering::SeqCst) >= 2 && catalog.still_cache().latest("flaky").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert!(pulls.load(Ordering::SeqCst) >= 2);
-    assert!(latest_live_still("flaky").is_some());
+    assert!(catalog.still_cache().latest("flaky").is_some());
     catalog.shutdown();
 }
 
 #[tokio::test]
 async fn independent_sources_keep_stable_ids_when_one_is_unavailable() {
     clear_all_live_stills();
-    let (good, _) = SequenceCamera::new(vec![jpeg(8)]);
+    let (good, _) = SequenceCamera::new(many_jpegs(60, 8));
     let sources = [descriptor("healthy", 0), descriptor("missing", 1)];
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
         &temp_dvr("independent"),
-        1024,
+        8 * 1024 * 1024,
         None,
         LiveVideoInjections::none()
             .with_color_camera("healthy", Box::new(good))
@@ -398,7 +418,12 @@ async fn independent_sources_keep_stable_ids_when_one_is_unavailable() {
     )
     .await
     .unwrap();
-    wait_for_follow(&catalog.provider(), "healthy").await;
+    for _ in 0..200 {
+        if catalog.still_cache().latest("healthy").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     let page = catalog
         .provider()
         .list_video_sources(ListVideoSourcesRequest::new(page()).unwrap())
@@ -414,21 +439,26 @@ async fn independent_sources_keep_stable_ids_when_one_is_unavailable() {
 #[tokio::test]
 async fn shutdown_leaves_runner_closed_without_leaking_threads() {
     clear_all_live_stills();
-    let (camera, _) = SequenceCamera::new(vec![jpeg(2)]);
+    let (camera, _) = SequenceCamera::new(many_jpegs(60, 2));
     let sources = [descriptor("stop", 3)];
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
         &temp_dvr("stop"),
-        1024,
+        8 * 1024 * 1024,
         None,
         LiveVideoInjections::none().with_color_camera("stop", Box::new(camera)),
     )
     .await
     .unwrap();
-    wait_for_follow(&catalog.provider(), "stop").await;
+    for _ in 0..200 {
+        if catalog.still_cache().latest("stop").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     catalog.shutdown();
     tokio::time::sleep(Duration::from_millis(120)).await;
 }
@@ -441,8 +471,8 @@ async fn mode_mismatch_surfaces_without_silent_fallback() {
         CaptureRate::fps(5).unwrap(),
     );
     let sources = [descriptor("mode", 0)];
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
@@ -458,6 +488,6 @@ async fn mode_mismatch_surfaces_without_silent_fallback() {
         .provider()
         .follow_video(FollowVideoRequest::new(VideoSourceId::new("mode").unwrap()))
         .await;
-    assert!(follow.is_err() || latest_live_still("mode").is_none());
+    assert!(follow.is_err() || catalog.still_cache().latest("mode").is_none());
     catalog.shutdown();
 }

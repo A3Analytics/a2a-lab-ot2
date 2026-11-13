@@ -89,7 +89,7 @@ fn startup_line_enables_the_extra_camera_only_when_an_index_is_set() {
     let off_out = String::from_utf8_lossy(&off.stdout);
     assert!(off_out.contains("opentrons-camera asset opentrons-ot2"));
     assert!(off_out.contains("external-camera off"));
-    assert!(!off_out.contains("external-camera index"));
+    assert!(!off_out.contains("external-camera camera_id"));
 
     let overridden = bin()
         .env("A2ALAB_EXTERNAL_CAMERA_INDEX", "2")
@@ -98,8 +98,8 @@ fn startup_line_enables_the_extra_camera_only_when_an_index_is_set() {
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&overridden.stdout);
-    assert!(out.contains("external-camera index 9"));
-    assert!(!out.contains("external-camera index 2"));
+    assert!(out.contains("external-camera camera_id 9"));
+    assert!(!out.contains("external-camera camera_id 2"));
 
     let from_env = bin()
         .env("A2ALAB_EXTERNAL_CAMERA_INDEX", "2")
@@ -107,7 +107,7 @@ fn startup_line_enables_the_extra_camera_only_when_an_index_is_set() {
         .output()
         .unwrap();
     let env_out = String::from_utf8_lossy(&from_env.stdout);
-    assert!(env_out.contains("external-camera index 2"));
+    assert!(env_out.contains("external-camera camera_id 2"));
 
     let invalid = bin()
         .env_remove("A2ALAB_EXTERNAL_CAMERA_INDEX")
@@ -255,6 +255,7 @@ async fn configured_description_is_advertised_for_the_external_camera() {
         &config,
         Some(Arc::new(Script::ok(jpeg(1, 1)))),
         None,
+        None,
     )
     .unwrap();
     let page = images
@@ -343,7 +344,7 @@ async fn serve_history(
     readonly: bool,
     history: Option<&std::path::Path>,
 ) -> Endpoints {
-    let catalog = image_catalog(url, config, Some(Arc::new(grab)), None).unwrap();
+    let catalog = image_catalog(url, config, Some(Arc::new(grab)), None, None).unwrap();
     let catalog = match history {
         Some(path) => catalog
             .with_persisted_sources(

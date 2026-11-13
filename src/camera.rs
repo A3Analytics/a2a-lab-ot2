@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
+use a2a_lab_dev_kit::videos::WarmStillCache;
 use a2a_lab_dev_kit::{A2aLabError, ImageSource, ImageSourceId, ImageTransportConfig, JsonObject};
 use nokhwa::Camera;
 use nokhwa::utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType};
@@ -261,11 +262,12 @@ pub fn camera_source_named(name: &str) -> Result<ImageSource, A2aLabError> {
 
 /// Still capture for one configured source id.
 ///
-/// Reads the JPEG stored by the live video pump. This does not open a device.
+/// Reads the JPEG stored by the declarative runtime still cache. This does not open a device.
 pub struct PumpLinkedStill {
     source_id: String,
     label: String,
     transport: ImageTransportConfig,
+    still_cache: WarmStillCache,
 }
 
 impl PumpLinkedStill {
@@ -274,17 +276,24 @@ impl PumpLinkedStill {
         source_id: impl Into<String>,
         label: impl Into<String>,
         max_image_bytes: u64,
+        still_cache: WarmStillCache,
     ) -> Result<Self, A2aLabError> {
         Ok(Self {
             source_id: source_id.into(),
             label: label.into(),
             transport: ImageTransportConfig::new(max_image_bytes)?,
+            still_cache,
         })
     }
 
     fn take_frame(&self) -> Result<CapturedFrame, A2aLabError> {
         let source = self.source_id.as_str();
-        let Some(body) = latest_live_still(source) else {
+        let body = self
+            .still_cache
+            .latest(source)
+            .map(|still| still.jpeg().to_vec())
+            .or_else(|| latest_live_still(source));
+        let Some(body) = body else {
             return Err(A2aLabError::unavailable(format!(
                 "{source} has no frame yet"
             )));
@@ -336,6 +345,7 @@ pub struct ConfiguredNativeStill {
     timeout: Duration,
     transport: ImageTransportConfig,
     capture: Arc<dyn CameraCapture>,
+    still_cache: Option<WarmStillCache>,
 }
 
 impl ConfiguredNativeStill {
@@ -345,6 +355,7 @@ impl ConfiguredNativeStill {
         timeout: Duration,
         max_image_bytes: u64,
         capture: Option<Arc<dyn CameraCapture>>,
+        still_cache: Option<WarmStillCache>,
     ) -> Result<Self, A2aLabError> {
         if timeout.is_zero() {
             return Err(A2aLabError::invalid("timeout", "must be greater than zero"));
@@ -364,6 +375,7 @@ impl ConfiguredNativeStill {
             timeout,
             transport: ImageTransportConfig::new(max_image_bytes)?,
             capture,
+            still_cache,
         })
     }
 
@@ -389,6 +401,11 @@ impl ConfiguredNativeStill {
     }
 
     async fn read_frame(&self) -> Result<Vec<u8>, A2aLabError> {
+        if let Some(cache) = &self.still_cache
+            && let Some(still) = cache.latest(self.descriptor.id.as_str())
+        {
+            return Ok(still.jpeg().to_vec());
+        }
         if let Some(bytes) = latest_live_still(self.descriptor.id.as_str()) {
             return Ok(bytes);
         }
@@ -398,7 +415,9 @@ impl ConfiguredNativeStill {
         let source_id = descriptor.id.clone();
         let task = tokio::task::spawn_blocking(move || {
             capture.capture(
-                descriptor.device_index,
+                descriptor
+                    .index_for_capture()
+                    .expect("index-based external"),
                 format,
                 EXTERNAL_CAMERA_SETTLING_FRAMES,
             )
@@ -431,8 +450,9 @@ impl ConfiguredNativeStill {
 
     fn unavailable(&self, reason: &str) -> A2aLabError {
         A2aLabError::unavailable(format!(
-            "{} (device index {}): {reason}",
-            self.descriptor.id, self.descriptor.device_index
+            "{} (camera_id {}): {reason}",
+            self.descriptor.id,
+            self.descriptor.camera_id_label()
         ))
     }
 
@@ -440,8 +460,9 @@ impl ConfiguredNativeStill {
         A2aLabError::invalid(
             "source_id",
             format!(
-                "{} (device index {}): {reason}",
-                self.descriptor.id, self.descriptor.device_index
+                "{} (camera_id {}): {reason}",
+                self.descriptor.id,
+                self.descriptor.camera_id_label()
             ),
         )
     }
@@ -461,10 +482,19 @@ pub struct CameraStill(PumpLinkedStill);
 impl CameraStill {
     /// Rejects an invalid payload limit. No device is opened.
     pub fn new(max_image_bytes: u64) -> Result<Self, A2aLabError> {
+        Self::with_still_cache(max_image_bytes, WarmStillCache::new())
+    }
+
+    /// Links the webcam still source to the runtime warm-still cache.
+    pub fn with_still_cache(
+        max_image_bytes: u64,
+        still_cache: WarmStillCache,
+    ) -> Result<Self, A2aLabError> {
         Ok(Self(PumpLinkedStill::new(
             CAMERA_SOURCE_ID,
             "Camera",
             max_image_bytes,
+            still_cache,
         )?))
     }
 }

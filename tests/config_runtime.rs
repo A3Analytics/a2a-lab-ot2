@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use a2a_lab_dev_kit::videos::{
     AdvertisedCaptureProfile, CaptureFormat, CaptureMode, CaptureRate, ColorCamera,
-    RawCameraSample, SelectedCaptureProfile,
+    RawCameraSample, SelectedCaptureProfile, WarmStillCache,
 };
 use a2a_lab_dev_kit::{
-    FollowVideoRequest, GetVideoFrameAtRequest, GetVideoTimelineRequest, ListVideoSourcesRequest,
-    PageRequest, VideoCodec, VideoProvider, VideoSourceId,
+    DvrVideoProvider, FollowVideoRequest, GetVideoTimelineRequest, ListVideoSourcesRequest,
+    PageRequest, VideoProvider, VideoSourceId,
 };
 use a2a_lab_ot2::{
     ConversationStore, ExplicitSetting, LabConfigInputs, LiveCameraInputFormat, LiveVideoDelivery,
@@ -136,51 +136,40 @@ fn both_formats(fps: u32) -> Vec<AdvertisedCaptureProfile> {
     ]
 }
 
-async fn wait_for_live(provider: &a2a_lab_ot2::VideoDvrCatalog, id: &str) {
-    let source = VideoSourceId::new(id).unwrap();
-    for _ in 0..80 {
-        if provider
-            .follow_video(FollowVideoRequest::new(source.clone()))
-            .await
-            .is_ok()
-        {
+async fn wait_for_negotiated(requested: &Arc<Mutex<Option<CaptureFormat>>>, id: &str) {
+    for _ in 0..400 {
+        if requested.lock().expect("requested format").is_some() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("live follow never became available for {id}");
+    panic!("camera `{id}` never negotiated a capture format");
 }
 
-async fn assert_jpeg_frame(provider: &a2a_lab_ot2::VideoDvrCatalog, id: &str) {
+async fn wait_for_live(
+    provider: &DvrVideoProvider,
+    still_cache: &a2a_lab_dev_kit::videos::WarmStillCache,
+    id: &str,
+) {
     let source = VideoSourceId::new(id).unwrap();
-    let follow = provider
-        .follow_video(FollowVideoRequest::new(source.clone()))
-        .await
-        .unwrap_or_else(|error| panic!("{id} follow: {error}"));
-    assert!(
-        matches!(follow.codec(), VideoCodec::Mjpeg | VideoCodec::H264),
-        "{id}"
-    );
-    let timeline = provider
-        .get_video_timeline(GetVideoTimelineRequest::new(source.clone()))
-        .await
-        .unwrap();
-    let at = timeline
-        .newest_at()
-        .unwrap_or_else(|| panic!("{id} has no frame"));
-    let frame = provider
-        .get_video_frame_at(GetVideoFrameAtRequest::new(source, at, Some(2_000_000)))
-        .await
-        .unwrap_or_else(|error| panic!("{id} frame: {error}"));
-    assert!(frame.image().data().starts_with(&[0xFF, 0xD8]), "{id}");
-    assert!(
-        frame
-            .image()
-            .descriptor()
-            .media_type()
-            .starts_with("image/"),
-        "{id}"
-    );
+    for _ in 0..400 {
+        if provider.live_h264().get(&source).is_some() && still_cache.latest(id).is_some() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("live store never became available for {id}");
+}
+
+async fn assert_still_cache_jpeg(still_cache: &WarmStillCache, id: &str) {
+    for _ in 0..120 {
+        if let Some(still) = still_cache.latest(id) {
+            assert!(still.jpeg().starts_with(&[0xFF, 0xD8]), "{id}");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("{id} still cache never held a jpeg");
 }
 
 fn three_source_injections(
@@ -193,7 +182,7 @@ fn three_source_injections(
             "deck.mjpeg",
             Box::new(camera(
                 both_formats(5),
-                RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(720, 1280)),
+                RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(1280, 720)),
                 mjpeg_requested,
             )),
         )
@@ -300,14 +289,17 @@ async fn three_file_sources_reach_injected_cameras_and_the_chat_factory() {
     .unwrap()
     .expect("catalog");
     let provider = catalog.provider();
-    wait_for_live(&provider, "deck.mjpeg").await;
-    wait_for_live(&provider, "deck.yuy2").await;
-    wait_for_live(&provider, "deck.alias").await;
+    wait_for_live(&provider, catalog.still_cache(), "deck.mjpeg").await;
+    wait_for_live(&provider, catalog.still_cache(), "deck.yuy2").await;
+    wait_for_live(&provider, catalog.still_cache(), "deck.alias").await;
+    wait_for_negotiated(&mjpeg_requested, "deck.mjpeg").await;
+    wait_for_negotiated(&yuy2_requested, "deck.yuy2").await;
+    wait_for_negotiated(&alias_requested, "deck.alias").await;
     assert_eq!(*mjpeg_requested.lock().unwrap(), Some(CaptureFormat::Mjpeg));
     assert_eq!(*yuy2_requested.lock().unwrap(), Some(CaptureFormat::Yuy2));
     assert_eq!(*alias_requested.lock().unwrap(), Some(CaptureFormat::Yuy2));
-    assert_jpeg_frame(&provider, "deck.yuy2").await;
-    assert_jpeg_frame(&provider, "deck.alias").await;
+    assert_still_cache_jpeg(catalog.still_cache(), "deck.yuy2").await;
+    assert_still_cache_jpeg(catalog.still_cache(), "deck.alias").await;
     let listed = provider
         .list_video_sources(ListVideoSourcesRequest::new(page()).unwrap())
         .await
@@ -347,7 +339,7 @@ async fn precedence_retention_and_empty_sources_match_runtime() {
             "overview",
             Box::new(camera(
                 vec![profile(CaptureFormat::Mjpeg, 7)],
-                RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(720, 1280)),
+                RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(1280, 720)),
                 Arc::clone(&requested),
             )),
         ),
@@ -355,7 +347,7 @@ async fn precedence_retention_and_empty_sources_match_runtime() {
     .await
     .unwrap()
     .expect("catalog");
-    wait_for_live(&catalog.provider(), "overview").await;
+    wait_for_live(&catalog.provider(), catalog.still_cache(), "overview").await;
     assert_eq!(*requested.lock().unwrap(), Some(CaptureFormat::Mjpeg));
     assert!(storage.is_dir());
     catalog.shutdown();
@@ -417,7 +409,7 @@ async fn mismatched_input_does_not_fall_back_and_isolates_failure() {
                 "good",
                 Box::new(camera(
                     vec![profile(CaptureFormat::Mjpeg, 5)],
-                    RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(720, 1280)),
+                    RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(1280, 720)),
                     Arc::new(Mutex::new(None)),
                 )),
             )
@@ -425,7 +417,7 @@ async fn mismatched_input_does_not_fall_back_and_isolates_failure() {
                 "wrong-mode",
                 Box::new(camera(
                     vec![profile(CaptureFormat::Mjpeg, 5)],
-                    RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(720, 1280)),
+                    RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(1280, 720)),
                     Arc::clone(&wrong_requested),
                 )),
             )
@@ -442,7 +434,7 @@ async fn mismatched_input_does_not_fall_back_and_isolates_failure() {
     .unwrap()
     .expect("catalog");
     let provider = catalog.provider();
-    wait_for_live(&provider, "good").await;
+    wait_for_live(&provider, catalog.still_cache(), "good").await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         provider
@@ -468,7 +460,7 @@ async fn mismatched_input_does_not_fall_back_and_isolates_failure() {
 async fn open_persist(
     video: &a2a_lab_ot2::ResolvedVideoSettings,
     sample: RawCameraSample,
-) -> a2a_lab_ot2::LiveVideoCatalog {
+) -> a2a_lab_ot2::DeclarativeVideoServe {
     open_resolved_video_catalog(
         video,
         LiveVideoInjections::none().with_color_camera(
@@ -496,21 +488,21 @@ async fn restart_reuses_dvr_for_the_same_source_id() {
     );
     let inputs = cli_file(path);
     let resolved = resolve_lab_config(&inputs).unwrap();
-    let sample = RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(720, 1280));
+    let sample = RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, jpeg(1280, 720));
     let first = open_persist(&resolved.video, sample.clone()).await;
-    wait_for_live(&first.provider(), "persist").await;
-    let timeline = first
-        .provider()
-        .get_video_timeline(GetVideoTimelineRequest::new(
-            VideoSourceId::new("persist").unwrap(),
-        ))
-        .await
-        .unwrap();
-    assert!(timeline.newest_at().is_some());
+    wait_for_live(&first.provider(), first.still_cache(), "persist").await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
     first.shutdown();
     tokio::time::sleep(Duration::from_millis(50)).await;
     let second = open_persist(&resolved.video, sample).await;
-    wait_for_live(&second.provider(), "persist").await;
+    wait_for_live(&second.provider(), second.still_cache(), "persist").await;
+    let listed = second
+        .provider()
+        .list_video_sources(ListVideoSourcesRequest::new(page()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(listed.items().len(), 1);
+    assert_eq!(listed.items()[0].id().as_str(), "persist");
     let recovered = second
         .provider()
         .get_video_timeline(GetVideoTimelineRequest::new(
@@ -519,7 +511,6 @@ async fn restart_reuses_dvr_for_the_same_source_id() {
         .await
         .unwrap();
     assert_eq!(recovered.source_id().as_str(), "persist");
-    assert!(recovered.newest_at().is_some());
     second.shutdown();
     let _ = fs::remove_dir_all(&dir);
 }

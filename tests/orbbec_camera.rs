@@ -136,6 +136,7 @@ fn catalog(
         &config(orbbec, serial),
         None,
         Some(Arc::new(capture)),
+        None,
     )
     .unwrap()
 }
@@ -382,6 +383,7 @@ async fn device_profile_and_payload_failures_store_nothing() {
         &tight,
         None,
         Some(Arc::new(Script::ok(jpeg(8, 8)))),
+        None,
     )
     .unwrap();
     let failed = images
@@ -414,6 +416,7 @@ async fn capture_timeout_and_other_sources_stay_isolated() {
         &config,
         Some(Arc::new(Native { fail: true })),
         Some(Arc::new(Script::ok(jpeg(2, 2)))),
+        None,
     )
     .unwrap();
     let orbbec = images
@@ -456,6 +459,7 @@ async fn stored_orbbec_frame_survives_reopen() {
         &config,
         None,
         Some(Arc::new(Script::ok(frame.clone()))),
+        None,
     )
     .unwrap()
     .with_persisted_sources(&sources, &path)
@@ -473,6 +477,7 @@ async fn stored_orbbec_frame_survives_reopen() {
         &config,
         None,
         Some(Arc::new(Script::fail(OrbbecCaptureError::NoDevice))),
+        None,
     )
     .unwrap()
     .with_persisted_sources(&sources, &path)

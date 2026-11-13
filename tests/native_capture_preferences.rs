@@ -89,11 +89,13 @@ fn legacy_external_camera_stays_mjpeg_1080() {
 
 #[test]
 fn unsupported_1080_yuy2_reports_available_modes() {
+    let (camera_id, device_index) = a2a_lab_ot2::index_camera_fields(0);
     let descriptor = LiveVideoSourceDescriptor {
         id: "external-camera".to_owned(),
         name: "External".to_owned(),
         description: "HD raw".to_owned(),
-        device_index: 0,
+        camera_id,
+        device_index,
         input: LiveCameraInputFormat::Yuy2,
         width: Some(1920),
         height: Some(1080),

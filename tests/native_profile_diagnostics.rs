@@ -46,11 +46,13 @@ impl a2a_lab_dev_kit::videos::ColorCamera for DiagnosticCamera {
 
 #[test]
 fn configured_source_yields_single_explicit_candidate() {
+    let (camera_id, device_index) = a2a_lab_ot2::index_camera_fields(1);
     let descriptor = LiveVideoSourceDescriptor {
         id: "usb-webcam".to_owned(),
         name: "USB".to_owned(),
         description: "test".to_owned(),
-        device_index: 1,
+        camera_id,
+        device_index,
         input: LiveCameraInputFormat::Mjpeg,
         width: Some(1920),
         height: Some(1080),
@@ -66,11 +68,13 @@ fn configured_source_yields_single_explicit_candidate() {
 
 #[test]
 fn negotiation_failure_lists_configured_and_advertised_profiles() {
+    let (camera_id, device_index) = a2a_lab_ot2::index_camera_fields(0);
     let descriptor = LiveVideoSourceDescriptor {
         id: "mac-built-in".to_owned(),
         name: "Built-in".to_owned(),
         description: "test".to_owned(),
-        device_index: 0,
+        camera_id,
+        device_index,
         input: LiveCameraInputFormat::Mjpeg,
         width: Some(1280),
         height: Some(720),

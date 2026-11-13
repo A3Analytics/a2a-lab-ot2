@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 
 use crate::images::jpeg_dimensions;
 use crate::videos::dvr::IndexedVideoDvr;
-use crate::videos::live_encode::LiveH264Catalog;
+use a2a_lab_dev_kit::videos::LiveH264Catalog;
 
 use super::epoch_playback::{
     effective_h264_range, epoch_session_has, live_store_edge_anchor, load_live_store_asset,

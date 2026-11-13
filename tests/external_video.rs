@@ -4,21 +4,27 @@ use std::process::Command;
 use std::time::Duration;
 
 use a2a_lab_dev_kit::{
-    A2aLabCommand, A2aLabError, A2aLabResult, A2aLabService, FollowVideoRequest,
+    A2aLabCommand, A2aLabError, A2aLabResult, A2aLabService, DvrVideoProvider, FollowVideoRequest,
     ListVideoSourcesRequest, MemoryLogs, MemoryMetrics, MemoryTasks, PageRequest, VideoProvider,
     VideoSourceId,
 };
-use a2a_lab_ot2::camera::EXTERNAL_CAMERA_SOURCE_ID;
+use a2a_lab_ot2::camera::{
+    EXTERNAL_CAMERA_HEIGHT, EXTERNAL_CAMERA_SOURCE_ID, EXTERNAL_CAMERA_WIDTH,
+};
 use a2a_lab_ot2::{
     DEFAULT_DISK_VIDEO_RETENTION_SECS, LiveJpegSource, VideoServeConfig, open_video_catalog,
 };
 
-fn jpeg(width: u16, height: u16) -> Vec<u8> {
-    let mut data = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08];
-    data.extend_from_slice(&height.to_be_bytes());
-    data.extend_from_slice(&width.to_be_bytes());
-    data.extend_from_slice(&[0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9]);
-    data
+fn jpeg(width: u32, height: u32) -> Vec<u8> {
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_fn(width, height, |_, _| Rgb([40, 40, 40]));
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 80)
+        .write_image(image.as_raw(), width, height, ExtendedColorType::Rgb8)
+        .expect("jpeg");
+    out
 }
 
 struct Repeat(Vec<u8>);
@@ -118,35 +124,38 @@ fn isolated_config(live_retention_secs: u64, max_bytes: u64) -> VideoServeConfig
     .unwrap()
 }
 
+async fn wait_for_live_follow(provider: &DvrVideoProvider, id: &str) {
+    let source = VideoSourceId::new(id).unwrap();
+    for _ in 0..200 {
+        if provider.live_h264().get(&source).is_some()
+            && provider
+                .follow_video(FollowVideoRequest::new(source.clone()))
+                .await
+                .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("live follow never became available for {id}");
+}
+
 #[tokio::test]
 async fn injected_external_camera_is_listed_and_followed() {
-    let bytes = jpeg(2, 3);
+    let bytes = jpeg(EXTERNAL_CAMERA_WIDTH, EXTERNAL_CAMERA_HEIGHT);
     let config = isolated_config(2, 1024);
     let catalog = open_video_catalog(&config, Some(Box::new(Repeat(bytes.clone()))), None)
         .await
         .unwrap()
         .expect("video on");
     let provider = catalog.provider();
-    let mut listed = None;
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let page = provider
-            .list_video_sources(
-                ListVideoSourcesRequest::new(PageRequest::new(None, 10).unwrap()).unwrap(),
-            )
-            .await
-            .unwrap();
-        listed = Some(page);
-        let follow = provider
-            .follow_video(FollowVideoRequest::new(
-                VideoSourceId::new(EXTERNAL_CAMERA_SOURCE_ID).unwrap(),
-            ))
-            .await;
-        if follow.is_ok() {
-            break;
-        }
-    }
-    let page = listed.unwrap();
+    wait_for_live_follow(&provider, EXTERNAL_CAMERA_SOURCE_ID).await;
+    let page = provider
+        .list_video_sources(
+            ListVideoSourcesRequest::new(PageRequest::new(None, 10).unwrap()).unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(page.items().len(), 1);
     assert_eq!(page.items()[0].id().as_str(), EXTERNAL_CAMERA_SOURCE_ID);
     provider
@@ -160,7 +169,7 @@ async fn injected_external_camera_is_listed_and_followed() {
 
 #[tokio::test]
 async fn video_skills_appear_on_the_shared_service() {
-    let bytes = jpeg(4, 4);
+    let bytes = jpeg(EXTERNAL_CAMERA_WIDTH, EXTERNAL_CAMERA_HEIGHT);
     let config = isolated_config(2, 1024);
     let catalog = open_video_catalog(&config, Some(Box::new(Repeat(bytes.clone()))), None)
         .await

@@ -14,7 +14,7 @@ use a2a_lab_dev_kit::{
 };
 use a2a_lab_ot2::{
     LiveCameraInputFormat, LiveVideoDelivery, LiveVideoInjections, LiveVideoSourceDescriptor,
-    start_live_video_catalog,
+    start_fixture_declarative_serve,
 };
 
 fn temp_dvr(name: &str) -> PathBuf {
@@ -123,11 +123,13 @@ impl a2a_lab_dev_kit::videos::ColorCamera for ScriptCam {
 }
 
 fn h264_source(id: &str, input: LiveCameraInputFormat) -> LiveVideoSourceDescriptor {
+    let (camera_id, device_index) = a2a_lab_ot2::index_camera_fields(1);
     LiveVideoSourceDescriptor {
         id: id.to_owned(),
         name: format!("Name {id}"),
         description: format!("Description {id}"),
-        device_index: 1,
+        camera_id,
+        device_index,
         input,
         width: Some(16),
         height: Some(16),
@@ -137,7 +139,7 @@ fn h264_source(id: &str, input: LiveCameraInputFormat) -> LiveVideoSourceDescrip
 }
 
 async fn wait_h264_disk(
-    catalog: &a2a_lab_ot2::LiveVideoCatalog,
+    catalog: &a2a_lab_ot2::DeclarativeVideoServe,
     source: &VideoSourceId,
 ) -> (Vec<u8>, Vec<u8>) {
     let track = DvrTrackId::new("h264").unwrap();
@@ -167,8 +169,8 @@ async fn mjpeg_fixture_emits_openh264_live_and_disk() {
     let _ = std::fs::remove_dir_all(&root);
     let id = "mjpeg-h264";
     let source = h264_source(id, LiveCameraInputFormat::Mjpeg);
-    let catalog = start_live_video_catalog(
-        std::slice::from_ref(&source),
+    let catalog = start_fixture_declarative_serve(
+        vec![source],
         5,
         5,
         3_600,
@@ -200,8 +202,8 @@ async fn yuy2_fixture_emits_openh264_live_and_disk() {
     let _ = std::fs::remove_dir_all(&root);
     let id = "yuy2-h264";
     let source = h264_source(id, LiveCameraInputFormat::Yuy2);
-    let catalog = start_live_video_catalog(
-        std::slice::from_ref(&source),
+    let catalog = start_fixture_declarative_serve(
+        vec![source],
         5,
         5,
         3_600,

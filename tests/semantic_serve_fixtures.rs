@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use a2a_lab_dev_kit::SemanticSearchCapabilities;
+use a2a_lab_dev_kit::videos::{
+    AdvertisedCaptureProfile, CaptureFormat, CaptureMode, CaptureRate, ColorCamera,
+    RawCameraSample, SelectedCaptureProfile,
+};
 use a2a_lab_dev_kit::{
     A2aLabCommand, A2aLabResult, A2aLabService, AppendFrameDecisionRequest, DecisionOutcome,
     DecisionSubject, FrameDecisionEvaluationOwnership, FrameDecisionEvaluatorLimits,
@@ -30,6 +34,55 @@ use a2a_lab_ot2::{
 };
 
 const SEMANTIC_LIMITS: &str = r#""limits":{"worker":{"max_batch_items":4,"max_concurrency":2,"max_queue_backlog":64,"max_retry_attempts":3,"job_deadline":"30s","retry_backoff":"1s"},"search":{"top_k":10,"candidate_limit":1000,"max_neighbor_frames":5,"query_window":"2h"},"roi":{"min_edge_pixels":280,"max_edge_pixels":1568,"max_rois_per_frame":8},"storage":{"vector_index_path":"./state/semantic-index","max_disk_bytes":1073741824},"decisions":{"max_batch_items":8,"max_concurrency":2,"job_deadline":"45s","coverage_policy":"on_demand"}}"#;
+
+struct FixtureCamera;
+
+fn fixture_jpeg() -> Vec<u8> {
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(64, 48, |_, _| Rgb([8, 8, 8]));
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 80)
+        .write_image(image.as_raw(), 64, 48, ExtendedColorType::Rgb8)
+        .expect("jpeg");
+    out
+}
+
+impl ColorCamera for FixtureCamera {
+    fn advertised(
+        &mut self,
+    ) -> Result<Vec<AdvertisedCaptureProfile>, a2a_lab_dev_kit::A2aLabError> {
+        Ok(vec![AdvertisedCaptureProfile::new(
+            CaptureMode::new(CaptureFormat::Mjpeg, 64, 48).expect("mode"),
+            CaptureRate::fps(5).expect("rate"),
+        )])
+    }
+
+    fn open(
+        &mut self,
+        selected: &SelectedCaptureProfile,
+    ) -> Result<SelectedCaptureProfile, a2a_lab_dev_kit::A2aLabError> {
+        Ok(*selected)
+    }
+
+    fn raw_frame(&mut self) -> Result<RawCameraSample, a2a_lab_dev_kit::A2aLabError> {
+        Ok(RawCameraSample::new(
+            CaptureFormat::Mjpeg,
+            64,
+            48,
+            0,
+            fixture_jpeg(),
+        ))
+    }
+
+    fn stop(&mut self) -> Result<(), a2a_lab_dev_kit::A2aLabError> {
+        Ok(())
+    }
+}
+
+fn semantic_video_injections() -> LiveVideoInjections {
+    LiveVideoInjections::none().with_color_camera("camera", Box::new(FixtureCamera))
+}
 
 fn temp_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -117,7 +170,7 @@ async fn search_capabilities_for_config(
     let injections = deterministic_semantic_injections(&semantic).await;
     let catalog = open_resolved_video_catalog_with_semantic(
         &resolved.video,
-        LiveVideoInjections::none(),
+        semantic_video_injections(),
         Some(&inputs),
         Some(injections),
     )
@@ -176,7 +229,7 @@ async fn enabled_semantic_registers_capabilities_for_configured_source() {
     let injections = deterministic_semantic_injections(&semantic).await;
     let catalog = open_resolved_video_catalog_with_semantic(
         &resolved.video,
-        LiveVideoInjections::none(),
+        semantic_video_injections(),
         Some(&inputs),
         Some(injections),
     )

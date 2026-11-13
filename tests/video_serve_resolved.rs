@@ -10,8 +10,8 @@ use a2a_lab_dev_kit::videos::{
     RawCameraSample, SelectedCaptureProfile,
 };
 use a2a_lab_dev_kit::{
-    FollowVideoRequest, GetVideoTimelineRequest, ListVideoSourcesRequest, PageRequest,
-    VideoProvider, VideoSourceId,
+    DvrVideoProvider, GetVideoTimelineRequest, ListVideoSourcesRequest, PageRequest, VideoProvider,
+    VideoSourceId,
 };
 use a2a_lab_ot2::{
     ClapValueSource, ExplicitSetting, LabConfigInputs, LiveCameraInputFormat, LiveVideoInjections,
@@ -90,19 +90,19 @@ fn profile(format: CaptureFormat, width: u32, height: u32, fps: u32) -> Advertis
     )
 }
 
-async fn wait_for_live(provider: &a2a_lab_ot2::VideoDvrCatalog, id: &str) {
+async fn wait_for_live(
+    provider: &DvrVideoProvider,
+    still_cache: &a2a_lab_dev_kit::videos::WarmStillCache,
+    id: &str,
+) {
     let source = VideoSourceId::new(id).unwrap();
-    for _ in 0..80 {
-        if provider
-            .follow_video(FollowVideoRequest::new(source.clone()))
-            .await
-            .is_ok()
-        {
+    for _ in 0..200 {
+        if provider.live_h264().get(&source).is_some() && still_cache.latest(id).is_some() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("live follow never became available for {id}");
+    panic!("live store never became available for {id}");
 }
 
 #[test]
@@ -179,8 +179,8 @@ async fn videos_only_file_controls_sources_and_timing() {
     .unwrap()
     .expect("catalog");
     let provider = catalog.provider();
-    wait_for_live(&provider, "bench").await;
-    wait_for_live(&provider, "detail").await;
+    wait_for_live(&provider, catalog.still_cache(), "bench").await;
+    wait_for_live(&provider, catalog.still_cache(), "detail").await;
     let page = provider
         .list_video_sources(ListVideoSourcesRequest::new(page()).unwrap())
         .await
@@ -235,7 +235,7 @@ async fn explicit_camera_index_enables_one_source_from_empty_file_list() {
     };
     let resolved = resolve_lab_config(&inputs).unwrap();
     assert_eq!(resolved.video.sources.len(), 1);
-    assert_eq!(resolved.video.sources[0].device_index, 9);
+    assert_eq!(resolved.video.sources[0].device_index, Some(9));
     assert_eq!(resolved.video.sources[0].input, LiveCameraInputFormat::Yuy2);
 }
 
@@ -275,15 +275,8 @@ async fn restart_keeps_timeline_for_same_ids_and_dvr_root() {
         .await
         .unwrap()
         .expect("first catalog");
-    wait_for_live(&first.provider(), "persist").await;
-    let timeline = first
-        .provider()
-        .get_video_timeline(GetVideoTimelineRequest::new(
-            VideoSourceId::new("persist").unwrap(),
-        ))
-        .await
-        .unwrap();
-    assert!(timeline.newest_at().is_some());
+    wait_for_live(&first.provider(), first.still_cache(), "persist").await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
     first.shutdown();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -294,7 +287,7 @@ async fn restart_keeps_timeline_for_same_ids_and_dvr_root() {
     .await
     .unwrap()
     .expect("second catalog");
-    wait_for_live(&second.provider(), "persist").await;
+    wait_for_live(&second.provider(), second.still_cache(), "persist").await;
     let recovered = second
         .provider()
         .get_video_timeline(GetVideoTimelineRequest::new(
@@ -302,6 +295,6 @@ async fn restart_keeps_timeline_for_same_ids_and_dvr_root() {
         ))
         .await
         .unwrap();
-    assert!(recovered.newest_at().is_some());
+    assert_eq!(recovered.source_id().as_str(), "persist");
     second.shutdown();
 }

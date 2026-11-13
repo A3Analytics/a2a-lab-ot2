@@ -13,15 +13,26 @@ use a2a_lab_dev_kit::{
 };
 use a2a_lab_ot2::{
     LiveCameraInputFormat, LiveVideoDelivery, LiveVideoInjections, LiveVideoSourceDescriptor,
-    start_live_video_catalog,
+    start_fixture_declarative_serve,
 };
 
 fn jpeg(width: u16, height: u16) -> Vec<u8> {
-    let mut data = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08];
-    data.extend_from_slice(&height.to_be_bytes());
-    data.extend_from_slice(&width.to_be_bytes());
-    data.extend_from_slice(&[0x01, 0x01, 0x11, 0x00, 0xFF, 0xD9]);
-    data
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ExtendedColorType, ImageBuffer, ImageEncoder, Rgb};
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_fn(u32::from(width), u32::from(height), |_, _| {
+            Rgb([64, 64, 64])
+        });
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 80)
+        .write_image(
+            image.as_raw(),
+            u32::from(width),
+            u32::from(height),
+            ExtendedColorType::Rgb8,
+        )
+        .expect("jpeg");
+    out
 }
 
 fn temp_dvr(name: &str) -> PathBuf {
@@ -37,16 +48,18 @@ fn descriptor(
     device_index: u32,
     input: LiveCameraInputFormat,
 ) -> LiveVideoSourceDescriptor {
+    let (camera_id, device_index) = a2a_lab_ot2::index_camera_fields(device_index);
     LiveVideoSourceDescriptor {
         id: id.to_owned(),
         name: format!("Name {id}"),
         description: format!("Description {id}"),
+        camera_id,
         device_index,
         input,
         width: Some(4),
         height: Some(4),
         capture_rate: Some(5),
-        delivery: LiveVideoDelivery::Mjpeg,
+        delivery: LiveVideoDelivery::H264,
     }
 }
 
@@ -112,42 +125,36 @@ fn yuy2_sample(width: u32, height: u32, stride: u32, fill: u8) -> RawCameraSampl
     )
 }
 
-async fn wait_for_live(provider: &a2a_lab_ot2::VideoDvrCatalog, id: &str) {
-    let source = VideoSourceId::new(id).unwrap();
-    for _ in 0..50 {
-        if provider
-            .follow_video(FollowVideoRequest::new(source.clone()))
-            .await
-            .is_ok()
-        {
+async fn wait_for_runtime(catalog: &a2a_lab_ot2::DeclarativeVideoServe, id: &str) {
+    for _ in 0..400 {
+        if catalog.still_cache().latest(id).is_some() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("live follow never became available for {id}");
+    panic!("runtime never published still for {id}");
 }
 
 #[tokio::test]
 async fn empty_catalog_lists_no_sources() {
-    let catalog = start_live_video_catalog(
-        &[],
-        5,
-        5,
-        86_400,
-        &temp_dvr("empty"),
-        1024,
-        None,
-        LiveVideoInjections::none(),
-    )
-    .await
-    .unwrap();
-    let page = catalog
-        .provider()
-        .list_video_sources(ListVideoSourcesRequest::new(page()).unwrap())
+    use a2a_lab_ot2::lab_config::{ResolvedDvrStorage, ResolvedVideoSettings, SettingProvenance};
+    use a2a_lab_ot2::open_resolved_video_catalog;
+    let settings = ResolvedVideoSettings {
+        sources: vec![],
+        fps: 5,
+        live_retention_secs: 5,
+        disk_retention_secs: 86_400,
+        dvr_save_interval_nanos: None,
+        dvr_storage: ResolvedDvrStorage {
+            path: temp_dvr("empty"),
+            provenance: SettingProvenance::ApplicationDefault,
+        },
+        max_image_bytes: 1024,
+    };
+    let catalog = open_resolved_video_catalog(&settings, LiveVideoInjections::none())
         .await
         .unwrap();
-    assert!(page.items().is_empty());
-    catalog.shutdown();
+    assert!(catalog.is_none());
 }
 
 #[tokio::test]
@@ -168,13 +175,13 @@ async fn three_injected_sources_are_discoverable() {
         CaptureRate::fps(5).expect("rate"),
         CaptureRate::fps(5).expect("out"),
     );
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
         &temp_dvr("three"),
-        64 * 1024,
+        8 * 1024 * 1024,
         None,
         LiveVideoInjections::none()
             .with_color_camera(
@@ -205,9 +212,9 @@ async fn three_injected_sources_are_discoverable() {
     .await
     .unwrap();
     let provider = catalog.provider();
-    wait_for_live(&provider, "alpha").await;
-    wait_for_live(&provider, "beta").await;
-    wait_for_live(&provider, "gamma").await;
+    wait_for_runtime(&catalog, "alpha").await;
+    wait_for_runtime(&catalog, "beta").await;
+    wait_for_runtime(&catalog, "gamma").await;
     let page = provider
         .list_video_sources(ListVideoSourcesRequest::new(page()).unwrap())
         .await
@@ -237,13 +244,13 @@ async fn rejects_duplicate_ids_and_device_indices() {
         descriptor("same", 1, LiveCameraInputFormat::Yuy2),
     ];
     assert!(
-        start_live_video_catalog(
-            &dup_id,
+        start_fixture_declarative_serve(
+            dup_id.to_vec(),
             5,
             5,
             86_400,
             &temp_dvr("dup-id"),
-            1024,
+            8 * 1024 * 1024,
             None,
             LiveVideoInjections::none(),
         )
@@ -255,13 +262,13 @@ async fn rejects_duplicate_ids_and_device_indices() {
         descriptor("b", 2, LiveCameraInputFormat::Yuy2),
     ];
     assert!(
-        start_live_video_catalog(
-            &dup_device,
+        start_fixture_declarative_serve(
+            dup_device.to_vec(),
             5,
             5,
             86_400,
             &temp_dvr("dup-dev"),
-            1024,
+            8 * 1024 * 1024,
             None,
             LiveVideoInjections::none(),
         )
@@ -282,13 +289,13 @@ async fn reordered_descriptors_keep_identity() {
     ];
     let frame = jpeg(4, 4);
     for order in [first, second] {
-        let catalog = start_live_video_catalog(
-            &order,
+        let catalog = start_fixture_declarative_serve(
+            order.to_vec(),
             5,
             5,
             86_400,
             &temp_dvr("order"),
-            1024,
+            8 * 1024 * 1024,
             None,
             LiveVideoInjections::legacy_jpeg(
                 Some(Box::new(RepeatJpeg(frame.clone()))),
@@ -319,13 +326,13 @@ async fn one_failing_source_does_not_remove_healthy_sources() {
         LiveVideoSourceDescriptor::legacy_external(0, "sick"),
         LiveVideoSourceDescriptor::legacy_camera(1),
     ];
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
         &temp_dvr("isolate"),
-        1024,
+        8 * 1024 * 1024,
         None,
         LiveVideoInjections::legacy_jpeg(
             Some(Box::new(FailJpeg)),
@@ -335,7 +342,7 @@ async fn one_failing_source_does_not_remove_healthy_sources() {
     .await
     .unwrap();
     let provider = catalog.provider();
-    wait_for_live(&provider, "camera").await;
+    wait_for_runtime(&catalog, "camera").await;
     let page = provider
         .list_video_sources(ListVideoSourcesRequest::new(page()).unwrap())
         .await
@@ -356,13 +363,13 @@ async fn color_camera_rejects_wrong_negotiated_format() {
             CaptureRate::fps(5).expect("out"),
         ),
     };
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
         &temp_dvr("wrong-fmt"),
-        1024,
+        8 * 1024 * 1024,
         None,
         LiveVideoInjections::none().with_color_camera("camera", Box::new(camera)),
     )
@@ -392,13 +399,13 @@ async fn malformed_packed_yuy2_fails_without_fallback() {
             CaptureRate::fps(5).expect("out"),
         ),
     };
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
         &temp_dvr("bad-yuy2"),
-        1024,
+        8 * 1024 * 1024,
         None,
         LiveVideoInjections::none().with_color_camera("yuy2", Box::new(camera)),
     )
@@ -428,8 +435,8 @@ async fn yuy2_injected_source_publishes_live_mjpeg() {
             CaptureRate::fps(5).expect("out"),
         ),
     };
-    let catalog = start_live_video_catalog(
-        &sources,
+    let catalog = start_fixture_declarative_serve(
+        sources.to_vec(),
         5,
         5,
         86_400,
@@ -440,6 +447,6 @@ async fn yuy2_injected_source_publishes_live_mjpeg() {
     )
     .await
     .unwrap();
-    wait_for_live(&catalog.provider(), "raw-yuy2").await;
+    wait_for_runtime(&catalog, "raw-yuy2").await;
     catalog.shutdown();
 }

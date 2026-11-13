@@ -12,7 +12,8 @@ fn intentional_media_parity_differences_are_recorded() {
         "camera",
         "native camera index",
         "--camera-index",
-        "does not open a second device",
+        "warm-still cache",
+        "configured resolution",
         "diagnostic",
         "Nokhwa",
     ] {
