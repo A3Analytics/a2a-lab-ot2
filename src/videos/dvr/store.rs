@@ -1,27 +1,26 @@
-//! Indexed on-disk DVR: devkit chunk store plus OT-2 semantic tables.
+//! Indexed on-disk DVR wrapping the generic semantic chunk store.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
+use a2a_lab_dev_kit::videos::{SaveFaults, SemanticFrameManifestRecord};
 use a2a_lab_dev_kit::{
-    A2aLabError, DvrCommittedFrame, DvrFrameAtRequest, DvrFrameAtResult, DvrMediaCoverage,
-    DvrMediaPayload, DvrMediaSegment, DvrMediaStore, DvrMediaTrack, DvrPersistHook,
-    DvrRetentionBounds, DvrStoreNamespace, DvrTrackId, Page, ReadDvrMediaWindowRequest,
-    SavedFrameRef, SemanticIndexingConfig, SemanticIndexingStage, SemanticSqliteStore,
-    SqliteChunkDvrStore, TimeRange, UtcTimestamp, VideoCodec, VideoSourceId,
+    A2aLabError, DvrFrameAtRequest, DvrFrameAtResult, DvrMediaCoverage, DvrMediaPayload,
+    DvrMediaSegment, DvrMediaStore, DvrMediaTrack, DvrPersistHook, DvrRetentionBounds,
+    DvrStoreNamespace, DvrTrackId, Page, ReadDvrMediaWindowRequest, SemanticChunkDvrStore,
+    SemanticIndexingConfig, TimeRange, UtcTimestamp, VideoCodec, VideoSourceId,
 };
-use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 use tokio::task;
 
 use super::chunk::{crc32, read_payload_range};
-use super::frame_manifest::DEFAULT_SEMANTIC_STORE_NAMESPACE;
 use super::h264_epoch;
-use super::indexing_registration::{INDEXING_PRIORITY_LIVE, SaveFaults, commit_indexing_job_tx};
 use super::indexing_scope::IndexedSourceFilter;
-use super::semantic_persist_hook::SemanticPersistHook;
+
+/// Default DVR store namespace for semantic manifest rows in this agent.
+pub const DEFAULT_SEMANTIC_STORE_NAMESPACE: &str = "ot2.video-dvr";
 
 /// Default root directory for indexed video payloads and SQLite index.
 pub const DEFAULT_VIDEO_DVR_ROOT: &str = ".a2a-lab-ot2/video-dvr";
@@ -32,264 +31,44 @@ pub const DEFAULT_DISK_VIDEO_RETENTION_SECS: u64 = 3 * 24 * 60 * 60;
 /// Hourly cleanup while serve is running.
 pub const VIDEO_DVR_CLEANUP_INTERVAL: Duration = Duration::from_hours(1);
 
-/// Restart-safe indexed DVR. Media and semantic databases are separate devkit stores.
+/// Restart-safe indexed DVR. Semantic persistence lives in the generic kit engine.
 #[derive(Clone)]
 pub struct IndexedVideoDvr {
-    chunk: SqliteChunkDvrStore,
-    semantic: SemanticSqliteStore,
-    pub(crate) save_faults: Arc<SaveFaults>,
+    engine: SemanticChunkDvrStore,
     indexing_sources: Arc<RwLock<IndexedSourceFilter>>,
-    semantic_indexing: Arc<RwLock<Option<SemanticIndexingConfig>>>,
-    hook_error: Arc<Mutex<Option<A2aLabError>>>,
 }
 
 impl IndexedVideoDvr {
-    /// Persists the active embedding model space and schedules re-embedding when it changes.
-    pub async fn sync_embedding_config(
-        &self,
-        config: &a2a_lab_dev_kit::SemanticEmbeddingsConfig,
-    ) -> Result<bool, A2aLabError> {
-        let model_space = config.model_space_identity()?;
-        let space = config.space();
-        let identity = format!(
-            "{}|{}|{}|{:?}|{:?}|{}",
-            model_space.provider(),
-            model_space.model(),
-            space.dimensions,
-            space.normalization,
-            space.metric,
-            model_space.generation().get()
-        );
-        let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
-        let generation = i64::try_from(model_space.generation().get()).unwrap_or(i64::MAX);
-        let prior: Option<String> = sqlx::query_scalar(
-            "SELECT config_digest FROM semantic_embedding_config_identity WHERE singleton_id = 1",
-        )
-        .fetch_optional(self.semantic_pool())
-        .await
-        .map_err(db_error)?;
-        if prior.as_deref() == Some(digest.as_str()) {
-            return Ok(false);
-        }
-        let now_us = crate::time::now()?.as_micros();
-        let mut tx = self.semantic_pool().begin().await.map_err(db_error)?;
-        if prior.is_some() {
-            self.wipe_retained_embedding_vectors_tx(&mut tx).await?;
-            self.persist_embedding_config_identity_tx(
-                &mut tx,
-                &model_space,
-                space,
-                generation,
-                &digest,
-                now_us,
-            )
-            .await?;
-            self.requeue_retained_indexing_for_rebuild_tx(&mut tx)
-                .await?;
-        } else {
-            self.persist_embedding_config_identity_tx(
-                &mut tx,
-                &model_space,
-                space,
-                generation,
-                &digest,
-                now_us,
-            )
-            .await?;
-        }
-        tx.commit().await.map_err(db_error)?;
-        Ok(prior.is_some())
-    }
-
-    async fn persist_embedding_config_identity_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        model_space: &a2a_lab_dev_kit::ModelSpaceIdentity,
-        space: &a2a_lab_dev_kit::EmbeddingSpaceConfig,
-        generation: i64,
-        digest: &str,
-        now_us: i64,
-    ) -> Result<(), A2aLabError> {
-        sqlx::query(
-            "INSERT INTO semantic_embedding_config_identity
-             (singleton_id, provider, model, dimensions, normalization, metric,
-              model_space_generation, config_digest, updated_at_us)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(singleton_id) DO UPDATE SET provider=excluded.provider,
-               model=excluded.model, dimensions=excluded.dimensions,
-               normalization=excluded.normalization, metric=excluded.metric,
-               model_space_generation=excluded.model_space_generation,
-               config_digest=excluded.config_digest, updated_at_us=excluded.updated_at_us",
-        )
-        .bind(model_space.provider())
-        .bind(model_space.model())
-        .bind(i64::from(space.dimensions))
-        .bind(format!("{:?}", space.normalization))
-        .bind(format!("{:?}", space.metric))
-        .bind(generation)
-        .bind(digest)
-        .bind(now_us)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
-        Ok(())
-    }
-
-    async fn wipe_retained_embedding_vectors_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    ) -> Result<(), A2aLabError> {
-        sqlx::query(
-            "UPDATE semantic_frame_embeddings
-             SET embedding_vector = NULL
-             WHERE frame_id IN (
-                 SELECT frame_id FROM semantic_frame_revisions
-                 WHERE search_current = 1 AND retained_state = 'retained'
-             )",
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
-        sqlx::query(
-            "UPDATE semantic_frame_revisions
-             SET embedding_checkpoint = 'pending'
-             WHERE search_current = 1 AND retained_state = 'retained'",
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
-        sqlx::query(
-            "UPDATE semantic_indexing_job_runtime
-             SET job_state = 'pending',
-                 lease_owner = NULL,
-                 lease_expires_at_us = NULL,
-                 completed_at_us = NULL
-             WHERE job_state = 'ready'
-               AND job_id IN (
-                 SELECT j.job_id FROM semantic_indexing_jobs j
-                 JOIN semantic_frame_revisions rev ON rev.frame_id = j.frame_id
-                 WHERE rev.search_current = 1 AND rev.retained_state = 'retained'
-               )",
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
-        Ok(())
-    }
-
-    async fn requeue_retained_indexing_for_rebuild_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    ) -> Result<(), A2aLabError> {
-        sqlx::query(
-            "UPDATE semantic_indexing_job_runtime
-             SET job_state = CASE
-                   WHEN description_generation IS NOT NULL THEN 'described'
-                   ELSE 'pending'
-                 END,
-                 lease_owner = NULL,
-                 lease_expires_at_us = NULL,
-                 completed_at_us = NULL
-             WHERE job_id IN (
-               SELECT j.job_id FROM semantic_indexing_jobs j
-               JOIN semantic_frame_revisions rev ON rev.frame_id = j.frame_id
-               WHERE rev.search_current = 1 AND rev.retained_state = 'retained'
-             )",
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(db_error)?;
-        Ok(())
-    }
-
-    #[doc(hidden)]
-    pub async fn count_searchable_embedding_vectors(&self) -> Result<u64, A2aLabError> {
-        let active: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(model_space_generation, 0)
-             FROM semantic_embedding_config_identity WHERE singleton_id = 1",
-        )
-        .fetch_optional(self.semantic_pool())
-        .await
-        .map_err(db_error)?
-        .unwrap_or(0);
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM semantic_frame_embeddings emb
-             JOIN semantic_frame_revisions rev ON rev.frame_id = emb.frame_id
-             WHERE rev.search_current = 1
-               AND rev.retained_state = 'retained'
-               AND rev.embedding_checkpoint = 'ready'
-               AND emb.embedding_vector IS NOT NULL
-               AND length(emb.embedding_vector) > 0
-               AND emb.model_space_generation = ?1",
-        )
-        .bind(active)
-        .fetch_one(self.semantic_pool())
-        .await
-        .map_err(db_error)?;
-        Ok(u64::try_from(count.max(0)).unwrap_or(0))
-    }
-
-    #[doc(hidden)]
-    pub async fn count_nonempty_embedding_vectors(&self) -> Result<u64, A2aLabError> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM semantic_frame_embeddings
-             WHERE embedding_vector IS NOT NULL AND length(embedding_vector) > 0",
-        )
-        .fetch_one(self.semantic_pool())
-        .await
-        .map_err(db_error)?;
-        Ok(u64::try_from(count.max(0)).unwrap_or(0))
-    }
-
-    pub async fn active_model_space_generation(&self) -> Result<Option<u64>, A2aLabError> {
-        let generation: Option<i64> = sqlx::query_scalar(
-            "SELECT model_space_generation FROM semantic_embedding_config_identity WHERE singleton_id = 1",
-        )
-        .fetch_optional(self.semantic_pool())
-        .await
-        .map_err(db_error)?;
-        Ok(generation.and_then(|value| u64::try_from(value.max(0)).ok()))
-    }
-
-    /// Shared persist hook slot for [`DeclarativeVideoRuntime::start`].
     #[must_use]
-    pub fn runtime_persist_hooks() -> (Vec<Arc<dyn DvrPersistHook>>, Arc<OnceLock<IndexedVideoDvr>>)
-    {
-        let store_slot = Arc::new(OnceLock::new());
-        let hook = Arc::new(SemanticPersistHook::new(Arc::clone(&store_slot)));
-        (vec![hook], store_slot)
+    pub fn engine(&self) -> &SemanticChunkDvrStore {
+        &self.engine
     }
 
-    /// Wraps an already-opened devkit chunk store and opens the semantic database beside it.
-    pub async fn adopt_opened(
-        chunk: SqliteChunkDvrStore,
-        store_slot: Arc<OnceLock<IndexedVideoDvr>>,
-    ) -> Result<Self, A2aLabError> {
-        let semantic_path = chunk.root().join("semantic.sqlite");
-        Self::adopt_opened_at(chunk, store_slot, semantic_path).await
+    #[must_use]
+    pub fn save_faults(&self) -> &Arc<SaveFaults> {
+        self.engine.save_faults()
     }
 
-    /// Wraps media storage and opens the semantic database at `semantic_sqlite`.
-    pub async fn adopt_opened_at(
-        chunk: SqliteChunkDvrStore,
-        store_slot: Arc<OnceLock<IndexedVideoDvr>>,
-        semantic_sqlite: impl AsRef<Path>,
-    ) -> Result<Self, A2aLabError> {
-        let semantic = SemanticSqliteStore::open(semantic_sqlite).await?;
+    /// Persist hooks plus engine slot for [`DeclarativeVideoRuntime::start`].
+    #[must_use]
+    pub fn runtime_persist_hooks() -> (
+        Vec<Arc<dyn DvrPersistHook>>,
+        Arc<OnceLock<SemanticChunkDvrStore>>,
+    ) {
+        SemanticChunkDvrStore::runtime_persist_hooks()
+    }
+
+    /// Wraps an already-opened kit semantic store and runs OT-2 media cutover.
+    pub async fn from_engine(engine: SemanticChunkDvrStore) -> Result<Self, A2aLabError> {
         let store = Self {
-            chunk,
-            semantic,
-            save_faults: Arc::new(SaveFaults::default()),
+            engine,
             indexing_sources: Arc::new(RwLock::new(IndexedSourceFilter::all_sources())),
-            semantic_indexing: Arc::new(RwLock::new(None)),
-            hook_error: Arc::new(Mutex::new(None)),
         };
-        let _ = store_slot.set(store.clone());
         store.finish_opening().await?;
         Ok(store)
     }
 
-    /// Opens or creates the store. Validates storage before capture starts.
+    /// Opens media at `root` and semantic state at `root/semantic.sqlite`.
     pub async fn open(root: impl AsRef<Path>, retain_secs: u64) -> Result<Self, A2aLabError> {
         let root = root.as_ref();
         Self::open_with_semantic_path(root, retain_secs, root.join("semantic.sqlite")).await
@@ -301,20 +80,14 @@ impl IndexedVideoDvr {
         retain_secs: u64,
         semantic_sqlite: impl AsRef<Path>,
     ) -> Result<Self, A2aLabError> {
-        if retain_secs == 0 {
-            return Err(A2aLabError::invalid(
-                "video_disk_retention_secs",
-                "must be greater than zero",
-            ));
-        }
-        let root = root.as_ref();
-        if root.as_os_str().is_empty() {
-            return Err(A2aLabError::invalid("video_dvr_root", "must not be empty"));
-        }
-        let store_slot: Arc<OnceLock<IndexedVideoDvr>> = Arc::new(OnceLock::new());
-        let hook = Arc::new(SemanticPersistHook::new(Arc::clone(&store_slot)));
-        let chunk = SqliteChunkDvrStore::open_with_hooks(root, retain_secs, vec![hook]).await?;
-        Self::adopt_opened_at(chunk, store_slot, semantic_sqlite).await
+        let engine = SemanticChunkDvrStore::open_at(
+            root,
+            retain_secs,
+            semantic_sqlite,
+            DvrStoreNamespace::new(DEFAULT_SEMANTIC_STORE_NAMESPACE)?,
+        )
+        .await?;
+        Self::from_engine(engine).await
     }
 
     async fn finish_opening(&self) -> Result<(), A2aLabError> {
@@ -325,7 +98,7 @@ impl IndexedVideoDvr {
 
     #[must_use]
     pub fn root(&self) -> &Path {
-        self.chunk.root()
+        self.engine.root()
     }
 
     pub async fn append_mjpeg_frame(
@@ -335,19 +108,9 @@ impl IndexedVideoDvr {
         frame_period_us: u64,
         jpeg: &[u8],
     ) -> Result<(), A2aLabError> {
-        if self.save_faults.fail_payload_append() {
-            return Err(A2aLabError::unavailable(
-                "video DVR test fault: payload append blocked",
-            ));
-        }
-        *self
-            .hook_error
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        self.chunk
+        self.engine
             .append_mjpeg_frame(source_id, captured_at, frame_period_us, jpeg)
-            .await?;
-        self.propagate_hook_failure()
+            .await
     }
 
     pub async fn append_h264_sample(
@@ -359,16 +122,7 @@ impl IndexedVideoDvr {
         codec_init: &[u8],
         sample: &[u8],
     ) -> Result<(), A2aLabError> {
-        if self.save_faults.fail_payload_append() {
-            return Err(A2aLabError::unavailable(
-                "video DVR test fault: payload append blocked",
-            ));
-        }
-        *self
-            .hook_error
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        self.chunk
+        self.engine
             .append_h264_sample(
                 source_id,
                 captured_at,
@@ -377,83 +131,7 @@ impl IndexedVideoDvr {
                 codec_init,
                 sample,
             )
-            .await?;
-        self.propagate_hook_failure()
-    }
-
-    fn propagate_hook_failure(&self) -> Result<(), A2aLabError> {
-        self.hook_error
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-            .map_or(Ok(()), Err)
-    }
-
-    pub(crate) async fn on_frame_committed(
-        &self,
-        frame: &DvrCommittedFrame,
-    ) -> Result<(), A2aLabError> {
-        if self.save_faults.fail_metadata_commit() {
-            return Err(A2aLabError::unavailable(
-                "video DVR test fault: metadata commit blocked",
-            ));
-        }
-        let row = self
-            .chunk_frame_row(frame.source_id(), frame.track_id(), frame.start())
-            .await?;
-        let bytes = self.load_payload_bytes_from_retained_row(&row).await?;
-        let checksum = crc32(&bytes);
-        if checksum != frame.payload_crc32() {
-            return Err(A2aLabError::unavailable(
-                "committed frame checksum mismatch",
-            ));
-        }
-        let end = crate::time::from_unix_microseconds(row.try_get("end_us").map_err(db_error)?)?;
-        let store_ns = DvrStoreNamespace::new(DEFAULT_SEMANTIC_STORE_NAMESPACE)?;
-        let saved = SavedFrameRef::from_payload_bytes(
-            store_ns,
-            frame.source_id().clone(),
-            frame.track_id().clone(),
-            frame.start(),
-            &bytes,
-            None,
-        )?;
-        let registered_at = crate::time::now()?;
-        let create_indexing_job = self.permits_indexing_source(frame.source_id().as_str())
-            && self
-                .indexing_job_needed_for_frame(
-                    frame.source_id().as_str(),
-                    frame.track_id().as_str(),
-                    frame.start().as_micros(),
-                )
-                .await?;
-        let mut tx = self.semantic_pool().begin().await.map_err(db_error)?;
-        self.register_manifest_revision_tx(
-            &mut tx,
-            &saved,
-            end,
-            checksum,
-            registered_at.as_micros(),
-        )
-        .await?;
-        if create_indexing_job {
-            commit_indexing_job_tx(
-                &mut tx,
-                saved.frame_id().as_str(),
-                registered_at.as_micros(),
-                INDEXING_PRIORITY_LIVE,
-            )
-            .await?;
-        }
-        tx.commit().await.map_err(db_error)?;
-        Ok(())
-    }
-
-    pub(crate) fn record_hook_failure(&self, error: A2aLabError) {
-        *self
-            .hook_error
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+            .await
     }
 
     pub async fn cleanup_source(
@@ -461,11 +139,11 @@ impl IndexedVideoDvr {
         source_id: &VideoSourceId,
         now: UtcTimestamp,
     ) -> Result<(), A2aLabError> {
-        self.chunk.cleanup_source(source_id, now).await
+        self.engine.chunk().cleanup_source(source_id, now).await
     }
 
     pub async fn cleanup_at(&self, now: UtcTimestamp) -> Result<(), A2aLabError> {
-        self.chunk.cleanup_at(now).await
+        self.engine.chunk().cleanup_at(now).await
     }
 
     #[doc(hidden)]
@@ -556,30 +234,6 @@ impl IndexedVideoDvr {
         .await
         .map_err(db_error)?;
         Ok(())
-    }
-
-    async fn chunk_frame_row(
-        &self,
-        source_id: &VideoSourceId,
-        track_id: &DvrTrackId,
-        start_us: UtcTimestamp,
-    ) -> Result<SqliteRow, A2aLabError> {
-        let key = start_us.as_micros();
-        let frame = sqlx::query(
-            "SELECT end_us, '' AS payload_relpath, chunk_relpath, payload_offset, payload_length,
-                    payload_crc32
-             FROM dvr_frames
-             WHERE source_id = ?1 AND track_id = ?2 AND start_us = ?3 AND payload_ready = 1",
-        )
-        .bind(source_id.as_str())
-        .bind(track_id.as_str())
-        .bind(key)
-        .fetch_optional(self.media_pool())
-        .await
-        .map_err(db_error)?;
-        frame.ok_or_else(|| {
-            A2aLabError::not_found("DVR frame", format!("{source_id}/{track_id}/{key}"))
-        })
     }
 
     pub(crate) async fn load_retained_payload_at_key(
@@ -706,96 +360,18 @@ impl IndexedVideoDvr {
         read_payload_range(&path, offset, length, expected_crc32).await
     }
 
-    /// DVR media metadata. Semantic tables are not in this database.
     #[must_use]
     pub fn media_pool(&self) -> &SqlitePool {
-        self.chunk.media_pool()
+        self.engine.media_pool()
     }
 
-    /// Semantic jobs, manifests, embeddings, and decisions.
     #[must_use]
     pub fn semantic_pool(&self) -> &SqlitePool {
-        self.semantic.pool()
+        self.engine.semantic_pool()
     }
 
-    pub(crate) async fn list_ready_media_keys(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<(String, String, i64)>, A2aLabError> {
-        self.chunk.list_ready_media_keys(limit).await
-    }
-
-    pub(crate) async fn retained_media_keys(
-        &self,
-        keys: &[(String, String, i64)],
-    ) -> Result<std::collections::HashSet<(String, String, i64)>, A2aLabError> {
-        self.chunk.retained_media_keys(keys).await
-    }
-
-    pub(crate) async fn current_semantic_revision_keys(
-        &self,
-        keys: &[(String, String, i64)],
-    ) -> Result<std::collections::HashSet<(String, String, i64)>, A2aLabError> {
-        self.semantic.current_revision_keys(keys).await
-    }
-
-    /// Attaches resolved semantic-indexing schedules for schedule-aware job registration.
-    pub fn set_semantic_indexing_config(&self, config: SemanticIndexingConfig) {
-        *self
-            .semantic_indexing
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config);
-    }
-
-    pub(crate) fn semantic_indexing_config(&self) -> Option<SemanticIndexingConfig> {
-        self.semantic_indexing
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Whether a durable indexing job is needed for one saved frame key.
-    pub(crate) async fn indexing_job_needed_for_frame(
-        &self,
-        source_id: &str,
-        track_id: &str,
-        start_us: i64,
-    ) -> Result<bool, A2aLabError> {
-        let Some(config) = self.semantic_indexing_config() else {
-            return Ok(true);
-        };
-        if config.embeddings.is_none() {
-            let schedule = config.schedule_for(source_id);
-            return self
-                .select_semantic_stage_frame(
-                    source_id,
-                    track_id,
-                    SemanticIndexingStage::Description.id(),
-                    start_us,
-                    schedule.description(),
-                )
-                .await;
-        }
-        let schedule = config.schedule_for(source_id);
-        let description_due = self
-            .select_semantic_stage_frame(
-                source_id,
-                track_id,
-                SemanticIndexingStage::Description.id(),
-                start_us,
-                schedule.description(),
-            )
-            .await?;
-        let embedding_due = self
-            .select_semantic_stage_frame(
-                source_id,
-                track_id,
-                SemanticIndexingStage::Embeddings.id(),
-                start_us,
-                schedule.embeddings(),
-            )
-            .await?;
-        Ok(description_due || embedding_due)
+    pub fn set_semantic_indexing_config(&self, config: &SemanticIndexingConfig) {
+        self.engine.set_stream_schedules(config.schedules.clone());
     }
 
     pub fn set_indexed_source_filter(&self, filter: IndexedSourceFilter) {
@@ -804,11 +380,116 @@ impl IndexedVideoDvr {
         }
     }
 
-    pub(crate) fn permits_indexing_source(&self, source_id: &str) -> bool {
+    #[must_use]
+    pub fn indexed_source_filter(&self) -> IndexedSourceFilter {
         self.indexing_sources
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .permits(source_id)
+            .clone()
+    }
+
+    pub async fn get_manifest_frame(
+        &self,
+        frame_id: &str,
+    ) -> Result<SemanticFrameManifestRecord, A2aLabError> {
+        self.engine.get_manifest_frame(frame_id).await
+    }
+
+    pub async fn list_manifest_frames(
+        &self,
+        request: &a2a_lab_dev_kit::videos::ListManifestFramesRequest,
+    ) -> Result<Page<SemanticFrameManifestRecord>, A2aLabError> {
+        self.engine.list_manifest_frames(request).await
+    }
+
+    pub async fn count_indexing_jobs(&self) -> Result<u64, A2aLabError> {
+        self.engine.count_indexing_jobs().await
+    }
+
+    pub async fn ensure_indexing_at_dvr_key(
+        &self,
+        store: &DvrStoreNamespace,
+        source_id: &VideoSourceId,
+        track_id: &DvrTrackId,
+        start: UtcTimestamp,
+    ) -> Result<
+        (
+            a2a_lab_dev_kit::SavedFrameRef,
+            a2a_lab_dev_kit::videos::RegisterManifestOutcome,
+            bool,
+        ),
+        A2aLabError,
+    > {
+        self.engine
+            .ensure_indexing_at_dvr_key(store, source_id, track_id, start)
+            .await
+    }
+
+    pub async fn register_manifest_at_dvr_key(
+        &self,
+        store: &DvrStoreNamespace,
+        source_id: &VideoSourceId,
+        track_id: &DvrTrackId,
+        start: UtcTimestamp,
+    ) -> Result<
+        (
+            a2a_lab_dev_kit::SavedFrameRef,
+            a2a_lab_dev_kit::videos::RegisterManifestOutcome,
+        ),
+        A2aLabError,
+    > {
+        self.engine
+            .register_manifest_at_dvr_key(store, source_id, track_id, start)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn count_searchable_embedding_vectors(&self) -> Result<u64, A2aLabError> {
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(model_space_generation, 0)
+             FROM semantic_embedding_config_identity WHERE singleton_id = 1",
+        )
+        .fetch_optional(self.semantic_pool())
+        .await
+        .map_err(db_error)?
+        .unwrap_or(0);
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM semantic_frame_embeddings emb
+             JOIN semantic_frame_revisions rev ON rev.frame_id = emb.frame_id
+             WHERE rev.search_current = 1
+               AND rev.retained_state = 'retained'
+               AND rev.embedding_checkpoint = 'ready'
+               AND emb.embedding_vector IS NOT NULL
+               AND length(emb.embedding_vector) > 0
+               AND emb.model_space_generation = ?1",
+        )
+        .bind(active)
+        .fetch_one(self.semantic_pool())
+        .await
+        .map_err(db_error)?;
+        Ok(u64::try_from(count.max(0)).unwrap_or(0))
+    }
+
+    #[doc(hidden)]
+    pub async fn count_nonempty_embedding_vectors(&self) -> Result<u64, A2aLabError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM semantic_frame_embeddings
+             WHERE embedding_vector IS NOT NULL AND length(embedding_vector) > 0",
+        )
+        .fetch_one(self.semantic_pool())
+        .await
+        .map_err(db_error)?;
+        Ok(u64::try_from(count.max(0)).unwrap_or(0))
+    }
+
+    pub async fn active_model_space_generation(&self) -> Result<Option<u64>, A2aLabError> {
+        let generation: Option<i64> = sqlx::query_scalar(
+            "SELECT model_space_generation FROM semantic_embedding_config_identity WHERE singleton_id = 1",
+        )
+        .fetch_optional(self.semantic_pool())
+        .await
+        .map_err(db_error)?;
+        Ok(generation.and_then(|value| u64::try_from(value.max(0)).ok()))
     }
 
     async fn containing_frame(
@@ -911,35 +592,35 @@ impl DvrMediaStore for IndexedVideoDvr {
         &self,
         source_id: &VideoSourceId,
     ) -> Result<DvrRetentionBounds, A2aLabError> {
-        self.chunk.retention_bounds(source_id).await
+        self.engine.chunk().retention_bounds(source_id).await
     }
 
     async fn media_coverage(
         &self,
         source_id: &VideoSourceId,
     ) -> Result<DvrMediaCoverage, A2aLabError> {
-        self.chunk.media_coverage(source_id).await
+        self.engine.chunk().media_coverage(source_id).await
     }
 
     async fn list_tracks(
         &self,
         source_id: &VideoSourceId,
     ) -> Result<Vec<DvrMediaTrack>, A2aLabError> {
-        self.chunk.list_tracks(source_id).await
+        self.engine.chunk().list_tracks(source_id).await
     }
 
     async fn read_media_window(
         &self,
         request: ReadDvrMediaWindowRequest,
     ) -> Result<Page<DvrMediaSegment>, A2aLabError> {
-        self.chunk.read_media_window(request).await
+        self.engine.chunk().read_media_window(request).await
     }
 
     async fn read_media_spans(
         &self,
         request: ReadDvrMediaWindowRequest,
     ) -> Result<Page<DvrMediaSegment>, A2aLabError> {
-        self.chunk.read_media_spans(request).await
+        self.engine.chunk().read_media_spans(request).await
     }
 
     async fn frame_at(&self, request: DvrFrameAtRequest) -> Result<DvrFrameAtResult, A2aLabError> {

@@ -1,9 +1,7 @@
 //! Live memory window plus indexed disk DVR.
 
 mod annotation_queue;
-mod annotation_worker;
 pub mod chunk;
-mod coverage;
 mod decision_evaluation_enqueue;
 mod decision_evaluation_job_store;
 mod decision_evaluation_pilot;
@@ -11,36 +9,29 @@ mod decision_evaluation_queue;
 mod decision_evaluation_worker;
 mod decision_worker_faults;
 mod dvr_frame_decision_ledger;
-mod embedding_worker;
 mod epoch_playback;
 mod frame_decision_store;
 pub mod frame_evidence;
 pub mod frame_manifest;
 mod h264_epoch;
-mod indexing_job_store;
-pub mod indexing_registration;
+mod indexing_scope;
 pub mod inventory;
 mod provider;
-mod semantic_persist_hook;
-mod stage_batch;
 mod store;
-mod worker_faults;
 
+pub use a2a_lab_dev_kit::videos::{
+    DEFAULT_RECONCILE_BATCH, INDEXING_PRIORITY_BACKFILL, INDEXING_PRIORITY_LIVE,
+    IndexingCheckpoint, IndexingJobRecord, IndexingJobState, IndexingReconcileReport,
+    IndexingWorkerBatchReport, IndexingWorkerFaults, IndexingWorkerLane, IndexingWorkerQueueStats,
+    ListManifestFramesRequest, ManifestPageRequest, ManifestRetainedState,
+    ManifestSearchCandidateFilter, ManifestSearchCandidateScan, MediaPayloadStatus,
+    RegisterManifestOutcome, SaveFaults, SemanticFrameManifestRecord, StoredFrameDescription,
+    StoredFrameEmbedding, indexing_job_id,
+};
 pub use annotation_queue::{
     ANNOTATION_RECONCILE_INTERVAL, AnnotationQueueWorker, AnnotationQueueWorkerBundle,
     SemanticAnnotationWorkers, VideoDvrAnnotationQueue,
 };
-pub use annotation_worker::{
-    AnyIndexingAnnotationWorker, DescriptionOnlyAnnotationWorker,
-    DeterministicDescriptionOnlyWorker, DeterministicIndexingWorker, IndexingAnnotationWorker,
-    IndexingWorkerBatchReport, LiveDescriptionOnlyWorker, LiveIndexingWorker,
-};
-pub use embedding_worker::{
-    DeterministicEmbeddingOnlyWorker, EmbeddingOnlyAnnotationWorker, LiveEmbeddingOnlyWorker,
-};
-pub mod semantic_search;
-pub use semantic_search::{DvrSearchEmbedder, DvrSemanticSearchProvider};
-mod indexing_scope;
 pub use decision_evaluation_enqueue::{
     DecisionEvaluationFrameSelection, DecisionEvaluationTarget, EnqueueDecisionEvaluationsReport,
     EnqueueDecisionEvaluationsRequest, decision_evaluation_job_id, subject_digest,
@@ -64,17 +55,7 @@ pub use frame_evidence::{
     FrameEvidenceFailure, FrameEvidenceFailureKind, FrameEvidenceLimits, FrameEvidencePixels,
     FrameEvidenceRequest,
 };
-pub use frame_manifest::{
-    DEFAULT_SEMANTIC_STORE_NAMESPACE, IndexingCheckpoint, ListManifestFramesRequest,
-    ManifestPageRequest, ManifestRetainedState, ManifestSearchCandidateFilter,
-    ManifestSearchCandidateScan, MediaPayloadStatus, RegisterManifestOutcome,
-    SemanticFrameManifestRecord, StoredFrameDescription, StoredFrameEmbedding,
-};
-pub use indexing_job_store::{IndexingJobRecord, IndexingJobState, IndexingWorkerQueueStats};
-pub use indexing_registration::{
-    DEFAULT_RECONCILE_BATCH, INDEXING_PRIORITY_BACKFILL, INDEXING_PRIORITY_LIVE,
-    IndexingReconcileReport, IndexingWorkerLane, SaveFaults, indexing_job_id,
-};
+pub use frame_manifest::DEFAULT_SEMANTIC_STORE_NAMESPACE;
 pub use indexing_scope::IndexedSourceFilter;
 pub use inventory::{DvrTrackInventory, FramePayloadEvidence};
 pub use provider::{VideoDvrCatalog, VideoDvrMaintenance};
@@ -82,4 +63,3 @@ pub use store::{
     DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_VIDEO_DVR_ROOT, IndexedVideoDvr,
     VIDEO_DVR_CLEANUP_INTERVAL,
 };
-pub use worker_faults::IndexingWorkerFaults;

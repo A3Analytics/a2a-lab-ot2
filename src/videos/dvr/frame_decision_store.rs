@@ -222,6 +222,7 @@ impl IndexedVideoDvr {
         Ok(())
     }
 
+    #[expect(dead_code)]
     pub(crate) async fn tombstone_decisions_for_frame_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,

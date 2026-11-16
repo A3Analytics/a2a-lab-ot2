@@ -98,6 +98,14 @@ fn seed_live(
             .open_epoch(track_id.clone(), init.to_vec(), picture)
             .unwrap();
     }
+    store
+        .append_sample(
+            track_id,
+            at.saturating_add_micros(-1_000_000),
+            bytes.clone(),
+            true,
+        )
+        .unwrap();
     store.append_sample(track_id, at, bytes, true).unwrap();
 }
 
@@ -302,6 +310,14 @@ async fn reconnect_clears_live_samples_until_new_frames_arrive() {
             &track("epoch-live"),
             ts("2024-06-01T00:00:02Z"),
             sample(2),
+            true,
+        )
+        .unwrap();
+    store
+        .append_sample(
+            &track("epoch-live"),
+            ts("2024-06-01T00:00:03Z"),
+            sample(3),
             true,
         )
         .unwrap();

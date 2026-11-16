@@ -163,7 +163,7 @@ async fn cutover_clears_h264_rows_but_not_mjpeg() {
     assert_eq!(h264_frames, 0);
     assert!(store.media_coverage(&source).await.is_ok());
     let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM semantic_indexing_jobs")
-        .fetch_one(store.media_pool())
+        .fetch_one(store.semantic_pool())
         .await
         .unwrap();
     assert!(jobs >= 0);

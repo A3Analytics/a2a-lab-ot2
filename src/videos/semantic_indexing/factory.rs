@@ -16,7 +16,6 @@ use super::description::LunaFrameDescriptionProvider;
 use super::embedding::ConfiguredTextEmbeddingProvider;
 use super::limits::{frame_description_limits, text_embedding_limits};
 use super::media::FrameDescriptionMedia;
-use crate::videos::dvr::DvrSearchEmbedder;
 
 /// Whether adapters call external inference APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,10 +48,8 @@ pub async fn build_semantic_indexing_providers<M: FrameDescriptionMedia + 'stati
 /// Deterministic query embedder for DVR semantic search.
 pub async fn build_deterministic_search_embedder(
     semantic: &SemanticIndexingConfig,
-) -> Result<DvrSearchEmbedder, a2a_lab_dev_kit::A2aLabError> {
-    Ok(DvrSearchEmbedder::Deterministic(Arc::new(
-        build_deterministic_providers(semantic).await?.embedding,
-    )))
+) -> Result<FakeTextEmbeddingProvider, a2a_lab_dev_kit::A2aLabError> {
+    Ok(build_deterministic_providers(semantic).await?.embedding)
 }
 
 /// Deterministic provider pair for tests and CI.

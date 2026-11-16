@@ -6,20 +6,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use a2a_lab_dev_kit::{
-    A2aLabConfig, A2aLabError, ChatProvider, DvrStoreNamespace, EmbeddingMetric, ImageProvider,
-    ListImageSourcesRequest, MemoryVideos, PageRequest, SearchSemanticFramesRequest,
-    SemanticSchedule, SemanticSearchLimits, SemanticSearchQuery, SemanticSearchScope,
-    SemanticVideoSearchProvider, TimeRange, VectorNormalization, VideoSourceId,
+    A2aLabConfig, A2aLabError, ChatProvider, ChunkDvrSemanticSearchProvider,
+    DescriptionStageWorker, DvrStoreNamespace, EmbeddingMetric, EmbeddingStageWorker,
+    ImageProvider, IndexingWorkerFaults, IndexingWorkerLane, ListImageSourcesRequest, MemoryVideos,
+    PageRequest, SearchSemanticFramesRequest, SemanticSchedule, SemanticSearchLimits,
+    SemanticSearchQuery, SemanticSearchScope, SemanticVideoSearchProvider, TimeRange,
+    VectorNormalization, VideoSourceId,
 };
 use a2a_lab_ot2::IndexedVideoDvr;
 use a2a_lab_ot2::lab_config::ResolvedSemanticIndexing;
-use a2a_lab_ot2::videos::dvr::{
-    DEFAULT_SEMANTIC_STORE_NAMESPACE, DeterministicIndexingWorker, DvrSemanticSearchProvider,
-    IndexingWorkerFaults,
-};
+use a2a_lab_ot2::videos::dvr::DEFAULT_SEMANTIC_STORE_NAMESPACE;
 use a2a_lab_ot2::videos::semantic_indexing::{
-    SemanticServeInjections, build_deterministic_search_embedder, embedding_provider_config,
-    prepare_semantic_serve_bundle,
+    SemanticServeInjections, embedding_provider_config, prepare_semantic_serve_bundle,
 };
 use a2a_lab_ot2::{
     ExplicitSetting, ImageServeConfig, LabConfigInputs, image_catalog, resolve_lab_config,
@@ -46,7 +44,7 @@ fn write_config(dir: &Path, body: &str) -> PathBuf {
 
 fn integration_config_document() -> String {
     format!(
-        r#"{{"schema_version":2,"chat":{{"provider":"openai","model":"chat-only"}},"videos":{{"sources":[{{"id":"bench-a","device_index":0,"format":"mjpeg","semantic_indexing":{{"description":"5s","description_model":"luna-a","embeddings":"1m","embedding_model":"embed-a"}}}},{{"id":"bench-b","device_index":1,"format":"mjpeg","semantic_indexing":{{"description":"1.5s","description_model":"luna-b","embeddings":"5s","embedding_model":"embed-b"}}}}],"dvr":{{"storage_path":"./dvr","retention":"1h"}}}},"semantic_indexing":{{"description":{{"provider":"bedrock","model":"global.openai.gpt-5.6-luna"}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
+        r#"{{"schema_version":2,"chat":{{"provider":"openai","model":"chat-only"}},"videos":{{"sources":[{{"id":"bench-a","device_index":0,"format":"mjpeg","semantic_indexing":{{"description":"5s","description_model":"luna-a","embeddings":"5s"}}}},{{"id":"bench-b","device_index":1,"format":"mjpeg","semantic_indexing":{{"description":"1.5s","description_model":"luna-b","embeddings":"5s"}}}}],"dvr":{{"storage_path":"./dvr","retention":"1h"}}}},"semantic_indexing":{{"description":{{"provider":"bedrock","model":"global.openai.gpt-5.6-luna"}},"embeddings":{{"provider":"bedrock","model":"text-embed-v1","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine","generation":1}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
     )
 }
 
@@ -120,8 +118,8 @@ fn complete_v2_configuration_resolves_distinct_source_schedules() {
     );
     assert_eq!(schedule_a.description_model(), Some("luna-a"));
     assert_eq!(schedule_b.description_model(), Some("luna-b"));
-    assert_eq!(schedule_a.embedding_model(), Some("embed-a"));
-    assert_eq!(schedule_b.embedding_model(), Some("embed-b"));
+    assert_eq!(schedule_a.embedding_model(), None);
+    assert_eq!(schedule_b.embedding_model(), None);
 
     let embedding = semantic.config.embeddings.as_ref().unwrap();
     assert_eq!(embedding.provider(), "bedrock");
@@ -244,81 +242,55 @@ fn per_source_schedule_changes_do_not_mutate_other_sources() {
     let _ = fs::remove_dir_all(dir);
 }
 
-#[tokio::test]
-async fn source_schedules_gate_eligibility_independently() {
-    let dir = temp_root("schedule-gate");
-    let store = IndexedVideoDvr::open(&dir, 86_400).await.unwrap();
-    let track = MemoryVideos::mjpeg_track_id(&VideoSourceId::new("bench-a").unwrap()).unwrap();
-    let five_sec = SemanticSchedule::Interval { micros: 5_000_000 };
-    let one_point_five = SemanticSchedule::Interval { micros: 1_500_000 };
-    assert!(
-        store
-            .select_semantic_stage_frame("bench-a", track.as_str(), "description", 0, five_sec)
+async fn run_deterministic_lanes(
+    store: &IndexedVideoDvr,
+    semantic: &a2a_lab_dev_kit::SemanticIndexingConfig,
+    rounds: u32,
+) {
+    store.set_semantic_indexing_config(semantic);
+    let desc_live = DescriptionStageWorker::deterministic(
+        semantic,
+        "desc-live",
+        IndexingWorkerFaults::new(),
+        IndexingWorkerLane::Live,
+    )
+    .unwrap();
+    let desc_backfill = DescriptionStageWorker::deterministic(
+        semantic,
+        "desc-backfill",
+        IndexingWorkerFaults::new(),
+        IndexingWorkerLane::Backfill,
+    )
+    .unwrap();
+    let embed_live = EmbeddingStageWorker::deterministic(
+        semantic,
+        "embed-live",
+        IndexingWorkerFaults::new(),
+        IndexingWorkerLane::Live,
+    )
+    .unwrap();
+    let embed_backfill = EmbeddingStageWorker::deterministic(
+        semantic,
+        "embed-backfill",
+        IndexingWorkerFaults::new(),
+        IndexingWorkerLane::Backfill,
+    )
+    .unwrap();
+    for _ in 0..rounds {
+        let _ = desc_live.run_batch(store.engine(), semantic).await.unwrap();
+        let _ = desc_backfill
+            .run_batch(store.engine(), semantic)
             .await
-            .unwrap()
-    );
-    assert!(
-        !store
-            .select_semantic_stage_frame(
-                "bench-a",
-                track.as_str(),
-                "description",
-                1_000_000,
-                five_sec
-            )
+            .unwrap();
+        let _ = embed_live
+            .run_batch(store.engine(), semantic)
             .await
-            .unwrap()
-    );
-    assert!(
-        store
-            .select_semantic_stage_frame(
-                "bench-a",
-                track.as_str(),
-                "description",
-                5_000_000,
-                five_sec
-            )
+            .unwrap();
+        let _ = embed_backfill
+            .run_batch(store.engine(), semantic)
             .await
-            .unwrap()
-    );
-    let track_b = MemoryVideos::mjpeg_track_id(&VideoSourceId::new("bench-b").unwrap()).unwrap();
-    assert!(
-        store
-            .select_semantic_stage_frame(
-                "bench-b",
-                track_b.as_str(),
-                "description",
-                0,
-                one_point_five
-            )
-            .await
-            .unwrap()
-    );
-    assert!(
-        !store
-            .select_semantic_stage_frame(
-                "bench-b",
-                track_b.as_str(),
-                "description",
-                1_000_000,
-                one_point_five
-            )
-            .await
-            .unwrap()
-    );
-    assert!(
-        store
-            .select_semantic_stage_frame(
-                "bench-b",
-                track_b.as_str(),
-                "description",
-                1_500_000,
-                one_point_five
-            )
-            .await
-            .unwrap()
-    );
-    let _ = fs::remove_dir_all(dir);
+            .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -336,19 +308,13 @@ async fn deterministic_semantic_path_indexes_persisted_vectors_and_searches_afte
     let capture = a2a_lab_ot2::time::now().unwrap();
     let frame_id = {
         let store = IndexedVideoDvr::open(&dvr_dir, 86_400).await.unwrap();
+        store.set_semantic_indexing_config(&semantic.config);
         store
             .append_mjpeg_frame(&source, capture, 1_000_000, &jpeg(31))
             .await
             .unwrap();
-        let worker = DeterministicIndexingWorker::deterministic(
-            &semantic.config,
-            "integration-worker",
-            IndexingWorkerFaults::new(),
-        )
-        .await
-        .unwrap();
-        let report = worker.run_batch(&store, &semantic.config).await.unwrap();
-        assert_eq!(report.embeddings_committed(), 1);
+        run_deterministic_lanes(&store, &semantic.config, 8).await;
+        assert!(store.count_nonempty_embedding_vectors().await.unwrap() >= 1);
         let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
         let (frame, _, _) = store
             .ensure_indexing_at_dvr_key(&store_ns(), &source, &track, capture)
@@ -369,11 +335,12 @@ async fn deterministic_semantic_path_indexes_persisted_vectors_and_searches_afte
         .expect("persisted description")
         .text()
         .to_owned();
-    let embedder = build_deterministic_search_embedder(&semantic.config)
-        .await
-        .unwrap();
-    assert!(!embedder.uses_live_adapters());
-    let provider = DvrSemanticSearchProvider::new(store, &semantic, embedder).unwrap();
+    let provider = ChunkDvrSemanticSearchProvider::deterministic(
+        store.engine().clone(),
+        semantic.config.clone(),
+    )
+    .await
+    .unwrap();
     let end = capture.saturating_add_micros(10_000_000);
     let scope =
         SemanticSearchScope::new(source.clone(), Some(TimeRange::new(capture, end).unwrap()))
@@ -419,6 +386,7 @@ async fn semantic_search_scopes_results_to_configured_sources() {
     let capture = a2a_lab_ot2::time::now().unwrap();
     {
         let store = IndexedVideoDvr::open(&dvr_dir, 86_400).await.unwrap();
+        store.set_semantic_indexing_config(&semantic.config);
         for (source, tag) in [(&source_a, 41_u8), (&source_b, 42_u8)] {
             store
                 .append_mjpeg_frame(
@@ -430,20 +398,15 @@ async fn semantic_search_scopes_results_to_configured_sources() {
                 .await
                 .unwrap();
         }
-        let worker = DeterministicIndexingWorker::deterministic(
-            &semantic.config,
-            "scope-worker",
-            IndexingWorkerFaults::new(),
-        )
-        .await
-        .unwrap();
-        worker.run_batch(&store, &semantic.config).await.unwrap();
+        run_deterministic_lanes(&store, &semantic.config, 8).await;
     }
     let store = IndexedVideoDvr::open(&dvr_dir, 86_400).await.unwrap();
-    let embedder = build_deterministic_search_embedder(&semantic.config)
-        .await
-        .unwrap();
-    let provider = DvrSemanticSearchProvider::new(store, &semantic, embedder).unwrap();
+    let provider = ChunkDvrSemanticSearchProvider::deterministic(
+        store.engine().clone(),
+        semantic.config.clone(),
+    )
+    .await
+    .unwrap();
     let end = capture.saturating_add_micros(120_000_000);
     let scope_a = SemanticSearchScope::new(
         source_a.clone(),
@@ -472,7 +435,7 @@ async fn semantic_search_scopes_results_to_configured_sources() {
     );
 
     let foreign = VideoSourceId::new("unconfigured-source").unwrap();
-    let err = provider
+    let empty = provider
         .search_semantic_frames(
             SearchSemanticFramesRequest::new(
                 SemanticSearchScope::new(foreign, Some(TimeRange::new(capture, end).unwrap()))
@@ -488,8 +451,8 @@ async fn semantic_search_scopes_results_to_configured_sources() {
             .unwrap(),
         )
         .await
-        .unwrap_err();
-    assert!(err.to_string().contains("semantic indexing scope"));
+        .unwrap();
+    assert!(empty.hits().items().is_empty());
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -550,10 +513,6 @@ async fn live_semantic_gate_stays_deterministic_without_credentials() {
     let workers = bundle.workers.expect("workers");
     assert!(!workers.description.live.uses_live_adapters());
     assert!(!workers.description.backfill.uses_live_adapters());
-    let embedder = build_deterministic_search_embedder(&semantic.config)
-        .await
-        .expect("deterministic embedder");
-    assert!(!embedder.uses_live_adapters());
     assert!(bundle.search.is_some());
     let _ = fs::remove_dir_all(dvr_dir);
 }

@@ -392,7 +392,10 @@ async fn simulated_long_run_caps_live_memory_and_matches_semantic_jobs() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let dvr = count_dvr_h264(catalog.dvr(), id).await;
     let jobs = count_indexing_jobs(catalog.dvr()).await;
-    assert!(jobs.abs_diff(dvr) <= 2, "jobs={jobs} dvr={dvr}");
+    assert!(
+        jobs.abs_diff(dvr.saturating_mul(2)) <= 4,
+        "jobs={jobs} dvr={dvr}"
+    );
     let live = count_live_h264_samples(&catalog, id);
     let cap = live_sample_cap(retain, live_fps);
     assert!(live <= cap, "live={live} cap={cap}");
@@ -477,7 +480,10 @@ async fn disk_fault_preserves_live_follow_without_duplicating_drop_reports() {
         "dvr_after={dvr_after} during={dvr_during_fault}"
     );
     let jobs = count_indexing_jobs(catalog.dvr()).await;
-    assert!(jobs.abs_diff(dvr_after) <= 2, "jobs={jobs} dvr={dvr_after}");
+    assert!(
+        jobs.abs_diff(dvr_after.saturating_mul(2)) <= 4,
+        "jobs={jobs} dvr={dvr_after}"
+    );
     catalog.shutdown();
     let _ = std::fs::remove_dir_all(root);
 }

@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use a2a_lab_dev_kit::videos::WarmStillCache;
 use a2a_lab_dev_kit::{
-    A2aLabError, DeclarativeVideoRuntime, DvrReady, DvrVideoProvider, FrameDecisionLedgerProvider,
-    MemoryVideos, SqliteChunkDvrStore, VideoCaptureSettingsHandle, VideoConfig, VideoRuntimeConfig,
+    A2aLabError, DeclarativeVideoRuntime, DvrReady, DvrStoreNamespace, DvrVideoProvider,
+    FrameDecisionLedgerProvider, MemoryVideos, SemanticChunkDvrStore, SqliteChunkDvrStore,
+    VideoCaptureSettingsHandle, VideoConfig, VideoRuntimeConfig,
 };
 use async_trait::async_trait;
 use tokio::sync::watch;
@@ -17,8 +18,8 @@ use crate::camera::{CAMERA_SOURCE_ID, EXTERNAL_CAMERA_SOURCE_ID};
 use crate::lab_config::{ResolvedSemanticIndexing, ResolvedVideoSettings};
 use crate::videos::VideoServeConfig;
 use crate::videos::dvr::{
-    DvrFrameDecisionLedger, IndexedVideoDvr, VideoDvrAnnotationQueue, VideoDvrCatalog,
-    VideoDvrDecisionEvaluationQueue,
+    DEFAULT_SEMANTIC_STORE_NAMESPACE, DvrFrameDecisionLedger, IndexedVideoDvr,
+    VideoDvrAnnotationQueue, VideoDvrCatalog, VideoDvrDecisionEvaluationQueue,
 };
 use crate::videos::injections::LiveVideoInjections;
 use crate::videos::semantic_indexing::{
@@ -92,19 +93,27 @@ impl Drop for DeclarativeVideoServe {
 }
 
 struct SemanticDvrReady {
-    slot: Arc<OnceLock<IndexedVideoDvr>>,
+    engine_slot: Arc<OnceLock<SemanticChunkDvrStore>>,
+    indexed_slot: Arc<OnceLock<IndexedVideoDvr>>,
     semantic_sqlite: std::path::PathBuf,
 }
 
 #[async_trait]
 impl DvrReady for SemanticDvrReady {
     async fn on_dvr_opened(&self, store: &SqliteChunkDvrStore) -> Result<(), A2aLabError> {
-        IndexedVideoDvr::adopt_opened_at(
+        SemanticChunkDvrStore::adopt_opened_at(
             store.clone(),
-            Arc::clone(&self.slot),
+            Arc::clone(&self.engine_slot),
             &self.semantic_sqlite,
+            DvrStoreNamespace::new(DEFAULT_SEMANTIC_STORE_NAMESPACE)?,
         )
         .await?;
+        let engine =
+            self.engine_slot.get().cloned().ok_or_else(|| {
+                A2aLabError::unavailable("semantic DVR engine init before workers")
+            })?;
+        let indexed = IndexedVideoDvr::from_engine(engine).await?;
+        let _ = self.indexed_slot.set(indexed);
         Ok(())
     }
 }
@@ -117,7 +126,8 @@ async fn start_declarative_serve(
     semantic: Option<&ResolvedSemanticIndexing>,
     semantic_injections: SemanticServeInjections,
 ) -> Result<DeclarativeVideoServe, A2aLabError> {
-    let (hooks, store_slot) = IndexedVideoDvr::runtime_persist_hooks();
+    let (hooks, engine_slot) = IndexedVideoDvr::runtime_persist_hooks();
+    let indexed_slot = Arc::new(OnceLock::new());
     let semantic_sqlite = semantic.map_or_else(
         || storage_root.join("semantic.sqlite"),
         |settings| settings.sqlite_path.clone(),
@@ -125,14 +135,15 @@ async fn start_declarative_serve(
     let mut runtime_config = VideoRuntimeConfig::new(video, storage_root)
         .with_hooks(hooks)
         .with_dvr_ready(Arc::new(SemanticDvrReady {
-            slot: Arc::clone(&store_slot),
+            engine_slot,
+            indexed_slot: Arc::clone(&indexed_slot),
             semantic_sqlite,
         }));
     runtime_config.max_frame_bytes = max_frame_bytes;
     let runtime =
         DeclarativeVideoRuntime::start(runtime_config, injections.into_runtime_injections())
             .await?;
-    let indexed = store_slot
+    let indexed = indexed_slot
         .get()
         .cloned()
         .ok_or_else(|| A2aLabError::unavailable("indexed DVR init before workers"))?;

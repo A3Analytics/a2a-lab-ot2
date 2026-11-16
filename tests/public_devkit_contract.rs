@@ -110,6 +110,34 @@ fn web_ui_comes_from_the_devkit_feature() {
 }
 
 #[test]
+fn serve_composes_kit_semantic_search_and_does_not_vendor_frame_links() {
+    let manifest = include_str!("../Cargo.toml");
+    assert!(manifest.contains("\"web-ui\""));
+    assert!(!manifest.contains("dioxus"));
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "web-ui",
+        "web-ui/src",
+        "web_ui_assets.rs",
+        "src/videos/dvr/semantic_search",
+        "web-ui/src/videos/browse_link.rs",
+        "web-ui/src/shell/videos",
+    ] {
+        assert!(
+            !root.join(relative).exists(),
+            "{relative} is vendored in this repository"
+        );
+    }
+    let serve = include_str!("../src/videos/semantic_indexing/serve.rs");
+    assert!(serve.contains("ChunkDvrSemanticSearchProvider"));
+    assert!(serve.contains("Arc<dyn SemanticVideoSearchProvider>"));
+    let binary = include_str!("../src/bin/a2a-lab-ot2.rs");
+    assert!(binary.contains(".with_web_ui()"));
+    assert!(binary.contains(".with_semantic_search(search)"));
+    assert!(!binary.contains("encode_browse_href"));
+}
+
+#[test]
 fn wasm32_target_is_installed_for_every_web_ui_build() {
     let toolchain = include_str!("../rust-toolchain.toml");
     assert!(toolchain.contains("targets = [\"wasm32-unknown-unknown\"]"));

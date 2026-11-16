@@ -50,5 +50,7 @@ pub use prompt::{
     DESCRIPTION_PREPROCESSING_LABEL, DESCRIPTION_PROMPT, description_preprocessing_digest,
     description_prompt_digest,
 };
-pub use serve::{SemanticServeBundle, SemanticServeInjections, prepare_semantic_serve_bundle};
+pub use serve::{
+    Ot2IndexingWorker, SemanticServeBundle, SemanticServeInjections, prepare_semantic_serve_bundle,
+};
 pub use smoke::{IndexingSmokeReport, run_indexing_smoke};

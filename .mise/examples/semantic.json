@@ -1,0 +1,76 @@
+{
+  "schema_version": 2,
+  "chat": {
+    "provider": "openai",
+    "model": "chat-only"
+  },
+  "videos": {
+    "fps": 5,
+    "sources": [
+      {
+        "id": "camera",
+        "device_index": 0,
+        "format": "auto",
+        "semantic_indexing": {
+          "description": "5s",
+          "embeddings": "5s"
+        }
+      }
+    ],
+    "dvr": {
+      "storage_path": "./state/video-dvr",
+      "retention": "1h"
+    }
+  },
+  "semantic_indexing": {
+    "description": {
+      "provider": "bedrock",
+      "model": "global.openai.gpt-5.6-luna"
+    },
+    "embeddings": {
+      "provider": "bedrock",
+      "model": "text-embed-v1",
+      "space": {
+        "dimensions": 4,
+        "normalization": "l2_unit",
+        "metric": "cosine",
+        "generation": 1
+      }
+    },
+    "limits": {
+      "worker": {
+        "max_batch_items": 4,
+        "max_concurrency": 2,
+        "max_queue_backlog": 64,
+        "max_retry_attempts": 3,
+        "job_deadline": "30s",
+        "retry_backoff": "1s"
+      },
+      "search": {
+        "top_k": 10,
+        "candidate_limit": 1000,
+        "max_neighbor_frames": 5,
+        "query_window": "2h"
+      },
+      "roi": {
+        "min_edge_pixels": 280,
+        "max_edge_pixels": 1568,
+        "max_rois_per_frame": 8
+      },
+      "storage": {
+        "vector_index_path": "./state/semantic-index",
+        "max_disk_bytes": 1073741824
+      },
+      "decisions": {
+        "max_batch_items": 8,
+        "max_concurrency": 2,
+        "job_deadline": "45s",
+        "coverage_policy": "on_demand"
+      }
+    },
+    "decisions": {
+      "provider": "jev",
+      "model": "jev-1.14.0"
+    }
+  }
+}

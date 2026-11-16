@@ -17,15 +17,16 @@ use a2a_lab_dev_kit::{
     JevEvaluationProvenance, JevProducerIdentity, JevStructuredOutput, LabPredicate, MemoryLogs,
     MemoryMetrics, MemoryTasks, MemoryVideos, PipetteChannelSubject, Sha256Digest, VideoSourceId,
 };
-use a2a_lab_ot2::videos::dvr::{
-    AnnotationQueueWorker, AnnotationQueueWorkerBundle, AnyIndexingAnnotationWorker,
-    DEFAULT_SEMANTIC_STORE_NAMESPACE, DeterministicDescriptionOnlyWorker,
-    DeterministicEmbeddingOnlyWorker, DvrFrameDecisionLedger, IndexingWorkerFaults,
-    IndexingWorkerLane, SemanticAnnotationWorkers,
+use a2a_lab_dev_kit::{
+    DescriptionStageWorker, EmbeddingStageWorker, IndexingWorkerFaults, IndexingWorkerLane,
 };
+use a2a_lab_ot2::videos::dvr::{
+    AnnotationQueueWorker, AnnotationQueueWorkerBundle, DEFAULT_SEMANTIC_STORE_NAMESPACE,
+    DvrFrameDecisionLedger, SemanticAnnotationWorkers,
+};
+use a2a_lab_ot2::videos::semantic_indexing::Ot2IndexingWorker;
 use a2a_lab_ot2::videos::semantic_indexing::{
-    SemanticServeInjections, build_deterministic_providers, description_provider_config,
-    embedding_provider_config,
+    SemanticServeInjections, description_provider_config, embedding_provider_config,
 };
 use a2a_lab_ot2::{
     ConversationStore, ExplicitSetting, LabConfigInputs, LiveVideoInjections, ModelProvider,
@@ -121,65 +122,54 @@ fn inputs_with_config(path: PathBuf) -> LabConfigInputs {
     }
 }
 
-async fn deterministic_semantic_injections(
+fn deterministic_semantic_injections(
     semantic: &ResolvedSemanticIndexing,
 ) -> SemanticServeInjections {
-    let providers = build_deterministic_providers(&semantic.config)
-        .await
-        .unwrap();
-    let desc_live = DeterministicDescriptionOnlyWorker::new(
-        providers.description.clone(),
-        semantic.config.limits.worker.clone(),
-        "fixture-desc-live",
-        IndexingWorkerFaults::new(),
-    )
-    .with_lane(IndexingWorkerLane::Live);
-    let desc_backfill = DeterministicDescriptionOnlyWorker::new(
-        providers.description.clone(),
-        semantic.config.limits.worker.clone(),
-        "fixture-desc-backfill",
-        IndexingWorkerFaults::new(),
-    )
-    .with_lane(IndexingWorkerLane::Backfill);
-    let embed_live = DeterministicEmbeddingOnlyWorker::new(
-        providers.embedding.clone(),
-        semantic.config.limits.worker.clone(),
-        "fixture-embed-live",
-        IndexingWorkerFaults::new(),
-    )
-    .with_lane(IndexingWorkerLane::Live);
-    let embed_backfill = DeterministicEmbeddingOnlyWorker::new(
-        providers.embedding,
-        semantic.config.limits.worker.clone(),
-        "fixture-embed-backfill",
-        IndexingWorkerFaults::new(),
-    )
-    .with_lane(IndexingWorkerLane::Backfill);
+    let desc_live = Ot2IndexingWorker::DeterministicDescription(
+        DescriptionStageWorker::deterministic(
+            &semantic.config,
+            "fixture-desc-live",
+            IndexingWorkerFaults::new(),
+            IndexingWorkerLane::Live,
+        )
+        .unwrap(),
+    );
+    let desc_backfill = Ot2IndexingWorker::DeterministicDescription(
+        DescriptionStageWorker::deterministic(
+            &semantic.config,
+            "fixture-desc-backfill",
+            IndexingWorkerFaults::new(),
+            IndexingWorkerLane::Backfill,
+        )
+        .unwrap(),
+    );
+    let embed_live = Ot2IndexingWorker::DeterministicEmbedding(
+        EmbeddingStageWorker::deterministic(
+            &semantic.config,
+            "fixture-embed-live",
+            IndexingWorkerFaults::new(),
+            IndexingWorkerLane::Live,
+        )
+        .unwrap(),
+    );
+    let embed_backfill = Ot2IndexingWorker::DeterministicEmbedding(
+        EmbeddingStageWorker::deterministic(
+            &semantic.config,
+            "fixture-embed-backfill",
+            IndexingWorkerFaults::new(),
+            IndexingWorkerLane::Backfill,
+        )
+        .unwrap(),
+    );
     SemanticServeInjections {
         workers: Some(SemanticAnnotationWorkers::new(
             AnnotationQueueWorkerBundle::new(
-                AnnotationQueueWorker::new(
-                    AnyIndexingAnnotationWorker::DeterministicDescriptionOnly(Arc::new(desc_live)),
-                    semantic.config.clone(),
-                ),
-                AnnotationQueueWorker::new(
-                    AnyIndexingAnnotationWorker::DeterministicDescriptionOnly(Arc::new(
-                        desc_backfill,
-                    )),
-                    semantic.config.clone(),
-                ),
+                AnnotationQueueWorker::new(desc_live, semantic.config.clone()),
+                AnnotationQueueWorker::new(desc_backfill, semantic.config.clone()),
             ),
             Some(AnnotationQueueWorkerBundle::new(
-                AnnotationQueueWorker::new(
-                    AnyIndexingAnnotationWorker::DeterministicEmbeddingOnly(Arc::new(embed_live)),
-                    semantic.config.clone(),
-                ),
-                AnnotationQueueWorker::new(
-                    AnyIndexingAnnotationWorker::DeterministicEmbeddingOnly(Arc::new(
-                        embed_backfill,
-                    )),
-                    semantic.config.clone(),
-                ),
+                AnnotationQueueWorker::new(embed_live, semantic.config.clone()),
+                AnnotationQueueWorker::new(embed_backfill, semantic.config.clone()),
             )),
         )),
         force_deterministic_worker: true,
@@ -198,7 +188,7 @@ async fn search_capabilities_for_config(
     let semantic = resolve_semantic_indexing(&inputs, &resolved.video)
         .unwrap()
         .expect("semantic");
-    let injections = deterministic_semantic_injections(&semantic).await;
+    let injections = deterministic_semantic_injections(&semantic);
     let catalog = open_resolved_video_catalog_with_semantic(
         &resolved.video,
         semantic_video_injections(),
@@ -257,7 +247,7 @@ async fn enabled_semantic_registers_capabilities_for_configured_source() {
     let semantic = resolve_semantic_indexing(&inputs, &resolved.video)
         .unwrap()
         .expect("semantic");
-    let injections = deterministic_semantic_injections(&semantic).await;
+    let injections = deterministic_semantic_injections(&semantic);
     let catalog = open_resolved_video_catalog_with_semantic(
         &resolved.video,
         semantic_video_injections(),

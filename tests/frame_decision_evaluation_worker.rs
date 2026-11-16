@@ -184,10 +184,13 @@ async fn worker_evaluates_all_three_predicates_without_luna() {
     let manifest = store.get_manifest_frame(&frame_id).await.unwrap();
     assert_eq!(manifest.embedding_checkpoint(), IndexingCheckpoint::Pending);
     assert!(manifest.description().is_none());
-    let indexing = store
-        .get_indexing_job(&a2a_lab_ot2::videos::dvr::indexing_job_id(&frame_id))
-        .await
-        .unwrap();
+    let job_id: String =
+        sqlx::query_scalar("SELECT job_id FROM semantic_indexing_jobs WHERE frame_id = ?1 LIMIT 1")
+            .bind(&frame_id)
+            .fetch_one(store.semantic_pool())
+            .await
+            .unwrap();
+    let indexing = store.engine().get_indexing_job(&job_id).await.unwrap();
     assert_eq!(indexing.state(), IndexingJobState::Pending);
 }
 
@@ -566,13 +569,13 @@ async fn indexing_worker_and_decision_worker_stay_isolated() {
     let (_dir, store) = open_store("isolation").await;
     let frame_id = seed_frame(&store, 9).await;
     let semantic = semantic_config();
-    let indexing_faults = IndexingWorkerFaults::new();
-    let indexing_worker = a2a_lab_ot2::videos::dvr::DeterministicIndexingWorker::deterministic(
+    store.set_semantic_indexing_config(&semantic);
+    let indexing_worker = a2a_lab_dev_kit::DescriptionStageWorker::deterministic(
         &semantic,
         "luna-worker",
-        indexing_faults,
+        IndexingWorkerFaults::new(),
+        a2a_lab_dev_kit::IndexingWorkerLane::Live,
     )
-    .await
     .unwrap();
     let config = pilot_evaluator_config();
     let tip_target = DecisionEvaluationTarget::new(
@@ -599,7 +602,10 @@ async fn indexing_worker_and_decision_worker_stay_isolated() {
         .run_batch(&store, &semantic, &[tip_target])
         .await
         .unwrap();
-    indexing_worker.run_batch(&store, &semantic).await.unwrap();
+    indexing_worker
+        .run_batch(store.engine(), &semantic)
+        .await
+        .unwrap();
     let decision = store
         .get_decision_evaluation_job(&decision_evaluation_job_id(
             "jev-req-isolate-tip",

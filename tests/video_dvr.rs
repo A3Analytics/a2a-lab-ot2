@@ -788,6 +788,14 @@ async fn append_keyframe(
             .open_epoch(track.clone(), INIT.to_vec(), picture)
             .unwrap();
     }
+    store
+        .append_sample(
+            &track,
+            at.saturating_add_micros(-1_000_000),
+            sample.clone(),
+            true,
+        )
+        .unwrap();
     store.append_sample(&track, at, sample, true).unwrap();
 }
 

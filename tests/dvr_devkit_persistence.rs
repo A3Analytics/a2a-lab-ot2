@@ -73,7 +73,7 @@ async fn chunk_media_survives_reopen_and_semantic_jobs_follow() {
             .append_mjpeg_frame(&source, capture, 1_000_000, &jpeg())
             .await
             .unwrap();
-        assert_eq!(store.count_indexing_jobs().await.unwrap(), 1);
+        assert_eq!(store.count_indexing_jobs().await.unwrap(), 2);
     }
     let store = IndexedVideoDvr::open(&dir, 86_400).await.unwrap();
     let track = MemoryVideos::mjpeg_track_id(&source).unwrap();
@@ -85,7 +85,7 @@ async fn chunk_media_survives_reopen_and_semantic_jobs_follow() {
         frame.payload(),
         DvrMediaPayload::MjpegFrame(bytes) if bytes == &jpeg()
     ));
-    assert_eq!(store.count_indexing_jobs().await.unwrap(), 1);
+    assert_eq!(store.count_indexing_jobs().await.unwrap(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -158,10 +158,12 @@ async fn semantic_migrations_idempotent_through_repeated_reopen() {
         let frame = page.items()[0].frame().clone();
         let frame_id = frame.frame_id().as_str().to_owned();
         store
+            .engine()
             .upsert_frame_description(&frame, text, &sample_description(text))
             .await
             .unwrap();
         store
+            .engine()
             .upsert_frame_embedding(
                 &frame,
                 &sample_model_space(),
@@ -193,7 +195,7 @@ async fn semantic_migrations_idempotent_through_repeated_reopen() {
         assert_eq!(generation_exists, 1);
         let record = store.get_manifest_frame(&frame_id).await.unwrap();
         assert_eq!(record.embedding().and_then(|e| e.vector()), Some(&vector));
-        assert_eq!(store.count_indexing_jobs().await.unwrap(), 1);
+        assert_eq!(store.count_indexing_jobs().await.unwrap(), 2);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

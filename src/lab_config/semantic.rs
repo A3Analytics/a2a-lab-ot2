@@ -35,6 +35,7 @@ pub fn resolve_semantic_indexing(
     } else {
         config
     };
+    config.validate_before_startup()?;
     let vector_index_path = loaded.semantic_vector_index_path.ok_or_else(|| {
         A2aLabError::invalid(
             "semantic_indexing.limits.storage.vector_index_path",

@@ -1,34 +1,34 @@
-//! Serve-time semantic worker and provider wiring.
+//! Serve-time semantic worker and provider wiring over the generic kit engine.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use a2a_lab_dev_kit::{
-    A2aLabError, DecisionEvaluationCoverage, SemanticIndexingConfig, SemanticVideoSearchProvider,
+    A2aLabError, ChunkDvrSemanticSearchProvider, DecisionEvaluationCoverage,
+    DescriptionStageWorker, EmbeddingStageWorker, FakeFrameDescriptionProvider,
+    FakeTextEmbeddingProvider, IndexingWorkerBatchReport, IndexingWorkerFaults, IndexingWorkerLane,
+    SemanticChunkDvrStore, SemanticIndexingConfig, SemanticVideoSearchProvider,
 };
 
 use super::bedrock::live_semantic_indexing_enabled;
 use super::factory::{
-    build_deterministic_description_provider, build_deterministic_providers,
-    build_deterministic_providers_for_source, build_deterministic_search_embedder,
-    build_live_description_provider, build_live_providers, build_live_providers_for_source,
+    build_deterministic_providers, build_live_description_provider, build_live_providers,
 };
 use super::media::EvidenceJpegMedia;
 use crate::lab_config::ResolvedSemanticIndexing;
 use crate::videos::dvr::{
     AnnotationQueueWorker, AnnotationQueueWorkerBundle, AnyDecisionEvaluationWorker,
-    AnyIndexingAnnotationWorker, DecisionEvaluationQueueWorker, DeterministicEmbeddingOnlyWorker,
-    DvrSearchEmbedder, DvrSemanticSearchProvider, IndexedSourceFilter, IndexedVideoDvr,
-    IndexingWorkerFaults, IndexingWorkerLane, LiveEmbeddingOnlyWorker, SemanticAnnotationWorkers,
+    DecisionEvaluationQueueWorker, IndexedSourceFilter, IndexedVideoDvr, SemanticAnnotationWorkers,
 };
-use crate::videos::semantic_indexing::{build_live_decision_worker, jev_live_worker_enabled};
+use crate::videos::semantic_indexing::{
+    ConfiguredTextEmbeddingProvider, LunaFrameDescriptionProvider, build_live_decision_worker,
+    jev_live_worker_enabled,
+};
 
 /// Injectable serve overrides for deterministic tests.
 #[derive(Default)]
 pub struct SemanticServeInjections {
     pub workers: Option<SemanticAnnotationWorkers>,
     pub search: Option<Arc<dyn SemanticVideoSearchProvider>>,
-    pub search_embedder: Option<DvrSearchEmbedder>,
     pub force_deterministic_worker: bool,
     pub decision_worker: Option<DecisionEvaluationQueueWorker>,
     pub force_deterministic_decision_worker: bool,
@@ -55,19 +55,45 @@ impl SemanticServeBundle {
     }
 }
 
+/// Kit workers injected with OT-2 Luna/Bedrock/Cohere adapters.
+pub enum Ot2IndexingWorker {
+    DeterministicDescription(DescriptionStageWorker<FakeFrameDescriptionProvider>),
+    LiveDescription(DescriptionStageWorker<LunaFrameDescriptionProvider<EvidenceJpegMedia>>),
+    DeterministicEmbedding(EmbeddingStageWorker<FakeTextEmbeddingProvider>),
+    LiveEmbedding(EmbeddingStageWorker<ConfiguredTextEmbeddingProvider>),
+}
+
+impl Ot2IndexingWorker {
+    #[must_use]
+    pub const fn uses_live_adapters(&self) -> bool {
+        matches!(self, Self::LiveDescription(_) | Self::LiveEmbedding(_))
+    }
+
+    pub async fn run_batch(
+        &self,
+        store: &SemanticChunkDvrStore,
+        semantic: &SemanticIndexingConfig,
+    ) -> Result<IndexingWorkerBatchReport, A2aLabError> {
+        match self {
+            Self::DeterministicDescription(worker) => worker.run_batch(store, semantic).await,
+            Self::LiveDescription(worker) => worker.run_batch(store, semantic).await,
+            Self::DeterministicEmbedding(worker) => worker.run_batch(store, semantic).await,
+            Self::LiveEmbedding(worker) => worker.run_batch(store, semantic).await,
+        }
+    }
+}
+
 /// Validates storage, configures source filters, and prepares optional worker/search providers.
 pub async fn prepare_semantic_serve_bundle(
     semantic: &ResolvedSemanticIndexing,
     dvr: &IndexedVideoDvr,
     injections: &SemanticServeInjections,
 ) -> Result<SemanticServeBundle, A2aLabError> {
+    semantic.config.validate_before_startup()?;
     dvr.set_indexed_source_filter(IndexedSourceFilter::allow_only(
         semantic.indexed_source_ids.clone(),
     ));
-    dvr.set_semantic_indexing_config(semantic.config.clone());
-    if let Some(embeddings) = semantic.config.embeddings.as_ref() {
-        let _ = dvr.sync_embedding_config(embeddings).await?;
-    }
+    dvr.set_semantic_indexing_config(&semantic.config);
 
     let search = if semantic.config.embeddings.is_none() {
         None
@@ -75,35 +101,16 @@ pub async fn prepare_semantic_serve_bundle(
         Some(if let Some(provider) = injections.search.clone() {
             provider
         } else {
-            let embedder = match injections.search_embedder.clone() {
-                Some(embedder) => embedder,
-                None => {
-                    prepare_search_embedder(
-                        &semantic.config,
-                        dvr,
-                        injections.force_deterministic_worker,
-                    )
-                    .await?
-                }
-            };
-            Arc::new(DvrSemanticSearchProvider::new(
-                dvr.clone(),
-                semantic,
-                embedder,
-            )?)
+            prepare_search_provider(&semantic.config, dvr, injections.force_deterministic_worker)
+                .await?
         })
     };
 
     let workers = match injections.workers.clone() {
         Some(workers) => Some(workers),
         None => {
-            prepare_annotation_workers(
-                &semantic.config,
-                dvr,
-                &semantic.indexed_source_ids,
-                injections.force_deterministic_worker,
-            )
-            .await?
+            prepare_annotation_workers(&semantic.config, dvr, injections.force_deterministic_worker)
+                .await?
         }
     };
 
@@ -115,11 +122,7 @@ pub async fn prepare_semantic_serve_bundle(
     } else {
         match injections.decision_worker.clone() {
             Some(worker) => (Some(worker), None),
-            None => prepare_decision_evaluation_worker(
-                &semantic.config,
-                dvr,
-                &semantic.indexed_source_ids,
-            ),
+            None => prepare_decision_evaluation_worker(&semantic.config, dvr),
         }
     };
 
@@ -131,35 +134,11 @@ pub async fn prepare_semantic_serve_bundle(
     })
 }
 
-async fn prepare_annotation_lane_worker(
-    semantic: &SemanticIndexingConfig,
-    dvr: &IndexedVideoDvr,
-    sources: &HashSet<String>,
-    force_deterministic: bool,
-    worker_id: String,
-    lane: IndexingWorkerLane,
-    faults: Arc<IndexingWorkerFaults>,
-) -> Result<AnyIndexingAnnotationWorker, A2aLabError> {
-    if force_deterministic || !live_semantic_indexing_enabled() {
-        return build_description_only_deterministic_worker(
-            semantic, sources, worker_id, faults, lane,
-        )
-        .await;
-    }
-    Ok(AnyIndexingAnnotationWorker::LiveDescriptionOnly(Arc::new(
-        build_description_only_live_worker(semantic, dvr, sources, worker_id, faults, lane).await?,
-    )))
-}
-
 async fn prepare_annotation_workers(
     semantic: &SemanticIndexingConfig,
     dvr: &IndexedVideoDvr,
-    sources: &HashSet<String>,
     force_deterministic: bool,
 ) -> Result<Option<SemanticAnnotationWorkers>, A2aLabError> {
-    if sources.is_empty() {
-        return Ok(None);
-    }
     let base_id = format!("ot2-annotation-{}", std::process::id());
     let live_id = format!("{base_id}-{}", IndexingWorkerLane::Live.id_suffix());
     let backfill_id = format!("{base_id}-{}", IndexingWorkerLane::Backfill.id_suffix());
@@ -167,7 +146,6 @@ async fn prepare_annotation_workers(
     let description_live = match prepare_description_lane_worker(
         semantic,
         dvr,
-        sources,
         force_deterministic,
         format!("{live_id}-description"),
         IndexingWorkerLane::Live,
@@ -184,7 +162,6 @@ async fn prepare_annotation_workers(
     let description_backfill = match prepare_description_lane_worker(
         semantic,
         dvr,
-        sources,
         force_deterministic,
         format!("{backfill_id}-description"),
         IndexingWorkerLane::Backfill,
@@ -206,7 +183,6 @@ async fn prepare_annotation_workers(
         let embedding_live = match prepare_embedding_lane_worker(
             semantic,
             dvr,
-            sources,
             force_deterministic,
             format!("{live_id}-embedding"),
             IndexingWorkerLane::Live,
@@ -223,7 +199,6 @@ async fn prepare_annotation_workers(
         let embedding_backfill = match prepare_embedding_lane_worker(
             semantic,
             dvr,
-            sources,
             force_deterministic,
             format!("{backfill_id}-embedding"),
             IndexingWorkerLane::Backfill,
@@ -250,202 +225,89 @@ async fn prepare_annotation_workers(
 async fn prepare_description_lane_worker(
     semantic: &SemanticIndexingConfig,
     dvr: &IndexedVideoDvr,
-    sources: &HashSet<String>,
     force_deterministic: bool,
     worker_id: String,
     lane: IndexingWorkerLane,
     faults: Arc<IndexingWorkerFaults>,
-) -> Result<AnyIndexingAnnotationWorker, A2aLabError> {
-    prepare_annotation_lane_worker(
-        semantic,
-        dvr,
-        sources,
-        force_deterministic,
-        worker_id,
-        lane,
-        faults,
-    )
-    .await
-}
-
-async fn prepare_embedding_lane_worker(
-    semantic: &SemanticIndexingConfig,
-    dvr: &IndexedVideoDvr,
-    sources: &HashSet<String>,
-    force_deterministic: bool,
-    worker_id: String,
-    lane: IndexingWorkerLane,
-    faults: Arc<IndexingWorkerFaults>,
-) -> Result<AnyIndexingAnnotationWorker, A2aLabError> {
+) -> Result<Ot2IndexingWorker, A2aLabError> {
     if force_deterministic || !live_semantic_indexing_enabled() {
-        return build_embedding_only_deterministic_worker(
-            semantic, sources, worker_id, faults, lane,
-        )
-        .await;
+        return Ok(Ot2IndexingWorker::DeterministicDescription(
+            DescriptionStageWorker::deterministic(semantic, worker_id, faults, lane)?,
+        ));
     }
-    Ok(AnyIndexingAnnotationWorker::LiveEmbeddingOnly(Arc::new(
-        build_embedding_only_live_worker(semantic, dvr, sources, worker_id, faults, lane).await?,
-    )))
-}
-
-async fn build_description_only_deterministic_worker(
-    semantic: &SemanticIndexingConfig,
-    sources: &HashSet<String>,
-    worker_id: String,
-    faults: Arc<IndexingWorkerFaults>,
-    lane: IndexingWorkerLane,
-) -> Result<AnyIndexingAnnotationWorker, A2aLabError> {
-    let provider =
-        build_deterministic_description_provider(semantic, Some(semantic.description.model()))
-            .await?;
-    let mut worker = crate::videos::dvr::DeterministicDescriptionOnlyWorker::new(
-        provider,
-        semantic.limits.worker.clone(),
-        worker_id,
-        faults,
-    )
-    .with_lane(lane);
-    for source_id in sources {
-        let schedule = semantic.schedule_for(source_id);
-        if schedule.description_model().is_some() {
-            worker = worker.with_source_provider(
-                source_id,
-                build_deterministic_description_provider(semantic, schedule.description_model())
-                    .await?,
-            );
-        }
-    }
-    Ok(AnyIndexingAnnotationWorker::DeterministicDescriptionOnly(
-        Arc::new(worker),
-    ))
-}
-
-async fn build_description_only_live_worker(
-    semantic: &SemanticIndexingConfig,
-    dvr: &IndexedVideoDvr,
-    sources: &HashSet<String>,
-    worker_id: String,
-    faults: Arc<IndexingWorkerFaults>,
-    lane: IndexingWorkerLane,
-) -> Result<crate::videos::dvr::LiveDescriptionOnlyWorker, A2aLabError> {
     let provider = build_live_description_provider(
         semantic,
         Arc::new(EvidenceJpegMedia::new(Arc::new(dvr.clone()))),
         Some(semantic.description.model()),
     )
     .await?;
-    let mut worker = crate::videos::dvr::LiveDescriptionOnlyWorker::new(
-        provider,
-        semantic.limits.worker.clone(),
-        worker_id,
-        faults,
-    )
-    .with_lane(lane);
-    for source_id in sources {
-        let schedule = semantic.schedule_for(source_id);
-        if schedule.description_model().is_some() {
-            worker = worker.with_source_provider(
-                source_id,
-                build_live_description_provider(
-                    semantic,
-                    Arc::new(EvidenceJpegMedia::new(Arc::new(dvr.clone()))),
-                    schedule.description_model(),
-                )
-                .await?,
-            );
-        }
-    }
-    Ok(worker)
-}
-
-async fn build_embedding_only_deterministic_worker(
-    semantic: &SemanticIndexingConfig,
-    sources: &HashSet<String>,
-    worker_id: String,
-    faults: Arc<IndexingWorkerFaults>,
-    lane: IndexingWorkerLane,
-) -> Result<AnyIndexingAnnotationWorker, A2aLabError> {
-    let providers = build_deterministic_providers(semantic).await?;
-    let mut worker = DeterministicEmbeddingOnlyWorker::new(
-        providers.embedding,
-        semantic.limits.worker.clone(),
-        worker_id,
-        faults,
-    )
-    .with_lane(lane);
-    for source_id in sources {
-        let schedule = semantic.schedule_for(source_id);
-        if schedule.embedding_model().is_some() {
-            worker = worker.with_source_provider(
-                source_id,
-                build_deterministic_providers_for_source(semantic, &schedule)
-                    .await?
-                    .embedding,
-            );
-        }
-    }
-    Ok(AnyIndexingAnnotationWorker::DeterministicEmbeddingOnly(
-        Arc::new(worker),
+    Ok(Ot2IndexingWorker::LiveDescription(
+        DescriptionStageWorker::new(provider, semantic.limits.worker.clone(), worker_id, faults)
+            .with_lane(lane),
     ))
 }
 
-async fn build_embedding_only_live_worker(
-    semantic: &SemanticIndexingConfig,
-    dvr: &IndexedVideoDvr,
-    sources: &HashSet<String>,
-    worker_id: String,
-    faults: Arc<IndexingWorkerFaults>,
-    lane: IndexingWorkerLane,
-) -> Result<LiveEmbeddingOnlyWorker, A2aLabError> {
-    let media = Arc::new(EvidenceJpegMedia::new(Arc::new(dvr.clone())));
-    let providers = build_live_providers(semantic, media).await?;
-    let mut worker = LiveEmbeddingOnlyWorker::new(
-        providers.embedding,
-        semantic.limits.worker.clone(),
-        worker_id,
-        faults,
-    )
-    .with_lane(lane);
-    for source_id in sources {
-        let schedule = semantic.schedule_for(source_id);
-        if schedule.embedding_model().is_some() {
-            let source_media = Arc::new(EvidenceJpegMedia::new(Arc::new(dvr.clone())));
-            worker = worker.with_source_provider(
-                source_id,
-                build_live_providers_for_source(semantic, source_media, &schedule)
-                    .await?
-                    .embedding,
-            );
-        }
-    }
-    Ok(worker)
-}
-
-async fn prepare_search_embedder(
+async fn prepare_embedding_lane_worker(
     semantic: &SemanticIndexingConfig,
     dvr: &IndexedVideoDvr,
     force_deterministic: bool,
-) -> Result<DvrSearchEmbedder, A2aLabError> {
+    worker_id: String,
+    lane: IndexingWorkerLane,
+    faults: Arc<IndexingWorkerFaults>,
+) -> Result<Ot2IndexingWorker, A2aLabError> {
     if force_deterministic || !live_semantic_indexing_enabled() {
-        return build_deterministic_search_embedder(semantic).await;
+        return Ok(Ot2IndexingWorker::DeterministicEmbedding(
+            EmbeddingStageWorker::deterministic(semantic, worker_id, faults, lane)?,
+        ));
     }
     let media = Arc::new(EvidenceJpegMedia::new(Arc::new(dvr.clone())));
-    Ok(DvrSearchEmbedder::Live(Arc::new(
-        build_live_providers(semantic, media).await?.embedding,
-    )))
+    let providers = build_live_providers(semantic, media).await?;
+    Ok(Ot2IndexingWorker::LiveEmbedding(
+        EmbeddingStageWorker::new(
+            providers.embedding,
+            semantic.limits.worker.clone(),
+            worker_id,
+            faults,
+        )
+        .with_lane(lane),
+    ))
+}
+
+async fn prepare_search_provider(
+    semantic: &SemanticIndexingConfig,
+    dvr: &IndexedVideoDvr,
+    force_deterministic: bool,
+) -> Result<Arc<dyn SemanticVideoSearchProvider>, A2aLabError> {
+    if force_deterministic || !live_semantic_indexing_enabled() {
+        let providers = build_deterministic_providers(semantic).await?;
+        return Ok(Arc::new(
+            ChunkDvrSemanticSearchProvider::new(
+                dvr.engine().clone(),
+                semantic.clone(),
+                providers.embedding,
+            )
+            .await?,
+        ));
+    }
+    let media = Arc::new(EvidenceJpegMedia::new(Arc::new(dvr.clone())));
+    let providers = build_live_providers(semantic, media).await?;
+    Ok(Arc::new(
+        ChunkDvrSemanticSearchProvider::new(
+            dvr.engine().clone(),
+            semantic.clone(),
+            providers.embedding,
+        )
+        .await?,
+    ))
 }
 
 fn prepare_decision_evaluation_worker(
     semantic: &SemanticIndexingConfig,
     dvr: &IndexedVideoDvr,
-    sources: &HashSet<String>,
 ) -> (
     Option<DecisionEvaluationQueueWorker>,
     Option<(DecisionEvaluationCoverage, &'static str)>,
 ) {
-    if sources.is_empty() {
-        return (None, None);
-    }
     if !jev_live_worker_enabled(semantic) {
         eprintln!("Jev live decision worker disabled; decision coverage will be not-evaluated");
         return (

@@ -3,13 +3,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use a2a_lab_dev_kit::{A2aLabError, DvrStoreNamespace, SemanticIndexingConfig};
+use a2a_lab_dev_kit::videos::DEFAULT_RECONCILE_BATCH;
+use a2a_lab_dev_kit::{
+    A2aLabError, DvrStoreNamespace, IndexingWorkerBatchReport, SemanticIndexingConfig,
+};
 use tokio::sync::watch;
 
-use super::annotation_worker::{AnyIndexingAnnotationWorker, IndexingWorkerBatchReport};
-use super::frame_manifest::DEFAULT_SEMANTIC_STORE_NAMESPACE;
-use super::indexing_registration::DEFAULT_RECONCILE_BATCH;
+use crate::videos::semantic_indexing::Ot2IndexingWorker;
+
 use super::provider::VideoDvrCatalog;
+use super::store::DEFAULT_SEMANTIC_STORE_NAMESPACE;
 
 /// Default delay between annotation reconcile batches while the catalog is live.
 pub const ANNOTATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
@@ -31,14 +34,14 @@ impl Drop for VideoDvrAnnotationQueue {
 /// One dedicated semantic indexing worker lane (live or backfill).
 #[derive(Clone)]
 pub struct AnnotationQueueWorker {
-    pub(crate) inner: Arc<AnyIndexingAnnotationWorker>,
+    pub(crate) inner: Arc<Ot2IndexingWorker>,
     pub(crate) semantic: Arc<SemanticIndexingConfig>,
 }
 
 impl AnnotationQueueWorker {
     /// Shared worker configuration for one catalog lifetime.
     #[must_use]
-    pub fn new(inner: AnyIndexingAnnotationWorker, semantic: SemanticIndexingConfig) -> Self {
+    pub fn new(inner: Ot2IndexingWorker, semantic: SemanticIndexingConfig) -> Self {
         Self {
             inner: Arc::new(inner),
             semantic: Arc::new(semantic),
@@ -92,7 +95,7 @@ async fn run_worker_batch(
 ) -> Result<IndexingWorkerBatchReport, A2aLabError> {
     worker
         .inner
-        .run_batch(catalog.dvr(), worker.semantic.as_ref())
+        .run_batch(catalog.dvr().engine(), worker.semantic.as_ref())
         .await
 }
 
@@ -121,6 +124,7 @@ impl VideoDvrCatalog {
                 }
                 if let Err(error) = catalog
                     .dvr()
+                    .engine()
                     .reconcile_indexing_jobs(&store_ns, DEFAULT_RECONCILE_BATCH)
                     .await
                 {

@@ -83,16 +83,21 @@ async fn source_embedding_model_stays_linked_to_the_configured_embedder() {
     let document = format!(
         r#"{{"schema_version":2,"videos":{{"sources":[{{"id":"camera","format":"mjpeg","device_index":1,"semantic_indexing":{{"description":"5s","description_model":"luna-camera","embeddings":"1m","embedding_model":"embed-camera"}}}},{{"id":"external-camera","format":"mjpeg","device_index":2,"semantic_indexing":{{"description":"1.5s","description_model":"luna-external","embeddings":"5s","embedding_model":"global-embed"}}}}]}},"semantic_indexing":{{"embeddings":{{"provider":"bedrock","model":"global-embed","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine"}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
     );
-    let config = A2aLabConfig::parse(&document).unwrap();
+    let err = A2aLabConfig::parse(&document).unwrap_err();
+    assert!(err.to_string().contains("embedding_model"));
+    let linked = format!(
+        r#"{{"schema_version":2,"videos":{{"sources":[{{"id":"camera","format":"mjpeg","device_index":1,"semantic_indexing":{{"description":"5s","description_model":"luna-camera","embeddings":"1m","embedding_model":"global-embed"}}}},{{"id":"external-camera","format":"mjpeg","device_index":2,"semantic_indexing":{{"description":"1.5s","description_model":"luna-external","embeddings":"5s","embedding_model":"global-embed"}}}}]}},"semantic_indexing":{{"embeddings":{{"provider":"bedrock","model":"global-embed","space":{{"dimensions":4,"normalization":"l2_unit","metric":"cosine"}}}},{SEMANTIC_LIMITS},"decisions":{{"provider":"jev","model":"jev-1.14.0"}}}}}}"#
+    );
+    let config = A2aLabConfig::parse(&linked).unwrap();
     let semantic = config.semantic_indexing.unwrap();
     let sources = config.videos.unwrap().sources;
-    let camera_error = build_deterministic_providers_for_source(
+    let camera = build_deterministic_providers_for_source(
         &semantic,
         sources[0].semantic_indexing.as_ref().unwrap(),
     )
     .await
-    .unwrap_err();
-    assert!(camera_error.to_string().contains("embedding_model"));
+    .unwrap();
+    assert_eq!(camera.embedding.config().model(), "global-embed");
     let external = build_deterministic_providers_for_source(
         &semantic,
         sources[1].semantic_indexing.as_ref().unwrap(),

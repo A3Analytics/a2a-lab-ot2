@@ -6,8 +6,8 @@ use a2a_lab_dev_kit::{A2aLabConfig, SemanticIndexingConfig};
 use a2a_lab_ot2::IndexedVideoDvr;
 use a2a_lab_ot2::lab_config::ResolvedSemanticIndexing;
 use a2a_lab_ot2::videos::semantic_indexing::{
-    SemanticServeInjections, build_deterministic_search_embedder, ensure_live_bedrock_ready,
-    load_bedrock_sdk_config, prepare_semantic_serve_bundle,
+    SemanticServeInjections, ensure_live_bedrock_ready, load_bedrock_sdk_config,
+    prepare_semantic_serve_bundle,
 };
 
 const SEMANTIC_LIMITS: &str = r#""limits":{"worker":{"max_batch_items":4,"max_concurrency":2,"max_queue_backlog":64,"max_retry_attempts":3,"job_deadline":"30s","retry_backoff":"1s"},"search":{"top_k":10,"candidate_limit":1000,"max_neighbor_frames":5,"query_window":"2h"},"roi":{"min_edge_pixels":280,"max_edge_pixels":1568,"max_rois_per_frame":8},"storage":{"vector_index_path":"./state/semantic-index","max_disk_bytes":1073741824},"decisions":{"max_batch_items":8,"max_concurrency":2,"job_deadline":"45s","coverage_policy":"on_demand"}}"#;
@@ -94,10 +94,7 @@ async fn live_bedrock_semantic_indexing_gate_contract() {
         let workers = bundle.workers.expect("workers");
         assert!(!workers.description.live.uses_live_adapters());
         assert!(!workers.description.backfill.uses_live_adapters());
-        let embedder = build_deterministic_search_embedder(&semantic.config)
-            .await
-            .expect("deterministic embedder");
-        assert!(!embedder.uses_live_adapters());
+        assert!(bundle.search.is_some());
     }
 
     {

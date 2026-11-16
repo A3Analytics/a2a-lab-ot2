@@ -62,8 +62,7 @@ pub async fn cohere_embed_texts(
         .map_err(|error| {
             let detail = error
                 .as_service_error()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| error.to_string());
+                .map_or_else(|| error.to_string(), ToString::to_string);
             super::bedrock::map_bedrock_invoke_failure(&detail)
         })?;
     vectors_from_cohere_body(response.body().as_ref(), expected_dims, texts.len())

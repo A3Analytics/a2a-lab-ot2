@@ -138,7 +138,10 @@ fn seed_live_tail(catalog: &VideoDvrCatalog, source: &VideoSourceId) {
         .open_epoch(track.clone(), INIT_B.to_vec(), picture)
         .unwrap();
     live.inner()
-        .append_sample(&track, ts("2024-06-01T00:00:03Z"), sample(2), true)
+        .append_sample(&track, ts("2024-06-01T00:00:02Z"), sample(2), true)
+        .unwrap();
+    live.inner()
+        .append_sample(&track, ts("2024-06-01T00:00:03Z"), sample(3), true)
         .unwrap();
 }
 
