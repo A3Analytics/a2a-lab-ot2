@@ -72,6 +72,10 @@ run = "bash .mise/scripts/ot2-simulator-health.sh"
 description = "Remove the simulator container, image, and leftover host checkout"
 run = "bash .mise/scripts/ot2-simulator-clean.sh"
 
+[ot2-replay-smoke]
+description = "Verify the OT-2 replay archive and optionally the A2A Lab media gateway"
+run = "python3 ot2-simulator/smoke_replay.py"
+
 [smoke]
 description = "Live smoke test: OT-2 simulator, A2A, MCP, and Bedrock conversations"
 run = "bash .mise/scripts/smoke.sh"

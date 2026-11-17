@@ -46,9 +46,14 @@ PY
 
 WORKDIR /opt/opentrons/robot-server
 RUN uv sync --frozen --group dev --python /usr/local/bin/python3 \
-  && uv pip uninstall --yes python-can >/dev/null 2>&1 || true
+  && (uv pip uninstall --yes python-can >/dev/null 2>&1 || true)
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /entrypoint.sh
+COPY prepare_replay.py replay-alignment.json replay_server.py replay.html ./
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 31950

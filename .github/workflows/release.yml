@@ -146,6 +146,73 @@ jobs:
           path: a2a-lab-ot2/${{ steps.package.outputs.asset }}
           if-no-files-found: error
 
+  container-images:
+    name: Publish Linux images (${{ matrix.arch }})
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: a2a-lab-ot2-*-${{ matrix.target }}
+          path: binaries
+          merge-multiple: true
+      - uses: docker/login-action@v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and publish both images
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          version="${GITHUB_REF_NAME#v}"
+          tag="$GITHUB_REF_NAME-$ARCH"
+          cp "binaries/a2a-lab-ot2-$version-$TARGET" agent/a2a-lab-ot2
+          docker build --tag "$registry/a2a-lab-ot2-agent:$tag" agent
+          docker build --tag "$registry/a2a-lab-ot2-simulator:$tag" ot2-simulator
+          docker run --rm --network none "$registry/a2a-lab-ot2-agent:$tag" --version
+          docker push "$registry/a2a-lab-ot2-agent:$tag"
+          docker push "$registry/a2a-lab-ot2-simulator:$tag"
+
+  container-manifests:
+    name: Publish multi-platform image manifests
+    needs: container-images
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v4.0.0
+      - uses: docker/login-action@v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish tagged manifests
+        run: |
+          set -euo pipefail
+          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          for image in a2a-lab-ot2-agent a2a-lab-ot2-simulator; do
+            tag="$registry/$image:$GITHUB_REF_NAME"
+            docker buildx imagetools create --tag "$tag" "$tag-amd64" "$tag-arm64"
+          done
+
   release:
     name: Publish GitHub release
     needs: build
