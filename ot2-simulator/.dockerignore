@@ -1,3 +1,7 @@
 *
 !Dockerfile
 !entrypoint.sh
+!prepare_replay.py
+!replay_server.py
+!replay.html
+!replay-alignment.json

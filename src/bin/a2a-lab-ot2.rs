@@ -18,6 +18,7 @@ use a2a_lab_dev_kit::{
     TaskRun, TaskState, TimeRange, UtcTimestamp, WEB_UI_PATH, start_run,
 };
 use a2a_lab_ot2::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
+use a2a_lab_ot2::videos::archived::ArchivedVideos;
 use a2a_lab_ot2::{
     ClapValueSource, ConversationStore, DEFAULT_CAPTURE_TIMEOUT_MS,
     DEFAULT_DISK_VIDEO_RETENTION_SECS, DEFAULT_IMAGE_RETENTION_PER_SOURCE, DEFAULT_SILA_PORT,
@@ -48,6 +49,9 @@ struct Cli {
         default_value = "http://127.0.0.1:31950"
     )]
     opentrons_url: String,
+    /// Optional HTTP archive root providing recorded video sources.
+    #[arg(long, env = "A2ALAB_VIDEO_ARCHIVE_URL")]
+    video_archive_url: Option<String>,
     /// Advertise and execute only GET-backed tasks
     #[arg(long, global = true)]
     readonly: bool,
@@ -880,12 +884,29 @@ async fn serve(
     let store = ConversationStore::open(&cli.conversation_db, cli.history_limit)
         .await
         .map_err(|error| startup_error(&conversation, error))?;
-    let service = share_with_videos(
-        A2aLabService::new(lab.clone(), lab.clone(), lab)
-            .with_images(catalog)
-            .with_image_transport(images.transport()),
-        videos.as_ref(),
-    );
+    let recordings = cli
+        .video_archive_url
+        .as_deref()
+        .map(ArchivedVideos::new)
+        .transpose()?;
+    if let Some(provider) = &recordings {
+        lab = lab.with_recordings(provider.clone());
+    }
+    let service = A2aLabService::new(lab.clone(), lab.clone(), lab)
+        .with_images(catalog)
+        .with_image_transport(images.transport());
+    let service = if let Some(provider) = recordings {
+        if videos.is_some() {
+            return Err(A2aLabError::invalid(
+                "video archive URL",
+                "choose archived video or local video capture",
+            )
+            .into());
+        }
+        service.with_videos(provider).share()
+    } else {
+        share_with_videos(service, videos.as_ref())
+    };
     let (sila, sila_ca) = start_sila(Arc::clone(&service), cli)
         .await
         .map_err(|error| startup_error("sila", error))?;

@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OT-2 Simulator</title>
+<style>
+  :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
+  body { margin: auto; padding: 1.5rem; max-width: 75rem; }
+  h1, h2 { margin: 0 0 .65rem; }
+  label, button, select { font: inherit; }
+  nav, .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
+  section { margin-block: 1.3rem; }
+  .cameras { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: 1rem; }
+  figure { margin: 0; } figcaption { margin-bottom: .45rem; font-weight: 600; }
+  video { width: 100%; aspect-ratio: 16/9; background: #181818; border-radius: .5rem; }
+  ol { padding-left: 2rem; } li { padding: .25rem 0; }
+  li button { display: flex; gap: .7rem; text-align: left; padding: .4rem .55rem; }
+  time, #state { font-variant-numeric: tabular-nums; }
+</style>
+<main>
+  <h1>OT-2 Simulator</h1>
+  <nav aria-label="Recorded scenarios">
+    <label for="scenario">Scenario</label>
+    <select id="scenario"></select>
+    <span id="state" role="status">Loading recordings…</span>
+  </nav>
+  <section>
+    <h2>Recorded replay</h2>
+    <p>Video timing is estimated from visible events matched to the exported OT-2 commands.</p>
+    <div class="cameras">
+      <figure><figcaption>Top</figcaption><video id="top" controls playsinline muted preload="metadata"></video><p id="top-note" role="status"></p></figure>
+      <figure><figcaption>Side</figcaption><video id="side" controls playsinline muted preload="metadata"></video><p id="side-note" role="status"></p></figure>
+    </div>
+    <div class="actions">
+      <button id="play" type="button">Play both angles</button>
+      <button id="pause" type="button">Pause</button>
+      <a id="fixr" hidden>Open in FIXR</a>
+    </div>
+  </section>
+  <section>
+    <h2>Commands</h2>
+    <ol id="commands"></ol>
+  </section>
+</main>
+<script type="module">
+  const byId = id => document.getElementById(id);
+  const angles = ["top", "side"];
+  const scenarioPicker = byId("scenario");
+  let data, scenario, selectedCommand, seekAt;
+
+  const timeFormat = new Intl.DateTimeFormat(undefined, {
+    hour: "numeric", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3,
+    timeZoneName: "short"
+  });
+
+  function setFixrLink() {
+    const link = byId("fixr");
+    if (!data.fixr_url) return;
+    const url = new URL("/fixr/fleet", data.fixr_url);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return;
+    url.search = new URLSearchParams({ device: "ot2", view: "runs", run: scenario.run_id });
+    if (selectedCommand) url.searchParams.set("command", selectedCommand.id);
+    link.href = url;
+    link.hidden = false;
+  }
+
+  function seek(angle) {
+    const element = byId(angle);
+    const coverage = scenario.cameras[angle];
+    const start = Date.parse(coverage.start);
+    const available = start <= seekAt && seekAt < Date.parse(coverage.end);
+    element.hidden = !available;
+    byId(angle + "-note").textContent = available ? "" : "No footage at this command.";
+    if (!available) element.pause();
+    else if (element.readyState >= 1) element.currentTime = (seekAt - start) / 1000;
+  }
+
+  function selectCommand(command) {
+    selectedCommand = command;
+    const at = command?.completedAt || command?.startedAt;
+    seekAt = at ? Date.parse(at) : Math.max(...angles.map(angle => Date.parse(scenario.cameras[angle].start)));
+    for (const angle of angles) {
+      byId(angle).pause();
+      seek(angle);
+    }
+    for (const button of byId("commands").querySelectorAll("button")) {
+      button.setAttribute("aria-pressed", String(button.dataset.command === command?.id));
+    }
+    setFixrLink();
+  }
+
+  function pick(slug) {
+    scenario = data.scenarios.find(item => item.slug === slug);
+    byId("state").textContent = "Robot status: " + scenario.status;
+    for (const angle of angles) {
+      byId(angle).src = "/replay/v1/video/" + encodeURIComponent(slug) + "/" + angle;
+    }
+    const list = byId("commands");
+    list.replaceChildren();
+    for (const command of scenario.commands) {
+      const row = document.createElement("li");
+      const button = document.createElement("button");
+      const name = document.createElement("span");
+      name.textContent = command.commandType;
+      const time = document.createElement("time");
+      time.dateTime = command.completedAt || command.startedAt || command.createdAt;
+      time.textContent = timeFormat.format(Date.parse(time.dateTime));
+      button.append(name, time);
+      button.dataset.command = command.id;
+      button.addEventListener("click", () => selectCommand(command));
+      row.append(button);
+      list.append(row);
+    }
+    selectCommand();
+  }
+
+  for (const angle of angles) {
+    byId(angle).addEventListener("loadedmetadata", () => seek(angle));
+    byId(angle).addEventListener("error", () => {
+      byId(angle + "-note").textContent = "Could not play this recording.";
+    });
+  }
+  byId("pause").addEventListener("click", () => angles.forEach(angle => byId(angle).pause()));
+  byId("play").addEventListener("click", () => {
+    for (const angle of angles) {
+      const element = byId(angle);
+      if (!element.hidden) element.play().catch(() => {
+        byId(angle + "-note").textContent = "Could not play this recording.";
+      });
+    }
+  });
+  scenarioPicker.addEventListener("change", () => pick(scenarioPicker.value));
+  try {
+    const response = await fetch("/replay/v1/scenarios");
+    if (!response.ok) throw new Error("Replay archive unavailable");
+    data = await response.json();
+    for (const item of data.scenarios) scenarioPicker.add(new Option(item.title, item.slug));
+    pick(scenarioPicker.value);
+  } catch {
+    byId("state").textContent = "The replay archive is unavailable.";
+  }
+</script>
+</html>

@@ -25,6 +25,8 @@ use crate::memory::ConversationStore;
 const PREAMBLE: &str = "\
 You operate an Opentrons OT-2 through the lab tools. Answer from tool results and this conversation. \
 Call list_tasks before start_task and use only a task id from that list. \
+For a named recording angle, call list_video_sources and use the exact source id it returns. \
+If a simulated command has a recording field, use its original capture timestamps and source ids for frame or clip lookups. \
 Do not invent task ids, run ids, measurements, or log lines. \
 When a tool changes the robot, say what changed.";
 

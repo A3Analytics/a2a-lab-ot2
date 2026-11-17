@@ -15,6 +15,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  linux-images:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: 1.98.1
+          targets: wasm32-unknown-unknown
+      - name: Build agent image
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin a2a-lab-ot2
+          cp target/debug/a2a-lab-ot2 agent/a2a-lab-ot2
+          docker build --tag a2a-lab-ot2-agent:ci agent
+          docker run --rm --network none a2a-lab-ot2-agent:ci --version
+      - name: Build simulator image
+        run: docker build --tag ot2-simulator:ci ot2-simulator
+      - name: Verify virtual robot startup
+        run: |
+          set -euo pipefail
+          docker run -d --name ot2-simulator --publish 127.0.0.1:31950:31950 ot2-simulator:ci
+          trap 'docker logs --tail 40 ot2-simulator; docker rm -f ot2-simulator' EXIT
+          curl --fail --silent --show-error --retry 30 --retry-all-errors --retry-delay 2 \
+            --header 'Opentrons-Version: *' http://127.0.0.1:31950/health > /dev/null
+
   compliance:
     runs-on: ubuntu-24.04
     steps:

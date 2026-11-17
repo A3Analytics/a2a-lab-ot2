@@ -1,0 +1,32 @@
+{
+  "good_run": {
+    "top": [
+      {"step": 12, "boundary": "startedAt", "video_seconds": 30.4},
+      {"step": 27, "boundary": "startedAt", "video_seconds": 66.3}
+    ],
+    "side": [
+      {"step": 12, "boundary": "startedAt", "video_seconds": 30.1},
+      {"step": 27, "boundary": "startedAt", "video_seconds": 65.9}
+    ]
+  },
+  "bad_run_no_tip_pickup": {
+    "top": [
+      {"step": 12, "boundary": "startedAt", "video_seconds": 21.4},
+      {"step": 27, "boundary": "startedAt", "video_seconds": 56.6}
+    ],
+    "side": [
+      {"step": 12, "boundary": "startedAt", "video_seconds": 21.0},
+      {"step": 27, "boundary": "startedAt", "video_seconds": 56.2}
+    ]
+  },
+  "bad_run_cover_on": {
+    "top": [
+      {"step": 12, "boundary": "startedAt", "video_seconds": 40.0},
+      {"step": 27, "boundary": "startedAt", "video_seconds": 75.5}
+    ],
+    "side": [
+      {"step": 12, "boundary": "startedAt", "video_seconds": 39.8},
+      {"step": 27, "boundary": "startedAt", "video_seconds": 75.3}
+    ]
+  }
+}

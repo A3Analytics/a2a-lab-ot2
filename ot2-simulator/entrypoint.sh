@@ -31,12 +31,17 @@ seed opentrons-update-server "no robot update in progress"
 cd /opt/opentrons/robot-server
 export OT_ROBOT_SERVER_DOT_ENV_PATH=/opt/opentrons/robot-server/dev.env
 export ENABLE_VIRTUAL_SMOOTHIE=true
+application=robot_server.app:app
+if [[ -n "${OT2_REPLAY_ARCHIVE:-}" ]]; then
+  application=replay_server:app
+  export OT_ROBOT_SERVER_simulator_configuration_file_path="${OT_ROBOT_SERVER_simulator_configuration_file_path:-replay-hardware.json}"
+fi
 
 if command -v systemd-cat >/dev/null 2>&1; then
   exec systemd-cat -t uvicorn --stderr-priority=err \
     uv run --frozen --python /usr/local/bin/python3 \
-    uvicorn robot_server.app:app --host 0.0.0.0 --port 31950 --ws wsproto
+    uvicorn "$application" --host 0.0.0.0 --port 31950 --ws wsproto
 fi
 
 exec uv run --frozen --python /usr/local/bin/python3 \
-  uvicorn robot_server.app:app --host 0.0.0.0 --port 31950 --ws wsproto
+  uvicorn "$application" --host 0.0.0.0 --port 31950 --ws wsproto

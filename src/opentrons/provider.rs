@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use crate::frame_set_service::{self, FrameSetApi};
 use crate::page::slice_page;
 use crate::time::{now, parse_timestamp};
+use crate::videos::archived::ArchivedVideos;
 
 use super::client::OpentronsClient;
 use super::inventory::{self, Entry, Kind};
@@ -37,6 +38,7 @@ pub struct OpentronsLab {
     local: Arc<Mutex<BTreeMap<String, TaskRun>>>,
     readonly: bool,
     frame_sets: Option<Arc<FrameSetApi>>,
+    recordings: Option<ArchivedVideos>,
 }
 
 impl OpentronsLab {
@@ -47,6 +49,7 @@ impl OpentronsLab {
             local: Arc::new(Mutex::new(BTreeMap::new())),
             readonly: false,
             frame_sets: None,
+            recordings: None,
         })
     }
 
@@ -54,6 +57,12 @@ impl OpentronsLab {
     #[must_use]
     pub fn with_frame_sets(mut self, api: Arc<FrameSetApi>) -> Self {
         self.frame_sets = Some(api);
+        self
+    }
+
+    #[must_use]
+    pub fn with_recordings(mut self, recordings: ArchivedVideos) -> Self {
+        self.recordings = Some(recordings);
         self
     }
 
@@ -383,7 +392,15 @@ async fn http_task(
             let path = fill_path(entry.path, request.input.as_map())?;
             let path = with_query(entry.method, &path, request.input.as_map());
             let body = http_body(entry.method, request.input.as_map());
-            let result = lab.client.call(entry.method, &path, body).await?;
+            let mut result = lab.client.call(entry.method, &path, body).await?;
+            if matches!(entry.id, "get_run_command" | "get_run_commands_as_list")
+                && let Some(recordings) = &lab.recordings
+                && let Ok(run_id) = path_param(request.input.as_map(), "runId")
+            {
+                let _ = recordings
+                    .add_sample_recordings(&lab.client, &run_id, &mut result)
+                    .await;
+            }
             complete_http(lab, entry, request, result).await
         }
     }

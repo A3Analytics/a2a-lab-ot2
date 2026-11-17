@@ -93,6 +93,30 @@ mise run images
 mise run a2a-lab-ot2 -- agent-message "which tasks can I run?"
 ```
 
+### Recorded OT-2 scenarios
+
+The simulator optionally serves a private replay archive alongside its virtual robot. The archive supplies robot-server reads, an operator page at `/replay`, and recorded Top and Side footage at `/replay/v1`. Its original commands and timestamps remain available across container restarts.
+
+From the repository root, build and prepare the archive from the supplied `ot2-demo-data` folder. Use a new bundle directory for each archive revision.
+
+```bash
+mise run ot2-simulator-setup
+mkdir -p "$PWD/.cache/replay"
+docker run --rm --network none --entrypoint python3 \
+  --mount "type=bind,source=$PWD/../ot2-demo/ot2-demo-data,target=/recordings,readonly" \
+  --mount "type=bind,source=$PWD/.cache/replay,target=/output" \
+  a2a-lab-ot2-sim:v10.0.0 prepare_replay.py /recordings replay-alignment.json /output/bundle
+
+docker run --name ot2-replay --publish 127.0.0.1:31950:31950 \
+  --mount "type=bind,source=$PWD/.cache/replay/bundle,target=/archive,readonly" \
+  --env OT2_REPLAY_ARCHIVE=/archive --env OT2_REPLAY_FIXR_URL=http://localhost:3808 \
+  a2a-lab-ot2-sim:v10.0.0
+```
+
+Start the normal Linux agent with `A2ALAB_OPENTRONS_URL=http://127.0.0.1:31950` and `A2ALAB_VIDEO_ARCHIVE_URL=http://127.0.0.1:31950/replay/v1`, using `mise run start -- --readonly`. Point local FIXR's `A2A_LAB_URL` at `http://127.0.0.1:31000`. Use `mise run ot2-replay-smoke -- --agent http://127.0.0.1:31000` to verify both surfaces. The agent's archive mode supplies retained media. Local-camera configuration selects the existing live capture mode.
+
+Tagged CI builds publish the agent and simulator base images without the private archive. Build an archive-bearing deployment image in an authorized private registry using `ot2-simulator/archive.Dockerfile`, the verified simulator base as `SIMULATOR_IMAGE`, and the prepared bundle as the named `archive` context. Pin the resulting image digest and its manifest revision together.
+
 `mise run images` lists `opentrons-camera`. The pinned simulator advertises that source and does not emulate a usable on-board camera, so `get-current-image` for it fails there. A real OT-2 returns a JPEG when the camera is enabled. Set `A2ALAB_EXTERNAL_CAMERA_INDEX` to also list and capture `external-camera`. Serve then follows that same host camera as live MJPEG in the Videos UI. On the A2A lab host, the EMEET SmartCam Nova 4K is V4L2 index 4.
 
 ```bash

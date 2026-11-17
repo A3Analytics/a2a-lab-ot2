@@ -1,0 +1,9 @@
+{
+  "machine": "OT-2 Standard",
+  "attached_instruments": {
+    "left": {
+      "model": "p300_single_v2.1",
+      "id": "replay-p300-single-gen2"
+    }
+  }
+}
