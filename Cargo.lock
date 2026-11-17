@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "a2a-lab-ot2"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "a2a-lab-dev-kit",
  "async-trait",
