@@ -229,6 +229,7 @@ jobs:
 
       - name: Checksum and publish
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
