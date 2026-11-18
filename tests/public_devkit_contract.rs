@@ -1,4 +1,4 @@
-const DEVKIT_REVISION: &str = "62663923ce4be49f79c6d6bf5ea51c70eadd68a6";
+const DEVKIT_REVISION: &str = "c3e8178e38216c3e3381b5705cd8287a02ff6028";
 const DEVKIT_URL: &str = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs";
 const TCK_REVISION: &str = "1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd";
 const TCK_URL: &str = "https://github.com/A3Analytics/a2a-lab-tck";
@@ -78,13 +78,14 @@ fn compliance_workflow_retains_failure_evidence_and_provenance() {
 fn workflows_do_not_require_private_or_sibling_tck_access() {
     let compliance = include_str!("../.github/workflows/a2a-lab-compliance.yml");
     let release = include_str!("../.github/workflows/release.yml");
-    for workflow in [compliance, release] {
+    let binaries = include_str!("../.github/workflows/build-binaries.yml");
+    for workflow in [compliance, release, binaries] {
         assert!(!workflow.contains("TCK_READ_TOKEN"));
         assert!(!workflow.contains("DEVKIT_READ_TOKEN"));
         assert!(!workflow.contains("repository: A3Analytics/a2a-lab-tck"));
         assert!(!workflow.contains("repository: A3Analytics/a2a-lab-dev-kit-rs"));
     }
-    assert!(release.contains("cargo build --locked --release"));
+    assert!(binaries.contains("cargo build --locked --release"));
 }
 
 #[test]
@@ -143,8 +144,8 @@ fn wasm32_target_is_installed_for_every_web_ui_build() {
     assert!(toolchain.contains("targets = [\"wasm32-unknown-unknown\"]"));
     let compliance = include_str!("../.github/workflows/a2a-lab-compliance.yml");
     assert!(compliance.contains("targets: wasm32-unknown-unknown"));
-    let release = include_str!("../.github/workflows/release.yml");
-    assert!(release.contains("targets: \"${{ matrix.target }},wasm32-unknown-unknown\""));
+    let binaries = include_str!("../.github/workflows/build-binaries.yml");
+    assert!(binaries.contains("targets: \"${{ matrix.target }},wasm32-unknown-unknown\""));
     let cross = include_str!("../.mise/scripts/build-linux-x86_64.sh");
     assert!(cross.contains("rustup target add x86_64-unknown-linux-gnu wasm32-unknown-unknown"));
 }

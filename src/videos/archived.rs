@@ -90,6 +90,12 @@ impl ArchivedVideos {
         run_id: &str,
         result: &mut Value,
     ) -> Option<()> {
+        let scenario = self.archive_scenario(robot, run_id).await?;
+        let commands = recorded_commands(robot, run_id, result).await?;
+        annotate_recordings(&scenario, &commands, result)
+    }
+
+    async fn archive_scenario(&self, robot: &OpentronsClient, run_id: &str) -> Option<Value> {
         let run = robot
             .call("GET", &format!("runs/{run_id}"), None)
             .await
@@ -104,77 +110,118 @@ impl ArchivedVideos {
             .ok()?;
         let slug = protocol["files"][0]["name"].as_str()?.strip_suffix(".py")?;
         let catalog: Value = self.json(&["scenarios"], &[]).await.ok()?;
-        let scenario = catalog["scenarios"]
+        catalog["scenarios"]
             .as_array()?
             .iter()
-            .find(|row| row["slug"] == slug)?;
-        let single = !result.is_array();
-        let commands = if single {
-            robot
-                .call(
-                    "GET",
-                    &format!("runs/{run_id}/commandsAsPreSerializedList"),
-                    None,
-                )
-                .await
-                .ok()?
-        } else {
-            result.clone()
-        };
-        let reference_commands = scenario["commands"].as_array()?;
-        let mut annotated = Vec::new();
-        for (index, (record, reference)) in commands
-            .as_array()?
-            .iter()
-            .zip(reference_commands)
-            .enumerate()
-        {
-            let mut command: Value = serde_json::from_str(record.as_str()?).ok()?;
-            if command["commandType"] != reference["commandType"] {
-                break;
-            }
-            let at = timestamp(reference["completedAt"].as_str()?)?;
-            let angles: Vec<&str> = ["top", "side"]
-                .into_iter()
-                .filter(|angle| {
-                    let coverage = &scenario["cameras"][*angle];
-                    let start = coverage["start"].as_str().and_then(timestamp);
-                    let end = coverage["end"].as_str().and_then(timestamp);
-                    start
-                        .zip(end)
-                        .is_some_and(|(start, end)| start <= at && at < end)
-                })
-                .collect();
-            if angles.is_empty() {
-                continue;
-            }
-            let recording = json!({
-                "runId": scenario["run_id"],
-                "commandId": reference["id"],
-                "startedAt": reference["startedAt"],
-                "completedAt": reference["completedAt"],
-                "sourceIds": angles,
-            });
-            if single && command["id"] == result["id"] {
-                result["recording"] = recording;
-                return Some(());
-            }
-            if !single {
-                command["recording"] = recording;
-                annotated.push((index, command.to_string()));
-            }
-        }
-        if let Some(records) = result.as_array_mut() {
-            for (index, replacement) in annotated {
-                records[index] = Value::String(replacement);
-            }
-        }
-        Some(())
+            .find(|row| row["slug"] == slug)
+            .cloned()
     }
 }
 
+async fn recorded_commands(robot: &OpentronsClient, run_id: &str, result: &Value) -> Option<Value> {
+    if result.is_array() {
+        return Some(result.clone());
+    }
+    robot
+        .call(
+            "GET",
+            &format!("runs/{run_id}/commandsAsPreSerializedList"),
+            None,
+        )
+        .await
+        .ok()
+}
+
+enum RecordingAnnotation {
+    Stop,
+    Skip,
+    Matched(Value),
+    Replace(String),
+}
+
+fn annotate_recordings(scenario: &Value, commands: &Value, result: &mut Value) -> Option<()> {
+    let single = !result.is_array();
+    let result_id = result["id"].clone();
+    let reference_commands = scenario["commands"].as_array()?;
+    let mut annotated = Vec::new();
+    for (index, (record, reference)) in commands
+        .as_array()?
+        .iter()
+        .zip(reference_commands)
+        .enumerate()
+    {
+        match command_annotation(scenario, record, reference, single, &result_id)? {
+            RecordingAnnotation::Stop => break,
+            RecordingAnnotation::Skip => {}
+            RecordingAnnotation::Matched(recording) => {
+                result["recording"] = recording;
+                return Some(());
+            }
+            RecordingAnnotation::Replace(command) => annotated.push((index, command)),
+        }
+    }
+    if let Some(records) = result.as_array_mut() {
+        for (index, replacement) in annotated {
+            records[index] = Value::String(replacement);
+        }
+    }
+    Some(())
+}
+
+fn command_annotation(
+    scenario: &Value,
+    record: &Value,
+    reference: &Value,
+    single: bool,
+    result_id: &Value,
+) -> Option<RecordingAnnotation> {
+    let mut command: Value = serde_json::from_str(record.as_str()?).ok()?;
+    if command["commandType"] != reference["commandType"] {
+        return Some(RecordingAnnotation::Stop);
+    }
+    let at = timestamp(reference["completedAt"].as_str()?)?;
+    let angles = covered_angles(scenario, at);
+    if angles.is_empty() {
+        return Some(RecordingAnnotation::Skip);
+    }
+    let recording = recording_value(scenario, reference, &angles);
+    if single && command["id"] == *result_id {
+        return Some(RecordingAnnotation::Matched(recording));
+    }
+    if !single {
+        command["recording"] = recording;
+        return Some(RecordingAnnotation::Replace(command.to_string()));
+    }
+    Some(RecordingAnnotation::Skip)
+}
+
+fn covered_angles(scenario: &Value, at: i64) -> Vec<&str> {
+    ["top", "side"]
+        .into_iter()
+        .filter(|angle| camera_covers(&scenario["cameras"][*angle], at))
+        .collect()
+}
+
+fn camera_covers(coverage: &Value, at: i64) -> bool {
+    let start = coverage["start"].as_str().and_then(timestamp);
+    let end = coverage["end"].as_str().and_then(timestamp);
+    start
+        .zip(end)
+        .is_some_and(|(start, end)| start <= at && at < end)
+}
+
+fn recording_value(scenario: &Value, reference: &Value, angles: &[&str]) -> Value {
+    json!({
+        "runId": scenario["run_id"],
+        "commandId": reference["id"],
+        "startedAt": reference["startedAt"],
+        "completedAt": reference["completedAt"],
+        "sourceIds": angles,
+    })
+}
+
 fn timestamp(value: &str) -> Option<i64> {
-    UtcTimestamp::parse(value).ok().map(|time| time.as_micros())
+    UtcTimestamp::parse(value).ok().map(UtcTimestamp::as_micros)
 }
 
 impl VideoProvider for ArchivedVideos {
@@ -323,4 +370,176 @@ async fn read_body(mut response: Response, limit: usize) -> Result<Vec<u8>, A2aL
         data.extend_from_slice(&chunk);
     }
     Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn micros(value: &str) -> i64 {
+        timestamp(value).expect("rfc3339")
+    }
+
+    fn reference(id: &str, command_type: &str, started_at: &str, completed_at: &str) -> Value {
+        json!({
+            "id": id,
+            "commandType": command_type,
+            "startedAt": started_at,
+            "completedAt": completed_at,
+        })
+    }
+
+    fn scenario(commands: &Value) -> Value {
+        json!({
+            "run_id": "scenario-run",
+            "commands": commands,
+            "cameras": {
+                "top": {
+                    "start": "2024-01-01T00:00:00Z",
+                    "end": "2024-01-01T00:00:02Z",
+                },
+                "side": {
+                    "start": "2024-01-01T00:00:05Z",
+                    "end": "2024-01-01T00:00:08Z",
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn camera_coverage_is_half_open() {
+        let coverage = json!({
+            "start": "2024-01-01T00:00:00Z",
+            "end": "2024-01-01T00:00:02Z",
+        });
+        assert!(camera_covers(&coverage, micros("2024-01-01T00:00:00Z")));
+        assert!(camera_covers(&coverage, micros("2024-01-01T00:00:01Z")));
+        assert!(!camera_covers(&coverage, micros("2024-01-01T00:00:02Z")));
+        assert!(!camera_covers(&coverage, micros("2023-12-31T23:59:59Z")));
+        assert!(!camera_covers(
+            &json!({"start": "2024-01-01T00:00:00Z"}),
+            micros("2024-01-01T00:00:01Z")
+        ));
+    }
+
+    #[test]
+    fn single_command_annotation_matches_id_only_inside_coverage() {
+        let active = scenario(&json!([reference(
+            "cmd-1",
+            "aspirate",
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T00:00:01Z",
+        )]));
+        let commands = json!([r#"{"id":"cmd-1","commandType":"aspirate"}"#]);
+        let mut matched = json!({"id":"cmd-1","commandType":"aspirate"});
+        assert_eq!(
+            annotate_recordings(&active, &commands, &mut matched),
+            Some(())
+        );
+        assert_eq!(matched["recording"]["runId"], json!("scenario-run"));
+        assert_eq!(matched["recording"]["commandId"], json!("cmd-1"));
+        assert_eq!(
+            matched["recording"]["startedAt"],
+            json!("2024-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            matched["recording"]["completedAt"],
+            json!("2024-01-01T00:00:01Z")
+        );
+        assert_eq!(matched["recording"]["sourceIds"], json!(["top"]));
+
+        let mut unmatched = json!({"id":"other","commandType":"aspirate"});
+        assert_eq!(
+            annotate_recordings(&active, &commands, &mut unmatched),
+            Some(())
+        );
+        assert!(unmatched.get("recording").is_none());
+
+        let inactive = scenario(&json!([reference(
+            "cmd-1",
+            "aspirate",
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T00:00:02Z",
+        )]));
+        let mut boundary = json!({"id":"cmd-1","commandType":"aspirate"});
+        assert_eq!(
+            annotate_recordings(&inactive, &commands, &mut boundary),
+            Some(())
+        );
+        assert!(boundary.get("recording").is_none());
+    }
+
+    #[test]
+    fn command_list_replaces_covered_rows_and_stops_on_type_mismatch() {
+        let catalog = scenario(&json!([
+            reference(
+                "cmd-1",
+                "aspirate",
+                "2024-01-01T00:00:00Z",
+                "2024-01-01T00:00:01Z",
+            ),
+            reference(
+                "cmd-2",
+                "aspirate",
+                "2024-01-01T00:00:00Z",
+                "2024-01-01T00:00:02Z",
+            ),
+            reference(
+                "cmd-3",
+                "dispense",
+                "2024-01-01T00:00:05Z",
+                "2024-01-01T00:00:06Z",
+            ),
+            reference(
+                "cmd-4",
+                "blowout",
+                "2024-01-01T00:00:05Z",
+                "2024-01-01T00:00:06Z",
+            ),
+        ]));
+        let skipped = r#"{"id":"cmd-skip","commandType":"aspirate"}"#;
+        let mismatch = r#"{"id":"cmd-3","commandType":"aspirate"}"#;
+        let later = r#"{"id":"cmd-4","commandType":"blowout"}"#;
+        let mut records = json!([
+            r#"{"id":"cmd-1","commandType":"aspirate"}"#,
+            skipped,
+            mismatch,
+            later,
+        ]);
+        let commands = records.clone();
+        assert_eq!(
+            annotate_recordings(&catalog, &commands, &mut records),
+            Some(())
+        );
+        let rows = records.as_array().expect("list");
+        let first: Value = serde_json::from_str(rows[0].as_str().expect("json")).expect("command");
+        assert_eq!(first["recording"]["sourceIds"], json!(["top"]));
+        assert_eq!(first["recording"]["commandId"], json!("cmd-1"));
+        assert_eq!(rows[1], json!(skipped));
+        assert_eq!(rows[2], json!(mismatch));
+        assert_eq!(rows[3], json!(later));
+    }
+
+    #[test]
+    fn invalid_command_json_leaves_earlier_rows_unchanged() {
+        let catalog = scenario(&json!([
+            reference(
+                "cmd-1",
+                "aspirate",
+                "2024-01-01T00:00:00Z",
+                "2024-01-01T00:00:01Z",
+            ),
+            reference(
+                "cmd-2",
+                "aspirate",
+                "2024-01-01T00:00:02Z",
+                "2024-01-01T00:00:03Z",
+            ),
+        ]));
+        let first = r#"{"id":"cmd-1","commandType":"aspirate"}"#;
+        let mut records = json!([first, "not-json"]);
+        let commands = records.clone();
+        assert_eq!(annotate_recordings(&catalog, &commands, &mut records), None);
+        assert_eq!(records[0], json!(first));
+    }
 }

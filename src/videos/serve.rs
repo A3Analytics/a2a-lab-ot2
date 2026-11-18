@@ -16,8 +16,8 @@ use crate::videos::dvr::DEFAULT_DISK_VIDEO_RETENTION_SECS;
 use crate::videos::external::LiveJpegSource;
 use crate::videos::injections::{ExternalVideoConfig, LiveVideoInjections, WebcamVideoConfig};
 use crate::videos::semantic_indexing::SemanticServeInjections;
-use crate::videos::source::LiveVideoSourceDescriptor;
 use crate::videos::source::{LiveCameraInputFormat, LiveVideoDelivery};
+use crate::videos::source::{LiveVideoSourceDescriptor, validate_live_sources};
 
 /// Default live catalog frame rate.
 pub const DEFAULT_VIDEO_FPS: u32 = 5;
@@ -258,6 +258,7 @@ async fn start_fixture_declarative_serve_inner(
     dvr_save_interval_nanos: Option<u64>,
     injections: LiveVideoInjections,
 ) -> Result<DeclarativeVideoServe, A2aLabError> {
+    validate_live_sources(&sources)?;
     let settings = ResolvedVideoSettings {
         sources,
         fps,

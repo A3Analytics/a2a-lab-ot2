@@ -398,7 +398,7 @@ async fn http_task(
                 && let Ok(run_id) = path_param(request.input.as_map(), "runId")
             {
                 let _ = recordings
-                    .add_sample_recordings(&lab.client, &run_id, &mut result)
+                    .add_sample_recordings(&lab.client, run_id, &mut result)
                     .await;
             }
             complete_http(lab, entry, request, result).await
