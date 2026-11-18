@@ -23,7 +23,7 @@ Author atomic, testable, AI-implementable tasks for this repo's `backlog.md` wor
 
 ## Golden rule
 
-**Never hand-edit files in `backlog/tasks/`.** Every create, edit, and status change goes through the CLI so metadata and relationships stay in sync. `backlog/tasks/`, `backlog/completed/`, `backlog/archive/`, `backlog/drafts/`, and `backlog/milestones/` are gitignored. Read with `--plain` for clean output.
+**Never hand-edit files in `backlog/tasks/`.** Every create, edit, and status change goes through the CLI so metadata and relationships stay in sync. The entire `backlog/` directory is gitignored. Read with `--plain` for clean output.
 
 ## Create a task
 
