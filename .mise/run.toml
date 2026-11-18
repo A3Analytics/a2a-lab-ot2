@@ -30,6 +30,7 @@ run = "cargo clippy --all-targets -- -D warnings"
 
 [test]
 description = "Run the workspace test suite"
+env = { CARGO_TARGET_DIR = "{{config_root}}/../target/quality" }
 run = "cargo nextest run --workspace"
 
 [quality]

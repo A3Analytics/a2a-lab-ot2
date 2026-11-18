@@ -21,7 +21,11 @@ clippy_warnings() {
   CARGO_TARGET_DIR="$root/target/quality" cargo clippy --all-targets --quiet -- -D warnings
 }
 
+nextest_run() {
+  CARGO_TARGET_DIR="$root/target/quality" cargo nextest run --workspace
+}
+
 step 'cargo fmt' cargo fmt --check
 step check check_warnings
 step clippy clippy_warnings
-step nextest cargo nextest run --workspace
+step nextest nextest_run
