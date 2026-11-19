@@ -27,9 +27,10 @@ use a2a_lab_ot2::{
     FixtureConfig, FixtureServer, FixtureVariant, ImageHistoryMaintenance, ImageServeConfig,
     LabAgent, LabConfigBootstrap, LabConfigCliValues, LabConfigInputs, LiveImageCatalog,
     LiveVideoInjections, ModelProvider, OidcConfig, OpentronsLab, ServeChatLegacyInputs,
-    SilaConfig, VideoServeConfig, bootstrap_lab_config, build_serve_lab_agent, image_catalog,
-    open_image_catalog, open_resolved_video_catalog_with_semantic, open_video_catalog,
-    prepare_sila, resolve_lab_config, resolved_lab_config, resolved_video_summary,
+    SilaConfig, VideoServeConfig, attach_configured_image_decision, bootstrap_lab_config,
+    build_serve_lab_agent, image_catalog, open_image_catalog,
+    open_resolved_video_catalog_with_semantic, open_video_catalog, prepare_sila,
+    resolve_image_decision_client, resolve_lab_config, resolved_lab_config, resolved_video_summary,
     selected_config_path, sila_server, uses_resolved_video_configuration, with_oidc,
 };
 use clap::parser::ValueSource;
@@ -665,6 +666,7 @@ fn map_value_source(source: Option<ValueSource>) -> Option<ClapValueSource> {
 
 fn run_config_validate(inputs: &LabConfigInputs) -> Result<(), Box<dyn std::error::Error>> {
     resolve_lab_config(inputs).map_err(config_error)?;
+    resolve_image_decision_client(inputs).map_err(config_error)?;
     println!("configuration valid");
     Ok(())
 }
@@ -895,6 +897,8 @@ async fn serve(
     let service = A2aLabService::new(lab.clone(), lab.clone(), lab)
         .with_images(catalog)
         .with_image_transport(images.transport());
+    let service = attach_configured_image_decision(service, config_inputs)
+        .map_err(|error| startup_error("image decision", error))?;
     let service = if let Some(provider) = recordings {
         if videos.is_some() {
             return Err(A2aLabError::invalid(

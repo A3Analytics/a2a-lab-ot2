@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use a2a_lab_dev_kit::{A2aLabError, LoadedLabConfig, SemanticIndexingConfig};
+use a2a_lab_dev_kit::{
+    A2aLabError, LoadedLabConfig, ResolvedImageDecisionClient, SemanticIndexingConfig,
+};
 
 use super::inputs::LabConfigInputs;
 use super::resolve::ResolvedVideoSettings;
@@ -57,6 +59,39 @@ pub fn resolve_semantic_indexing(
         sqlite_path,
         indexed_source_ids,
     }))
+}
+
+/// Loads the generic synchronous image-decision client when the lab file enables it.
+///
+/// Absent configuration returns `Ok(None)` and leaves typed decision workers alone.
+/// Invalid settings and a named credential that is not set return the devkit error.
+pub fn resolve_image_decision_client(
+    inputs: &LabConfigInputs,
+) -> Result<Option<ResolvedImageDecisionClient>, A2aLabError> {
+    let Some(path) = selected_config_path(inputs)? else {
+        return Ok(None);
+    };
+    let loaded = LoadedLabConfig::load(&path)?;
+    let Some(config) = loaded.config.image_decision else {
+        return Ok(None);
+    };
+    let client = ResolvedImageDecisionClient::from_config(config);
+    ensure_image_decision_client_available(&client)?;
+    Ok(Some(client))
+}
+
+fn ensure_image_decision_client_available(
+    client: &ResolvedImageDecisionClient,
+) -> Result<(), A2aLabError> {
+    if let Some(name) = client.config().credentials_env() {
+        let configured = std::env::var(name).is_ok_and(|value| !value.trim().is_empty());
+        if !configured {
+            return Err(A2aLabError::unavailable(format!(
+                "image decision credentials not configured (env:{name})"
+            )));
+        }
+    }
+    client.executor().map(|_| ())
 }
 
 fn validate_vector_storage(path: &Path) -> Result<(), A2aLabError> {

@@ -38,11 +38,11 @@ pub use factory::{
     build_live_description_provider, build_live_providers, build_live_providers_for_source,
 };
 pub use jev::{
-    EvidenceJpegDecisionMedia, InjectedJevDecisionMedia, JevDecisionMedia, JevHttpClient,
-    JevSmokeAdoptionGates, JevSmokeReport, LiveDecisionEvaluationWorker,
-    TypeSafeJevFrameDecisionEvaluator, build_deterministic_decision_worker,
-    build_live_decision_worker, jev_api_base, jev_live_worker_enabled, jev_smoke_enabled,
-    live_jev_allowed, map_decision_worker_failure, run_jev_smoke,
+    EvidenceJpegDecisionMedia, InjectedJevDecisionMedia, JevDecisionMedia, JevSmokeAdoptionGates,
+    JevSmokeReport, LiveDecisionEvaluationWorker, TypeSafeJevFrameDecisionEvaluator,
+    build_deterministic_decision_worker, build_live_decision_worker, jev_api_base,
+    jev_live_worker_enabled, jev_smoke_enabled, live_jev_allowed, map_decision_worker_failure,
+    run_jev_smoke,
 };
 pub use limits::{frame_description_limits, indexing_claim_batch_size, text_embedding_limits};
 pub use media::{EvidenceJpegMedia, FrameDescriptionMedia, InjectedDescriptionMedia};

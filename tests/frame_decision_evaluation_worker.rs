@@ -3,15 +3,23 @@
 #![allow(clippy::implicit_clone, clippy::useless_vec)]
 
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
+use axum::response::IntoResponse;
+use axum::routing::post;
 use image::ExtendedColorType;
 use image::codecs::jpeg::JpegEncoder;
+use tokio::net::TcpListener;
 
 use a2a_lab_dev_kit::{
     A2aLabConfig, DecisionCoveragePolicy, DecisionEvaluationCoverage, DvrStoreNamespace,
-    FakeJevBehavior, FrameDecisionEvaluatorLimits, LabPredicate, MemoryVideos,
-    SemanticIndexingConfig, UtcTimestamp, VideoSourceId,
+    FakeJevBehavior, FrameDecisionEvaluationRouter, FrameDecisionEvaluatorLimits, LabPredicate,
+    MemoryVideos, SemanticIndexingConfig, UtcTimestamp, VideoSourceId,
 };
 use a2a_lab_ot2::IndexedVideoDvr;
 use a2a_lab_ot2::videos::dvr::{
@@ -19,6 +27,9 @@ use a2a_lab_ot2::videos::dvr::{
     DecisionEvaluationWorkerFaults, DeterministicDecisionEvaluationWorker,
     EnqueueDecisionEvaluationsRequest, IndexingCheckpoint, IndexingJobState, IndexingWorkerFaults,
     decision_evaluation_job_id, pilot_evaluator_config, pilot_predicate_targets, subject_digest,
+};
+use a2a_lab_ot2::videos::semantic_indexing::{
+    EvidenceJpegDecisionMedia, TypeSafeJevFrameDecisionEvaluator,
 };
 
 const SEMANTIC_LIMITS: &str = r#""limits":{"worker":{"max_batch_items":4,"max_concurrency":2,"max_queue_backlog":64,"max_retry_attempts":3,"job_deadline":"30s","retry_backoff":"1s"},"search":{"top_k":10,"candidate_limit":1000,"max_neighbor_frames":5,"query_window":"2h"},"roi":{"min_edge_pixels":280,"max_edge_pixels":1568,"max_rois_per_frame":8},"storage":{"vector_index_path":"./state/semantic-index","max_disk_bytes":1073741824},"decisions":{"max_batch_items":8,"max_concurrency":2,"job_deadline":"45s","coverage_policy":"on_demand"}}"#;
@@ -622,4 +633,170 @@ async fn indexing_worker_and_decision_worker_stay_isolated() {
     );
     let manifest = store.get_manifest_frame(&frame_id).await.unwrap();
     assert!(manifest.description().is_some());
+}
+
+#[derive(Clone)]
+struct AdapterMock {
+    succeed: bool,
+    seen: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+async fn spawn_adapter_endpoint(succeed: bool) -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let state = AdapterMock {
+        succeed,
+        seen: Arc::clone(&seen),
+    };
+    let app = Router::new()
+        .route("/decide", post(adapter_decide))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}/decide"), seen)
+}
+
+async fn adapter_decide(State(state): State<AdapterMock>, body: Bytes) -> impl IntoResponse {
+    let payload = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    state.seen.lock().expect("seen requests").push(payload);
+    if !state.succeed {
+        return StatusCode::GATEWAY_TIMEOUT.into_response();
+    }
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, "application/json")],
+        serde_json::json!({
+            "answers": [{
+                "probability": 0.94,
+                "model_box": {"bounds": [0.1, 0.2, 0.3, 0.4]}
+            }]
+        })
+        .to_string(),
+    )
+        .into_response()
+}
+
+fn adapter_worker(
+    store: &Arc<IndexedVideoDvr>,
+    semantic: &SemanticIndexingConfig,
+    endpoint: &str,
+    worker_id: &str,
+) -> DecisionEvaluationWorker<TypeSafeJevFrameDecisionEvaluator<EvidenceJpegDecisionMedia>> {
+    let config = pilot_evaluator_config();
+    let limits = FrameDecisionEvaluatorLimits::pilot();
+    let evaluator = TypeSafeJevFrameDecisionEvaluator::mock(
+        config.clone(),
+        limits,
+        Arc::new(EvidenceJpegDecisionMedia::new(Arc::clone(store))),
+        endpoint,
+    )
+    .unwrap();
+    DecisionEvaluationWorker::new(
+        FrameDecisionEvaluationRouter::new(evaluator),
+        config,
+        limits,
+        semantic.limits.decisions.clone(),
+        worker_id,
+        DecisionEvaluationWorkerFaults::new(),
+    )
+}
+
+#[tokio::test]
+async fn adapter_worker_commits_three_predicates_and_replays_idempotently() {
+    let (_dir, store) = open_store("adapter-commit").await;
+    let store = Arc::new(store);
+    let frame_id = seed_frame(&store, 21).await;
+    let config = pilot_evaluator_config();
+    let targets = pilot_targets();
+    let request = EnqueueDecisionEvaluationsRequest::new(
+        DecisionCoveragePolicy::OnDemand,
+        config,
+        DecisionEvaluationFrameSelection::FrameIds(vec![frame_id.clone()]),
+        targets.clone(),
+        1,
+    )
+    .unwrap();
+    store
+        .enqueue_decision_evaluation_jobs(&request)
+        .await
+        .unwrap();
+    let semantic = semantic_config();
+    let (endpoint, seen) = spawn_adapter_endpoint(true).await;
+    let mut worker = adapter_worker(&store, &semantic, &endpoint, "adapter-commit");
+    let report = worker.run_batch(&store, &semantic, &targets).await.unwrap();
+    assert_eq!(report.claimed(), 3);
+    assert_eq!(report.failures(), 0);
+    let decisions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM frame_decisions WHERE frame_id = ?1")
+            .bind(&frame_id)
+            .fetch_one(store.semantic_pool())
+            .await
+            .unwrap();
+    assert_eq!(decisions, 3);
+    let replay = worker.run_batch(&store, &semantic, &targets).await.unwrap();
+    assert_eq!(replay.claimed(), 0);
+    let replayed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM frame_decisions WHERE frame_id = ?1")
+            .bind(&frame_id)
+            .fetch_one(store.semantic_pool())
+            .await
+            .unwrap();
+    assert_eq!(replayed, 3);
+    {
+        let requests = seen.lock().expect("seen requests");
+        assert_eq!(requests.len(), 3);
+        for payload in requests.iter() {
+            assert!(payload["model_input"].get("roi").is_none());
+            assert_eq!(payload["image"]["descriptor"]["width"], 320);
+            assert_eq!(payload["image"]["descriptor"]["height"], 240);
+        }
+    }
+    let manifest = store.get_manifest_frame(&frame_id).await.unwrap();
+    assert!(manifest.description().is_none());
+}
+
+#[tokio::test]
+async fn adapter_timeout_records_timed_out_without_a_ledger_row() {
+    let (_dir, store) = open_store("adapter-timeout").await;
+    let store = Arc::new(store);
+    let frame_id = seed_frame(&store, 22).await;
+    let config = pilot_evaluator_config();
+    let mut pilot = pilot_targets();
+    let targets = [pilot.remove(0)];
+    store
+        .enqueue_decision_evaluation_jobs(
+            &EnqueueDecisionEvaluationsRequest::on_demand_pilot_frames(
+                config.clone(),
+                vec![frame_id.clone()],
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let semantic = semantic_config();
+    let (endpoint, _) = spawn_adapter_endpoint(false).await;
+    let mut worker = adapter_worker(&store, &semantic, &endpoint, "adapter-timeout");
+    worker.run_batch(&store, &semantic, &targets).await.unwrap();
+    worker.run_batch(&store, &semantic, &targets).await.unwrap();
+    worker.run_batch(&store, &semantic, &targets).await.unwrap();
+    let job = store
+        .get_decision_evaluation_job(&decision_evaluation_job_id(
+            "jev-req-pilot-0",
+            &LabPredicate::pipette_tip_attached_v1(),
+            &subject_digest(targets[0].subject()),
+            config.config_digest().as_str(),
+            config.producer().model_revision(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(job.coverage(), Some(DecisionEvaluationCoverage::TimedOut));
+    let decisions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM frame_decisions WHERE frame_id = ?1")
+            .bind(&frame_id)
+            .fetch_one(store.semantic_pool())
+            .await
+            .unwrap();
+    assert_eq!(decisions, 0);
 }

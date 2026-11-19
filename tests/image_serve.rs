@@ -486,6 +486,7 @@ async fn both_sources_match_across_a2a_and_mcp() {
             "search-images",
             "get-image",
             "get-current-image",
+            "decide-image",
             "list-video-sources",
             "get-video-frame-at",
             "get-video-clip",
@@ -643,6 +644,7 @@ async fn payload_limit_matches_and_readonly_keeps_image_reads() {
 fn expected_tools() -> Vec<String> {
     [
         "append_frame_decision",
+        "decide_image",
         "follow_video",
         "get_current_image",
         "get_frame_decision_capabilities",

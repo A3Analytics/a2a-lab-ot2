@@ -10,7 +10,6 @@ use a2a_lab_dev_kit::{
 use serde::Serialize;
 
 use super::adapter::{jev_smoke_enabled, live_jev_allowed};
-use super::http::DEFAULT_TYPESAFE_URL;
 use super::media::EvidenceJpegDecisionMedia;
 use super::{TypeSafeJevFrameDecisionEvaluator, jev_api_base};
 use crate::videos::dvr::pilot_operator_criteria;
@@ -195,8 +194,4 @@ fn build_smoke_request(
         640,
     )
     .map_err(|error| error.to_string())
-}
-
-fn _endpoint_hint() -> &'static str {
-    DEFAULT_TYPESAFE_URL
 }

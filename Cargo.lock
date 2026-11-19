@@ -52,7 +52,7 @@ dependencies = [
 [[package]]
 name = "a2a-lab-dev-kit"
 version = "0.1.0"
-source = "git+https://github.com/A3Analytics/a2a-lab-dev-kit-rs?rev=c3e8178e38216c3e3381b5705cd8287a02ff6028#c3e8178e38216c3e3381b5705cd8287a02ff6028"
+source = "git+https://github.com/A3Analytics/a2a-lab-dev-kit-rs?rev=dd8055d7a6a6775f2ecb11c37af63521117132b6#dd8055d7a6a6775f2ecb11c37af63521117132b6"
 dependencies = [
  "a2a-client-lf",
  "a2a-grpc",
@@ -5351,7 +5351,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",

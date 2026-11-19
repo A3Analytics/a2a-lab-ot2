@@ -15,7 +15,9 @@ pub use selection::{
     ServeChatLegacyInputs, build_serve_lab_agent, selected_config_path, serve_chat_settings,
     uses_resolved_chat_configuration, uses_resolved_video_configuration,
 };
-pub use semantic::{ResolvedSemanticIndexing, resolve_semantic_indexing};
+pub use semantic::{
+    ResolvedSemanticIndexing, resolve_image_decision_client, resolve_semantic_indexing,
+};
 
 use a2a_lab_dev_kit::{A2aLabError, LoadedLabConfig, LoggingGuard, init_logging_from_loaded};
 
@@ -44,6 +46,7 @@ pub fn bootstrap_lab_config(inputs: &LabConfigInputs) -> Result<LabConfigBootstr
         .ok_or_else(|| A2aLabError::invalid("config", "configuration file is not selected"))?;
     let loaded = LoadedLabConfig::load(&path)?;
     let resolved = resolve(inputs, Some(&loaded))?;
+    resolve_image_decision_client(inputs)?;
     let logging = init_logging_from_loaded(&loaded)?;
     Ok(LabConfigBootstrap { resolved, logging })
 }

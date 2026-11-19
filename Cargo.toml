@@ -28,7 +28,7 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [dependencies]
-a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", rev = "c3e8178e38216c3e3381b5705cd8287a02ff6028", default-features = false, features = [
+a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", rev = "dd8055d7a6a6775f2ecb11c37af63521117132b6", default-features = false, features = [
     "sila2",
     "web-ui",
     "yuv",

@@ -16,7 +16,7 @@ use crate::videos::semantic_indexing::credentials::credential_env_configured;
 use super::adapter::{TypeSafeJevFrameDecisionEvaluator, live_jev_allowed};
 use super::media::EvidenceJpegDecisionMedia;
 
-/// Live worker type wired with the `TypeSafe` HTTP evaluator.
+/// Live worker type wired through the devkit compatibility adapter.
 pub type LiveDecisionEvaluationWorker =
     DecisionEvaluationWorker<TypeSafeJevFrameDecisionEvaluator<EvidenceJpegDecisionMedia>>;
 
@@ -53,7 +53,7 @@ pub fn build_deterministic_decision_worker(
     )
 }
 
-/// Live `TypeSafe` worker; requires `A2ALAB_JEV_LIVE=1` and configured credentials.
+/// Live worker; requires `A2ALAB_JEV_LIVE=1` and configured credentials.
 pub fn build_live_decision_worker(
     semantic: &SemanticIndexingConfig,
     dvr: Arc<IndexedVideoDvr>,

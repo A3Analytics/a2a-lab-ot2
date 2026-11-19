@@ -235,6 +235,114 @@ async fn service_wires_capabilities_append_and_bounded_history() {
     );
 }
 
+#[tokio::test]
+async fn generic_image_decision_does_not_write_typed_ledger_or_jobs() {
+    use a2a_lab_dev_kit::{
+        A2aLabCommand, ImageDecisionImageRef, ImageDecisionModelInput, ImageDecisionRequest,
+        ImageDecisionUnmappedAnswer, ImageId,
+    };
+    use a2a_lab_ot2::{
+        ExplicitSetting, LabConfigInputs, attach_configured_image_decision,
+        resolve_image_decision_client,
+    };
+
+    let dir = std::env::temp_dir().join(format!(
+        "a2a-lab-ot2-generic-decision-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("a2a-lab.json");
+    std::fs::write(
+        &config_path,
+        r#"{"schema_version":1,"image_decision":{"endpoint":"https://127.0.0.1:1/decide","model":"jev-1.14.0","timeout":"1s"}}"#,
+    )
+    .unwrap();
+    let inputs = LabConfigInputs {
+        config_path: ExplicitSetting::cli(Some(config_path)),
+        ..LabConfigInputs::default()
+    };
+    assert!(resolve_image_decision_client(&inputs).unwrap().is_some());
+
+    let (_root, store) = open_store("generic-isolated").await;
+    let saved = frame(b"generic", "2024-06-01T12:00:00Z");
+    register_saved(&store, &saved, b"generic").await;
+    let ledger = DvrFrameDecisionLedger::pilot_authorized_producer(store.clone()).unwrap();
+    let lab = attach_configured_image_decision(ledger_service(ledger), &inputs).unwrap();
+    assert!(lab.image_decision_client().unwrap().omits_roi());
+
+    let resolved = lab
+        .resolve_generic_image_decision(
+            ImageDecisionImageRef::by_id(ImageId::new("missing-generic").unwrap()),
+            "Is the tip attached?",
+            ImageDecisionModelInput::new("jev-1.14.0", None).unwrap(),
+            &[ImageDecisionUnmappedAnswer::new(Some("yes"), Some(0.5), None).unwrap()],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(resolved.code(), "unavailable");
+    assert_eq!(resolved.to_string(), "image provider is not configured");
+
+    let request = ImageDecisionRequest::new(
+        a2a_lab_dev_kit::Image::new(
+            a2a_lab_dev_kit::ImageDescriptor::new(
+                ImageId::new("frame").unwrap(),
+                a2a_lab_dev_kit::ImageSourceId::new("cam").unwrap(),
+                UtcTimestamp::parse("2024-01-01T00:00:00Z").unwrap(),
+                "image/png",
+                64,
+                48,
+                None,
+                a2a_lab_dev_kit::JsonObject::empty(),
+            )
+            .unwrap(),
+            vec![1, 2, 3, 4],
+        )
+        .unwrap(),
+        "Is the tip attached?",
+        ImageDecisionModelInput::new("jev-1.14.0", None).unwrap(),
+    )
+    .unwrap();
+    let error = lab
+        .execute(A2aLabCommand::DecideImage(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "unavailable");
+
+    let decisions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM frame_decisions")
+        .fetch_one(store.semantic_pool())
+        .await
+        .unwrap();
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM frame_decision_evaluation_jobs")
+        .fetch_one(store.semantic_pool())
+        .await
+        .unwrap();
+    assert_eq!(decisions, 0);
+    assert_eq!(jobs, 0);
+    let history = lab
+        .execute(A2aLabCommand::ReadFrameDecisionHistory(
+            ReadFrameDecisionHistoryRequest::new(
+                scope(&saved),
+                None,
+                None,
+                None,
+                DecisionHistoryPolicy::FullHistory,
+                FrameDecisionReadLimits::pilot(),
+                PageRequest::new(None, 10).unwrap(),
+                Vec::new(),
+            )
+            .unwrap(),
+        ))
+        .await
+        .unwrap()
+        .task
+        .result;
+    let A2aLabResult::ReadFrameDecisionHistory(history) = history else {
+        panic!("history");
+    };
+    assert!(history.entries().items().is_empty());
+}
+
 #[test]
 fn non_jev_provenance_rejected_without_fallback() {
     let err =

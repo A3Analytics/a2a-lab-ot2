@@ -709,7 +709,7 @@ async fn skills_and_tools_differ_only_by_protocol_framing() {
     from_skills.sort();
     assert_eq!(
         skills.len(),
-        5,
+        6,
         "A2A skills: {skills:?}\nMCP tools: {tools:?}"
     );
     assert_eq!(

@@ -2,7 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use a2a_lab_dev_kit::A2aLabError;
+use a2a_lab_dev_kit::{
+    A2aLabError, A2aLabService, ImageProvider, LogProvider, MetricProvider, TaskProvider,
+    VideoProvider,
+};
 
 use crate::camera::DEFAULT_EXTERNAL_CAMERA_DESCRIPTION;
 use crate::lab_config::{
@@ -307,6 +310,26 @@ pub async fn open_resolved_video_catalog_with_semantic(
         )
         .await?,
     ))
+}
+
+/// Registers the devkit generic image-decision client when configuration enables it.
+///
+/// The typed frame-decision ledger and evaluation worker are not changed.
+pub fn attach_configured_image_decision<L, M, W, I, V>(
+    service: A2aLabService<L, M, W, I, V>,
+    inputs: &LabConfigInputs,
+) -> Result<A2aLabService<L, M, W, I, V>, A2aLabError>
+where
+    L: LogProvider,
+    M: MetricProvider,
+    W: TaskProvider,
+    I: ImageProvider,
+    V: VideoProvider,
+{
+    let Some(client) = crate::lab_config::resolve_image_decision_client(inputs)? else {
+        return Ok(service);
+    };
+    Ok(service.with_image_decision_client(client))
 }
 
 /// Resolved semantic settings for serve when a configuration file is selected.

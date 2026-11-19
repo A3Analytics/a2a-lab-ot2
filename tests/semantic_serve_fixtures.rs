@@ -31,7 +31,8 @@ use a2a_lab_ot2::videos::semantic_indexing::{
 use a2a_lab_ot2::{
     ConversationStore, ExplicitSetting, LabConfigInputs, LiveVideoInjections, ModelProvider,
     RecordingServeAgentFactory, ResolvedSemanticIndexing, ServeChatLegacyInputs,
-    build_serve_lab_agent, open_resolved_video_catalog_with_semantic, resolve_lab_config,
+    attach_configured_image_decision, build_serve_lab_agent,
+    open_resolved_video_catalog_with_semantic, resolve_image_decision_client, resolve_lab_config,
     resolve_semantic_indexing,
 };
 
@@ -462,4 +463,295 @@ async fn decision_append_keeps_chat_factory_single_invocation() {
     .unwrap();
     assert!(recorder.take_recorded().unwrap().is_some());
     let _ = dir;
+}
+
+fn image_decision_object(roi: bool) -> String {
+    let roi = if roi {
+        r#","roi":{"bounds":[0.25,0.25,0.75,0.75]}"#
+    } else {
+        ""
+    };
+    format!(
+        r#""image_decision":{{"endpoint":"https://127.0.0.1:1/decide","model":"jev-1.14.0","timeout":"1s"{roi}}}"#
+    )
+}
+
+fn document_with_image_decision(document: &str, roi: bool) -> String {
+    let body = document
+        .trim_end()
+        .strip_suffix('}')
+        .expect("config object");
+    let image_decision = image_decision_object(roi);
+    format!("{body},{image_decision}}}")
+}
+
+fn config_inputs(name: &str, document: &str) -> LabConfigInputs {
+    let dir = temp_root(name);
+    let path = write_config(&dir, document);
+    inputs_with_config(path)
+}
+
+fn deck_image() -> a2a_lab_dev_kit::Image {
+    use a2a_lab_dev_kit::{
+        Image, ImageDescriptor, ImageId, ImageSourceId, JsonObject, UtcTimestamp,
+    };
+    let descriptor = ImageDescriptor::new(
+        ImageId::new("frame").unwrap(),
+        ImageSourceId::new("cam").unwrap(),
+        UtcTimestamp::parse("2024-01-01T00:00:00Z").unwrap(),
+        "image/png",
+        640,
+        480,
+        Some("tip".to_owned()),
+        JsonObject::empty(),
+    )
+    .unwrap();
+    Image::new(descriptor, vec![9, 8, 7, 6]).unwrap()
+}
+
+async fn image_catalog() -> a2a_lab_dev_kit::MemoryImages {
+    use a2a_lab_dev_kit::{ImageSource, ImageSourceId, MemoryImages};
+    let images = MemoryImages::new();
+    images
+        .insert_source(ImageSource {
+            id: ImageSourceId::new("cam").unwrap(),
+            name: "Deck".to_owned(),
+            description: "deck camera".to_owned(),
+            asset_id: None,
+            semantic_id: None,
+        })
+        .await
+        .unwrap();
+    images.insert_image(deck_image()).await.unwrap();
+    images
+}
+
+fn bits(bounds: [f32; 4]) -> [u32; 4] {
+    bounds.map(f32::to_bits)
+}
+
+#[test]
+fn invalid_image_decision_configuration_stays_on_the_lab_error() {
+    let inputs = config_inputs(
+        "image-decision-invalid",
+        r#"{"schema_version":1,"image_decision":{"endpoint":"http://127.0.0.1:9/decide","model":"jev-1.14.0"}}"#,
+    );
+    let error = resolve_image_decision_client(&inputs).unwrap_err();
+    assert!(matches!(
+        error,
+        a2a_lab_dev_kit::A2aLabError::Invalid {
+            field: "image_decision.endpoint",
+            ..
+        }
+    ));
+    assert_eq!(error.code(), "invalid");
+}
+
+#[test]
+fn missing_image_decision_credential_is_unavailable() {
+    let inputs = config_inputs(
+        "image-decision-credential",
+        r#"{"schema_version":1,"image_decision":{"endpoint":"https://127.0.0.1:1/decide","model":"jev-1.14.0","credentials":{"env":"JEV_IMAGE_DECISION_TASK107_UNSET"}}}"#,
+    );
+    let error = resolve_image_decision_client(&inputs).unwrap_err();
+    assert_eq!(error.code(), "unavailable");
+    assert_eq!(
+        error.to_string(),
+        "image decision credentials not configured (env:JEV_IMAGE_DECISION_TASK107_UNSET)"
+    );
+}
+
+async fn registered_decision_service(
+    name: &str,
+    roi: bool,
+) -> a2a_lab_dev_kit::A2aLabService<
+    a2a_lab_dev_kit::MemoryLogs,
+    a2a_lab_dev_kit::MemoryMetrics,
+    a2a_lab_dev_kit::MemoryTasks,
+    a2a_lab_dev_kit::MemoryImages,
+> {
+    use a2a_lab_dev_kit::{A2aLabService, MemoryLogs, MemoryMetrics, MemoryTasks};
+    let inputs = config_inputs(
+        name,
+        &document_with_image_decision(&semantic_document(None), roi),
+    );
+    attach_configured_image_decision(
+        A2aLabService::new(
+            MemoryLogs::default(),
+            MemoryMetrics::default(),
+            MemoryTasks::default(),
+        )
+        .with_images(image_catalog().await),
+        &inputs,
+    )
+    .unwrap()
+}
+
+fn source_box_bits(result: &a2a_lab_dev_kit::ImageDecisionResult) -> [u32; 4] {
+    bits(result.answers()[0].source_box().unwrap().bounds())
+}
+
+#[tokio::test]
+async fn omitted_roi_evaluates_the_full_source_image() {
+    use a2a_lab_dev_kit::{ImageDecisionImageRef, ImageDecisionUnmappedAnswer, ImageId};
+    let service = registered_decision_service("image-decision-full", false).await;
+    let client = service.image_decision_client().expect("registered client");
+    let full_box = [0.25, 0.25, 0.75, 0.75];
+    let resolved = service
+        .resolve_generic_image_decision(
+            ImageDecisionImageRef::by_id(ImageId::new("frame").unwrap()),
+            "Is the tip attached?",
+            client.model_input().unwrap(),
+            &[ImageDecisionUnmappedAnswer::new(Some("yes"), Some(0.91), Some(full_box)).unwrap()],
+        )
+        .await
+        .unwrap();
+    assert!(client.omits_roi());
+    assert!(resolved.omits_roi());
+    assert_eq!(resolved.source().data(), &[9, 8, 7, 6]);
+    assert_eq!(
+        (
+            resolved.model_crop().x(),
+            resolved.model_crop().y(),
+            resolved.model_crop().width(),
+            resolved.model_crop().height()
+        ),
+        (0, 0, 640, 480)
+    );
+    assert_eq!(
+        bits(client.effective_roi().bounds()),
+        bits([0.0, 0.0, 1.0, 1.0])
+    );
+    assert_eq!(source_box_bits(resolved.result()), bits(full_box));
+}
+
+#[tokio::test]
+async fn cropped_model_boxes_normalize_to_the_original_source_image() {
+    use a2a_lab_dev_kit::{
+        ImageDecisionImageRef, ImageDecisionModelAnswer, ImageDecisionRequest, ImageDecisionRoi,
+        ImageDecisionUnmappedAnswer, ImageId,
+    };
+    let service = registered_decision_service("image-decision-crop", true).await;
+    let client = service.image_decision_client().expect("cropped client");
+    let model_box = [0.0, 0.0, 0.5, 1.0];
+    let resolved = service
+        .resolve_generic_image_decision(
+            ImageDecisionImageRef::by_id(ImageId::new("frame").unwrap()),
+            "Is the tip attached?",
+            client.model_input().unwrap(),
+            &[ImageDecisionUnmappedAnswer::new(Some("yes"), Some(0.91), Some(model_box)).unwrap()],
+        )
+        .await
+        .unwrap();
+    let request = ImageDecisionRequest::new(
+        deck_image(),
+        "Is the tip attached?",
+        client.model_input().unwrap(),
+    )
+    .unwrap();
+    let completed = client
+        .complete(
+            &request,
+            &[ImageDecisionModelAnswer::new(
+                Some("yes"),
+                Some(0.91),
+                Some(ImageDecisionRoi::new(model_box).unwrap()),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+    assert!(!resolved.omits_roi());
+    assert_eq!(
+        (
+            resolved.model_crop().x(),
+            resolved.model_crop().y(),
+            resolved.model_crop().width(),
+            resolved.model_crop().height()
+        ),
+        (160, 120, 320, 240)
+    );
+    assert_eq!(
+        source_box_bits(resolved.result()),
+        bits([0.25, 0.25, 0.5, 0.75])
+    );
+    assert_eq!(
+        source_box_bits(&completed),
+        source_box_bits(resolved.result())
+    );
+}
+
+#[tokio::test]
+async fn generic_registration_preserves_typed_worker_and_devkit_operation() {
+    use a2a_lab_dev_kit::{
+        A2aLabCommand, A2aLabService, ImageDecisionModelInput, ImageDecisionRequest, MemoryLogs,
+        MemoryMetrics, MemoryTasks, operation_name,
+    };
+    let document = document_with_image_decision(&semantic_document(None), false);
+    let inputs = config_inputs("image-decision-worker", &document);
+    let resolved = resolve_lab_config(&inputs).unwrap();
+    let semantic = resolve_semantic_indexing(&inputs, &resolved.video)
+        .unwrap()
+        .expect("semantic");
+    let injections = deterministic_semantic_injections(&semantic);
+    let catalog = open_resolved_video_catalog_with_semantic(
+        &resolved.video,
+        semantic_video_injections(),
+        Some(&inputs),
+        Some(injections),
+    )
+    .await
+    .unwrap()
+    .expect("catalog");
+    assert!(catalog.semantic_bundle().decision_worker.is_none());
+    assert_eq!(
+        catalog.semantic_bundle().decision_unavailable,
+        Some((
+            a2a_lab_dev_kit::DecisionEvaluationCoverage::NotEvaluated,
+            "jev_live_disabled",
+        ))
+    );
+    let service = attach_configured_image_decision(
+        A2aLabService::new(
+            MemoryLogs::default(),
+            MemoryMetrics::default(),
+            MemoryTasks::default(),
+        ),
+        &inputs,
+    )
+    .unwrap();
+    assert!(service.image_decision_client().is_some());
+    assert!(catalog.semantic_bundle().decision_worker.is_none());
+    let request = ImageDecisionRequest::new(
+        deck_image(),
+        "Is the tip attached?",
+        ImageDecisionModelInput::new("jev-1.14.0", None).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        operation_name(&A2aLabCommand::DecideImage(request.clone())),
+        "decide_image"
+    );
+    assert_eq!(
+        a2a_lab_dev_kit::IMAGE_DECISION_TRANSPORTS,
+        ["http", "mcp", "a2a"].as_slice()
+    );
+    let error = service
+        .execute(A2aLabCommand::DecideImage(request))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "unavailable");
+    assert!(
+        error
+            .to_string()
+            .contains("decision endpoint is unavailable")
+    );
+    assert!(catalog.semantic_bundle().decision_worker.is_none());
+    let binary = include_str!("../src/bin/a2a-lab-ot2.rs");
+    let declarative = include_str!("../src/videos/declarative_serve.rs");
+    assert!(binary.contains("attach_configured_image_decision"));
+    assert!(binary.contains("McpServer::new(&service)"));
+    assert!(binary.contains("A2aServer::new(&service)"));
+    assert!(!binary.contains("fn decide_image"));
+    assert!(!declarative.contains("image_decision"));
+    assert!(declarative.contains("maintain_decision_evaluation_jobs"));
 }

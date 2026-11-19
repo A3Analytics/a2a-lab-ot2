@@ -61,11 +61,11 @@ impl DecisionEvaluationWorkerBatchReport {
 pub type DeterministicDecisionEvaluationWorker =
     DecisionEvaluationWorker<FakeFrameDecisionEvaluator>;
 
-/// Routes decision batches through either the dev-kit fake or live `TypeSafe` evaluator.
+/// Routes decision batches through either the dev-kit fake or the live compatibility adapter.
 pub enum AnyDecisionEvaluationWorker {
     /// Deterministic `FakeFrameDecisionEvaluator` (default for CI and absent live mode).
     Deterministic(tokio::sync::Mutex<DeterministicDecisionEvaluationWorker>),
-    /// Live `TypeSafe` HTTP evaluator when opted in and credentialed.
+    /// Live devkit compatibility adapter when opted in and credentialed.
     Live(tokio::sync::Mutex<crate::videos::semantic_indexing::LiveDecisionEvaluationWorker>),
 }
 
@@ -97,7 +97,7 @@ pub struct DecisionEvaluationWorker<E: FrameDecisionEvaluator> {
 }
 
 impl DecisionEvaluationWorker<FakeFrameDecisionEvaluator> {
-    /// Wires a deterministic dev-kit Jev fake; no `TypeSafe` HTTP adapter.
+    /// Wires a deterministic dev-kit Jev fake; no live HTTP adapter.
     pub fn deterministic(
         config: &FrameDecisionEvaluatorProviderConfig,
         limits: FrameDecisionEvaluatorLimits,
