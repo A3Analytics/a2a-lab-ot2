@@ -3,6 +3,8 @@
 !entrypoint.sh
 !prepare_replay.py
 !replay_server.py
+!sample_pacing.py
+!sample-pacing.patch
 !replay.html
 !replay-alignment.json
 !replay-hardware.json
