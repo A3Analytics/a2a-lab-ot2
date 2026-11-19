@@ -12,6 +12,9 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -53,8 +56,12 @@ jobs:
           set -euo pipefail
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
           target='${{ matrix.target }}'
-          built="target/${target}/release/a2a-lab-ot2"
-          asset="a2a-lab-ot2-${version}-${target}"
+          suffix=""
+          if [ '${{ matrix.libc }}' = msvc ]; then
+            suffix=".exe"
+          fi
+          built="target/${target}/release/a2a-lab-ot2${suffix}"
+          asset="a2a-lab-ot2-${version}-${target}${suffix}"
           "$built" --help >/dev/null
           version_text="$("$built" --version)"
           printf '%s\n' "$version_text"
@@ -77,13 +84,13 @@ jobs:
                   ;;
               esac
               ;;
-            darwin)
-              link_text="$(otool -L "$built")"
-              printf '%s\n' "$link_text"
-              case "$link_text" in
-                *libSystem*) ;;
+            msvc)
+              signature="$(od -An -t x1 -N 2 "$built" | tr -d ' \n')"
+              printf '%s\n' "$signature"
+              case "$signature" in
+                4d5a) ;;
                 *)
-                  printf 'darwin binary is not linked to libSystem\n' >&2
+                  printf 'windows binary is not a PE executable\n' >&2
                   exit 1
                   ;;
               esac
