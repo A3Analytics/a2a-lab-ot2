@@ -95,6 +95,17 @@ jobs:
                   ;;
               esac
               ;;
+            darwin)
+              link_text="$(otool -L "$built")"
+              printf '%s\n' "$link_text"
+              case "$link_text" in
+                *libSystem*) ;;
+                *)
+                  printf 'darwin binary is not linked to libSystem\n' >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
           esac
           cp "$built" "$asset"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"

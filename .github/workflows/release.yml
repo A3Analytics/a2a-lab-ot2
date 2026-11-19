@@ -34,6 +34,15 @@ jobs:
           {"target":"x86_64-pc-windows-msvc","runner":"windows-2025","libc":"msvc"}
         ]
 
+  build-macos:
+    name: Build macOS binary
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      targets: >-
+        [
+          {"target":"aarch64-apple-darwin","runner":"macos-26","libc":"darwin"}
+        ]
+
   container-images:
     name: Publish Linux images (${{ matrix.arch }})
     needs: build-linux
@@ -103,7 +112,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
@@ -129,7 +138,7 @@ jobs:
           fi
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --notes "glibc Linux binaries and an x86-64 Windows binary for a2a-lab-ot2 ${GITHUB_REF_NAME#v}." \
+            --notes "glibc Linux binaries, an x86-64 Windows binary, and an Apple Silicon macOS binary for a2a-lab-ot2 ${GITHUB_REF_NAME#v}." \
             --verify-tag \
             a2a-lab-ot2-* \
             SHA256SUMS
