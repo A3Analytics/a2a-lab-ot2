@@ -14,6 +14,7 @@ from robot_server.app import app
 from robot_server.camera.fastapi_dependencies import get_camera_provider
 
 from prepare_replay import timestamp_us, utc
+from sample_pacing import SamplePacing, sample_pacing
 
 
 class Replay:
@@ -228,6 +229,19 @@ def register(archive):
         if collection not in ("runs", "protocols"):
             return await call_next(request)
         records = archive.runs if collection == "runs" else archive.protocols
+        sample = request.headers.get("X-OT2-Sample")
+        if request.method == "POST" and parts == ["runs"] and sample is not None:
+            scenario = archive.scenarios.get(sample)
+            if not scenario:
+                return JSONResponse({"errors": [{"detail": "Unknown sample run"}]}, status_code=422)
+            token = sample_pacing.set(SamplePacing(scenario["commands"]))
+            try:
+                response = await call_next(request)
+                if response.status_code == 201:
+                    response.headers["X-OT2-Sample"] = sample
+                return response
+            finally:
+                sample_pacing.reset(token)
         if request.method == "GET" and len(parts) == 1:
             response = await call_next(request)
             if response.status_code != 200:

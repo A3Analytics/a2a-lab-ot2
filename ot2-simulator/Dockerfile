@@ -54,6 +54,9 @@ RUN apt-get update \
 
 COPY entrypoint.sh /entrypoint.sh
 COPY prepare_replay.py replay-alignment.json replay_server.py replay.html replay-hardware.json ./
+COPY sample_pacing.py ./
+COPY sample-pacing.patch /tmp/sample-pacing.patch
+RUN git -C /opt/opentrons apply /tmp/sample-pacing.patch && rm /tmp/sample-pacing.patch
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 31950

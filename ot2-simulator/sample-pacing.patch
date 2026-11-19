@@ -1,0 +1,32 @@
+diff --git a/api/src/opentrons/protocol_engine/execution/command_executor.py b/api/src/opentrons/protocol_engine/execution/command_executor.py
+--- a/api/src/opentrons/protocol_engine/execution/command_executor.py
++++ b/api/src/opentrons/protocol_engine/execution/command_executor.py
+@@ -4,6 +4,8 @@
+ from logging import getLogger
+ from typing import List, Optional, Protocol
+ 
++from sample_pacing import sample_pacing, wait_until
++
+ from opentrons_shared_data.data_files import MimeType
+ from opentrons_shared_data.errors.exceptions import (
+     EnumeratedError,
+@@ -138,6 +140,11 @@
+             task_handler=self._task_handler,
+         )
+ 
++        pacing = sample_pacing.get()
++        deadline = (
++            await pacing.before_command(queued_command.commandType) if pacing else None
++        )
++
+         started_at = self._model_utils.get_timestamp()
+ 
+         self._action_dispatcher.dispatch(
+@@ -154,6 +161,7 @@
+             result = await command_impl.execute(
+                 running_command.params  # type: ignore[arg-type]
+             )
++            await wait_until(deadline)
+ 
+         except (Exception, asyncio.CancelledError) as error:
+             # The command encountered an undefined error.
