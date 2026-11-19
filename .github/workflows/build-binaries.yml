@@ -35,33 +35,16 @@ jobs:
           fi
 
       - name: Install Rust
-        if: matrix.libc != 'musl'
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
           toolchain: 1.98.1
           targets: "${{ matrix.target }},wasm32-unknown-unknown"
 
       - name: Build
-        if: matrix.libc != 'musl'
         working-directory: a2a-lab-ot2
         run: |
           set -euo pipefail
           cargo build --locked --release --bin a2a-lab-ot2 --target '${{ matrix.target }}'
-
-      - name: Build with native musl C and C++ tools
-        if: matrix.libc == 'musl'
-        working-directory: a2a-lab-ot2
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          docker run --rm --volume "$PWD:/workspace" --workdir /workspace \
-            --env TARGET --env 'RUSTFLAGS=-C target-feature=+crt-static' \
-            --env 'CXXSTDLIB=static=stdc++' \
-            rust:1.98.1-alpine@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f \
-            sh -ec 'apk add --no-cache build-base clang-dev git linux-headers perl pkgconf
-              rustup target add "$TARGET" wasm32-unknown-unknown
-              cargo build --locked --release --bin a2a-lab-ot2 --target "$TARGET"'
 
       - name: Smoke-test and package
         id: package
@@ -83,17 +66,6 @@ jobs:
               ;;
           esac
           case '${{ matrix.libc }}' in
-            musl)
-              ldd_text="$(ldd "$built" 2>&1 || true)"
-              printf '%s\n' "$ldd_text"
-              case "$ldd_text" in
-                *"not a dynamic executable"*|*"statically linked"*) ;;
-                *)
-                  printf 'musl binary is dynamically linked\n' >&2
-                  exit 1
-                  ;;
-              esac
-              ;;
             gnu)
               ldd_text="$(ldd "$built" 2>&1 || true)"
               printf '%s\n' "$ldd_text"

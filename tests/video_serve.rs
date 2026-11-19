@@ -8,7 +8,7 @@ use std::time::Duration;
 use a2a_lab_dev_kit::{
     A2aClient, A2aLabApi, A2aLabCommand, A2aLabResult, A2aLabService, DvrVideoProvider,
     FollowVideoRequest, GetVideoTimelineRequest, ListVideoSourcesRequest, McpLab, McpServer,
-    PageRequest, VideoProvider, VideoSourceId, bind_local,
+    PageRequest, VideoFollow, VideoProvider, VideoSourceId, bind_local,
 };
 use a2a_lab_ot2::camera::{
     CAMERA_SOURCE_ID, EXTERNAL_CAMERA_HEIGHT, EXTERNAL_CAMERA_SOURCE_ID, EXTERNAL_CAMERA_WIDTH,
@@ -198,7 +198,7 @@ async fn serve_stack_lists_the_same_sources_on_a2a_and_mcp() {
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
     let client = A2aClient::new(&format!("http://{a2a_addr}")).unwrap();
-    wait_for_live(&client, EXTERNAL_CAMERA_SOURCE_ID).await;
+    let _ = wait_for_live(&client, EXTERNAL_CAMERA_SOURCE_ID).await;
     let a2a_page = client
         .list_video_sources(ListVideoSourcesRequest::new(page()).unwrap())
         .await
@@ -260,20 +260,19 @@ async fn live_gateway_uses_the_in_process_service_not_a_loopback_client() {
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
     let client = A2aClient::new(&format!("http://{a2a_addr}")).unwrap();
-    wait_for_live(&client, EXTERNAL_CAMERA_SOURCE_ID).await;
-    let follow = client
-        .follow_video(FollowVideoRequest::new(
-            VideoSourceId::new(EXTERNAL_CAMERA_SOURCE_ID).unwrap(),
-        ))
-        .await
-        .unwrap();
+    let follow = wait_for_live(&client, EXTERNAL_CAMERA_SOURCE_ID).await;
     assert!(follow.path().starts_with("/media/video-live/"));
     let http = reqwest::Client::new();
-    let response = http
-        .get(format!("http://{a2a_addr}{}", follow.path()))
-        .send()
-        .await
-        .unwrap();
+    let url = format!("http://{a2a_addr}{}", follow.path());
+    let mut response = http.get(&url).send().await.unwrap();
+    for _ in 0..80 {
+        if response.status().is_success() {
+            break;
+        }
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        response = http.get(&url).send().await.unwrap();
+    }
     assert!(response.status().is_success(), "{}", response.status());
     videos.shutdown();
 }
@@ -310,15 +309,14 @@ async fn one_live_pump_failure_does_not_remove_the_other_source() {
     videos.shutdown();
 }
 
-async fn wait_for_live(client: &A2aClient, source_id: &str) {
+async fn wait_for_live(client: &A2aClient, source_id: &str) -> VideoFollow {
     let source = VideoSourceId::new(source_id).unwrap();
     for _ in 0..400 {
-        if client
+        if let Ok(follow) = client
             .follow_video(FollowVideoRequest::new(source.clone()))
             .await
-            .is_ok()
         {
-            return;
+            return follow;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
