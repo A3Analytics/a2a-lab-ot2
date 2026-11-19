@@ -39,9 +39,9 @@ fi
 
 if command -v systemd-cat >/dev/null 2>&1; then
   exec systemd-cat -t uvicorn --stderr-priority=err \
-    uv run --frozen --python /usr/local/bin/python3 \
+    uv run --frozen --no-sync --python /usr/local/bin/python3 \
     uvicorn "$application" --host 0.0.0.0 --port 31950 --ws wsproto
 fi
 
-exec uv run --frozen --python /usr/local/bin/python3 \
+exec uv run --frozen --no-sync --python /usr/local/bin/python3 \
   uvicorn "$application" --host 0.0.0.0 --port 31950 --ws wsproto
