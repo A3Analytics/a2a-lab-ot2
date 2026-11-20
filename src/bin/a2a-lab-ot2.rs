@@ -11,7 +11,7 @@ use a2a_lab_dev_kit::sila::SilaServerHandle;
 use a2a_lab_dev_kit::{
     A2aClient, A2aLabApi, A2aLabError, A2aLabService, A2aServer, AgentMessageHandler,
     DEFAULT_MAX_IMAGE_BYTES, DEFAULT_MCP_URL, GetCurrentImageRequest, GetImageRequest,
-    GetTaskStatusRequest, ImageId, ImageProvider, ImageSourceId, JsonObject,
+    GetTaskStatusRequest, ImageId, ImageProvider, ImageSourceId, JsonObject, LabConfigStore,
     ListImageSourcesRequest, ListLogSourcesRequest, ListMetricsRequest, ListTasksRequest, LogLevel,
     LogProvider, LogRecord, McpLab, McpServer, MetricId, MetricProvider, PageRequest,
     QueryLogsRequest, QueryMetricRequest, RunId, SourceId, StartTaskRequest, TaskId, TaskProvider,
@@ -955,6 +955,11 @@ async fn serve(
     let mut a2a = A2aServer::new(&service)
         .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>)
         .with_web_ui();
+    if let Some(path) = selected_config_path(config_inputs)? {
+        let config_store =
+            LabConfigStore::open(path).map_err(|error| startup_error("config store", error))?;
+        a2a = a2a.with_lab_config_store(config_store);
+    }
     if let Some(videos) = videos.as_ref() {
         a2a = a2a.with_capture_settings(videos.settings_handle());
     }
