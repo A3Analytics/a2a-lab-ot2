@@ -52,7 +52,7 @@ dependencies = [
 [[package]]
 name = "a2a-lab-dev-kit"
 version = "0.1.0"
-source = "git+https://github.com/A3Analytics/a2a-lab-dev-kit-rs?rev=dd8055d7a6a6775f2ecb11c37af63521117132b6#dd8055d7a6a6775f2ecb11c37af63521117132b6"
+source = "git+https://github.com/A3Analytics/a2a-lab-dev-kit-rs?rev=cc46b6dc112b7455c761ad1abeb24f280d8e4f9e#cc46b6dc112b7455c761ad1abeb24f280d8e4f9e"
 dependencies = [
  "a2a-client-lf",
  "a2a-grpc",
@@ -109,6 +109,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-bedrockagentcore",
  "aws-sdk-bedrockruntime",
  "axum",
  "base64 0.22.1",
@@ -504,6 +505,32 @@ dependencies = [
  "pin-project-lite",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "aws-sdk-bedrockagentcore"
+version = "1.77.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fc85ed6429b75b744d46d72a6d5b3e6dec2464395f152ef1302c5178453b9b4"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]
@@ -5351,7 +5378,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",

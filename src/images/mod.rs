@@ -1,9 +1,12 @@
 //! Live image catalog over injectable capture backends.
 
+mod agentcore;
 mod catalog;
 mod history;
 mod jpeg;
 mod serve;
+
+pub use agentcore::{AgentCoreImageDecisionExecutor, AgentCoreInvoker, SdkAgentCoreInvoker};
 
 pub(crate) use jpeg::jpeg_dimensions;
 

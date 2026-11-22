@@ -50,10 +50,13 @@ struct Cli {
         default_value = "http://127.0.0.1:31950"
     )]
     opentrons_url: String,
+    /// Local path to the robot-server protocol store, with one folder per protocol ID.
+    #[arg(long, env = "A2ALAB_OPENTRONS_PROTOCOLS_DIR")]
+    opentrons_protocols_dir: Option<PathBuf>,
     /// Optional HTTP archive root providing recorded video sources.
     #[arg(long, env = "A2ALAB_VIDEO_ARCHIVE_URL")]
     video_archive_url: Option<String>,
-    /// Advertise and execute only GET-backed tasks
+    /// Advertise and execute only read tasks
     #[arg(long, global = true)]
     readonly: bool,
     /// A2A origin used by `agent-message`
@@ -583,7 +586,11 @@ async fn agent_message(
 }
 
 fn connect(cli: &Cli) -> Result<OpentronsLab, Box<dyn std::error::Error>> {
-    Ok(OpentronsLab::new(&cli.opentrons_url)?.with_readonly(cli.readonly))
+    let mut lab = OpentronsLab::new(&cli.opentrons_url)?.with_readonly(cli.readonly);
+    if let Some(directory) = &cli.opentrons_protocols_dir {
+        lab = lab.with_protocol_source_directory(directory.clone());
+    }
+    Ok(lab)
 }
 
 fn lab_config_cli_values(cli: &Cli) -> LabConfigCliValues {
@@ -898,6 +905,7 @@ async fn serve(
         .with_images(catalog)
         .with_image_transport(images.transport());
     let service = attach_configured_image_decision(service, config_inputs)
+        .await
         .map_err(|error| startup_error("image decision", error))?;
     let service = if let Some(provider) = recordings {
         if videos.is_some() {

@@ -28,7 +28,7 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [dependencies]
-a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", rev = "dd8055d7a6a6775f2ecb11c37af63521117132b6", default-features = false, features = [
+a2a-lab-dev-kit = { git = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs", rev = "cc46b6dc112b7455c761ad1abeb24f280d8e4f9e", default-features = false, features = [
     "sila2",
     "web-ui",
     "yuv",
@@ -46,6 +46,10 @@ aws-config = { version = "1", default-features = false, features = [
 ] }
 aws-credential-types = { version = "1", default-features = false }
 aws-sdk-bedrockruntime = { version = "1", default-features = false, features = [
+    "rt-tokio",
+    "default-https-client",
+] }
+aws-sdk-bedrockagentcore = { version = "1", default-features = false, features = [
     "rt-tokio",
     "default-https-client",
 ] }

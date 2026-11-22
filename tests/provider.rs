@@ -33,6 +33,90 @@ async fn readonly_lab() -> (OpentronsLab, Mock) {
 }
 
 #[tokio::test]
+async fn protocol_python_is_opt_in_and_preserves_uploaded_bytes() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde_json::json;
+
+    let task = "get_protocol_python";
+    let protocol_id = "176029c0-d78c-47d9-b7bf-2e860a6e8503";
+    let request = |id| {
+        StartTaskRequest::new(
+            TaskId::new(task).unwrap(),
+            JsonObject::try_from_value(json!({"protocolId": id})).unwrap(),
+        )
+    };
+    let (lab, _) = readonly_lab().await;
+    let tasks = lab
+        .list_tasks(ListTasksRequest { page: page() })
+        .await
+        .unwrap();
+    assert!(!tasks.items().iter().any(|item| item.id.as_str() == task));
+    assert!(lab.start(request(protocol_id)).await.is_err());
+
+    let root = std::env::temp_dir().join(format!(
+        "a2a-lab-ot2-protocol-source-{}-{}",
+        std::process::id(),
+        jiff::Timestamp::now().as_nanosecond()
+    ));
+    let folder = root.join(protocol_id);
+    let filename = "Protocol version (2).py";
+    let python = b"# coding: latin-1\r\n# \xe9\r\n";
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join(filename), python).unwrap();
+    std::fs::write(folder.join("labware.json"), b"{}").unwrap();
+
+    let lab = lab.with_protocol_source_directory(root.clone());
+    let tasks = lab
+        .list_tasks(ListTasksRequest { page: page() })
+        .await
+        .unwrap();
+    assert!(tasks.items().iter().any(|item| item.id.as_str() == task));
+    let run = lab.start(request(protocol_id)).await.unwrap();
+    assert_eq!(run.state, TaskState::Completed);
+    let result = run.result.unwrap();
+    assert_eq!(result.as_map()["filename"], filename);
+    assert_eq!(
+        STANDARD
+            .decode(result.as_map()["data"].as_str().unwrap())
+            .unwrap(),
+        python
+    );
+    assert!(lab.start(request("../other-protocol")).await.is_err());
+
+    let at_limit = vec![b'#'; 5 * 1024 * 1024];
+    let source_path = folder.join(filename);
+    std::fs::write(&source_path, &at_limit).unwrap();
+    let run = lab.start(request(protocol_id)).await.unwrap();
+    let result = run.result.unwrap();
+    assert_eq!(
+        STANDARD
+            .decode(result.as_map()["data"].as_str().unwrap())
+            .unwrap(),
+        at_limit
+    );
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source_path)
+        .unwrap()
+        .set_len(u64::try_from(at_limit.len()).unwrap() + 1)
+        .unwrap();
+    let error = lab.start(request(protocol_id)).await.unwrap_err();
+    assert!(error.to_string().contains("Python source exceeds 5 MiB"));
+
+    #[cfg(unix)]
+    {
+        let alias_id = "176029c0-d78c-47d9-b7bf-2e860a6e8504";
+        std::os::unix::fs::symlink(&folder, root.join(alias_id)).unwrap();
+        assert!(lab.start(request(alias_id)).await.is_err());
+
+        std::fs::remove_file(folder.join(filename)).unwrap();
+        std::os::unix::fs::symlink(folder.join("labware.json"), folder.join(filename)).unwrap();
+        assert!(lab.start(request(protocol_id)).await.is_err());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn lists_tasks_sources_and_metrics() {
     let (lab, _) = lab().await;
     let tasks = lab

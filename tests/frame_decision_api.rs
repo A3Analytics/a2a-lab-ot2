@@ -238,8 +238,8 @@ async fn service_wires_capabilities_append_and_bounded_history() {
 #[tokio::test]
 async fn generic_image_decision_does_not_write_typed_ledger_or_jobs() {
     use a2a_lab_dev_kit::{
-        A2aLabCommand, ImageDecisionImageRef, ImageDecisionModelInput, ImageDecisionRequest,
-        ImageDecisionUnmappedAnswer, ImageId,
+        A2aLabCommand, ImageDecisionImageRef, ImageDecisionModelInput, ImageDecisionQuestions,
+        ImageDecisionUnmappedAnswer, ImageId, ImageSourceId, SourceImageDecisionRequest,
     };
     use a2a_lab_ot2::{
         ExplicitSetting, LabConfigInputs, attach_configured_image_decision,
@@ -268,7 +268,9 @@ async fn generic_image_decision_does_not_write_typed_ledger_or_jobs() {
     let saved = frame(b"generic", "2024-06-01T12:00:00Z");
     register_saved(&store, &saved, b"generic").await;
     let ledger = DvrFrameDecisionLedger::pilot_authorized_producer(store.clone()).unwrap();
-    let lab = attach_configured_image_decision(ledger_service(ledger), &inputs).unwrap();
+    let lab = attach_configured_image_decision(ledger_service(ledger), &inputs)
+        .await
+        .unwrap();
     assert!(lab.image_decision_client().unwrap().omits_roi());
 
     let resolved = lab
@@ -283,24 +285,14 @@ async fn generic_image_decision_does_not_write_typed_ledger_or_jobs() {
     assert_eq!(resolved.code(), "unavailable");
     assert_eq!(resolved.to_string(), "image provider is not configured");
 
-    let request = ImageDecisionRequest::new(
-        a2a_lab_dev_kit::Image::new(
-            a2a_lab_dev_kit::ImageDescriptor::new(
-                ImageId::new("frame").unwrap(),
-                a2a_lab_dev_kit::ImageSourceId::new("cam").unwrap(),
-                UtcTimestamp::parse("2024-01-01T00:00:00Z").unwrap(),
-                "image/png",
-                64,
-                48,
-                None,
-                a2a_lab_dev_kit::JsonObject::empty(),
-            )
-            .unwrap(),
-            vec![1, 2, 3, 4],
-        )
-        .unwrap(),
-        "Is the tip attached?",
-        ImageDecisionModelInput::new("jev-1.14.0", None).unwrap(),
+    let questions = serde_json::from_value::<ImageDecisionQuestions>(serde_json::json!({
+        "tip_attached": {"type": "noul", "instructions": "Is the tip attached?"}
+    }))
+    .unwrap();
+    let request = SourceImageDecisionRequest::new(
+        ImageSourceId::new("cam").unwrap(),
+        UtcTimestamp::parse("2024-01-01T00:00:00Z").unwrap(),
+        questions,
     )
     .unwrap();
     let error = lab

@@ -315,7 +315,7 @@ pub async fn open_resolved_video_catalog_with_semantic(
 /// Registers the devkit generic image-decision client when configuration enables it.
 ///
 /// The typed frame-decision ledger and evaluation worker are not changed.
-pub fn attach_configured_image_decision<L, M, W, I, V>(
+pub async fn attach_configured_image_decision<L, M, W, I, V>(
     service: A2aLabService<L, M, W, I, V>,
     inputs: &LabConfigInputs,
 ) -> Result<A2aLabService<L, M, W, I, V>, A2aLabError>
@@ -329,7 +329,22 @@ where
     let Some(client) = crate::lab_config::resolve_image_decision_client(inputs)? else {
         return Ok(service);
     };
-    Ok(service.with_image_decision_client(client))
+    let Some(settings) = client.config().agentcore().cloned() else {
+        return Ok(service.with_image_decision_client(client));
+    };
+    let executor = crate::images::AgentCoreImageDecisionExecutor::<
+        crate::images::SdkAgentCoreInvoker,
+    >::connect(
+        &settings,
+        client.config().timeout(),
+        client.config().max_image_bytes(),
+        client.config().max_request_bytes(),
+        client.config().max_response_bytes(),
+    )
+    .await?;
+    Ok(service
+        .with_image_decision_client(client)
+        .with_image_decision_executor(std::sync::Arc::new(executor)))
 }
 
 /// Resolved semantic settings for serve when a configuration file is selected.

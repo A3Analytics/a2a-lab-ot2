@@ -584,6 +584,7 @@ async fn registered_decision_service(
         .with_images(image_catalog().await),
         &inputs,
     )
+    .await
     .unwrap()
 }
 
@@ -683,8 +684,8 @@ async fn cropped_model_boxes_normalize_to_the_original_source_image() {
 #[tokio::test]
 async fn generic_registration_preserves_typed_worker_and_devkit_operation() {
     use a2a_lab_dev_kit::{
-        A2aLabCommand, A2aLabService, ImageDecisionModelInput, ImageDecisionRequest, MemoryLogs,
-        MemoryMetrics, MemoryTasks, operation_name,
+        A2aLabCommand, A2aLabService, ImageDecisionQuestions, ImageSourceId, MemoryLogs,
+        MemoryMetrics, MemoryTasks, SourceImageDecisionRequest, UtcTimestamp, operation_name,
     };
     let document = document_with_image_decision(&semantic_document(None), false);
     let inputs = config_inputs("image-decision-worker", &document);
@@ -718,13 +719,19 @@ async fn generic_registration_preserves_typed_worker_and_devkit_operation() {
         ),
         &inputs,
     )
-    .unwrap();
+    .await
+    .unwrap()
+    .with_images(image_catalog().await);
     assert!(service.image_decision_client().is_some());
     assert!(catalog.semantic_bundle().decision_worker.is_none());
-    let request = ImageDecisionRequest::new(
-        deck_image(),
-        "Is the tip attached?",
-        ImageDecisionModelInput::new("jev-1.14.0", None).unwrap(),
+    let questions = serde_json::from_value::<ImageDecisionQuestions>(serde_json::json!({
+        "tip_attached": {"type": "noul", "instructions": "Is the tip attached?"}
+    }))
+    .unwrap();
+    let request = SourceImageDecisionRequest::new(
+        ImageSourceId::new("cam").unwrap(),
+        UtcTimestamp::parse("2024-01-01T00:00:00Z").unwrap(),
+        questions,
     )
     .unwrap();
     assert_eq!(

@@ -21,6 +21,7 @@ use crate::videos::archived::ArchivedVideos;
 use super::client::OpentronsClient;
 use super::inventory::{self, Entry, Kind};
 use super::model::{Command, Run};
+use super::protocol_source::{self, PROTOCOL_PYTHON_TASK};
 
 const PAUSE_TASK: &str = "pause_run";
 const RESUME_TASK: &str = "resume_run";
@@ -39,6 +40,7 @@ pub struct OpentronsLab {
     readonly: bool,
     frame_sets: Option<Arc<FrameSetApi>>,
     recordings: Option<ArchivedVideos>,
+    protocol_source_directory: Option<PathBuf>,
 }
 
 impl OpentronsLab {
@@ -50,6 +52,7 @@ impl OpentronsLab {
             readonly: false,
             frame_sets: None,
             recordings: None,
+            protocol_source_directory: None,
         })
     }
 
@@ -66,10 +69,17 @@ impl OpentronsLab {
         self
     }
 
-    /// Advertises and starts only GET-backed tasks.
+    /// Advertises and starts only read tasks.
     #[must_use]
     pub fn with_readonly(mut self, readonly: bool) -> Self {
         self.readonly = readonly;
+        self
+    }
+
+    /// Enables source downloads from the local robot-server protocol store.
+    #[must_use]
+    pub fn with_protocol_source_directory(mut self, directory: PathBuf) -> Self {
+        self.protocol_source_directory = Some(directory);
         self
     }
 
@@ -97,8 +107,11 @@ impl TaskProvider for OpentronsLab {
         let mut items = task_definitions(self.readonly);
         if self.frame_sets.is_some() {
             items.extend(frame_set_service::task_definitions());
-            items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
         }
+        if self.protocol_source_directory.is_some() {
+            items.push(protocol_source::task_definition());
+        }
+        items.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
         slice_page(&items, &request.page)
     }
 
@@ -128,6 +141,7 @@ impl TaskProvider for OpentronsLab {
                 .await
             }
             COMMAND_TASK => execute_command(self, request.input).await,
+            PROTOCOL_PYTHON_TASK => self.get_protocol_python(request).await,
             id => match inventory::task_entry(id) {
                 Some(entry) => http_task(self, entry, request).await,
                 None => Err(A2aLabError::not_found("task", request.task_id.to_string())),
@@ -200,8 +214,33 @@ fn task_definitions(readonly: bool) -> Vec<TaskDefinition> {
 }
 
 fn allowed_in_readonly(task_id: &str) -> bool {
-    frame_set_service::is_frame_set_task(task_id)
+    task_id == PROTOCOL_PYTHON_TASK
+        || frame_set_service::is_frame_set_task(task_id)
         || inventory::task_entry(task_id).is_some_and(inventory::is_read)
+}
+
+impl OpentronsLab {
+    async fn get_protocol_python(&self, request: StartTaskRequest) -> Result<TaskRun, A2aLabError> {
+        let directory = self
+            .protocol_source_directory
+            .clone()
+            .ok_or_else(|| A2aLabError::not_found("task", PROTOCOL_PYTHON_TASK))?;
+        let protocol_id = string_field(request.input.as_map(), "protocolId")?.to_owned();
+        let result =
+            tokio::task::spawn_blocking(move || protocol_source::read(&directory, &protocol_id))
+                .await
+                .map_err(|_| A2aLabError::unavailable("protocol source read failed"))??;
+        let mut local = self.local.lock().await;
+        let run = completed_run(
+            &format!("{PROTOCOL_PYTHON_TASK}-{}", local.len() + 1),
+            request.task_id,
+            request.input,
+            None,
+            Some(result),
+        )?;
+        local.insert(run.id.as_str().to_owned(), run.clone());
+        Ok(run)
+    }
 }
 
 async fn frame_set_task(

@@ -83,6 +83,9 @@ pub fn resolve_image_decision_client(
 fn ensure_image_decision_client_available(
     client: &ResolvedImageDecisionClient,
 ) -> Result<(), A2aLabError> {
+    if client.config().agentcore().is_some() {
+        return Ok(());
+    }
     if let Some(name) = client.config().credentials_env() {
         let configured = std::env::var(name).is_ok_and(|value| !value.trim().is_empty());
         if !configured {

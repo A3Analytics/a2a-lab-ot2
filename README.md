@@ -198,6 +198,17 @@ mise run a2a-lab-ot2 -- --external-camera-index 4 get-current-image --source ext
 
 Point `A2ALAB_OPENTRONS_URL` at a robot-server that speaks the `v10.0.0` API.
 
+To enable `get_protocol_python`, set `A2ALAB_OPENTRONS_PROTOCOLS_DIR` (or
+`--opentrons-protocols-dir`) to the robot-server protocol store for that robot.
+The agent must be able to read it locally, such as through a read-only mount
+when the agent and robot-server run separately. The store contains one
+subdirectory per protocol ID.
+
+Call `start_task` with task ID `get_protocol_python` and input
+`{"protocolId":"<UUID from get_protocols>"}`. The result contains the original
+`filename` and standard base64 `data` for Python sources up to 5 MiB. The task
+is available in read-only mode and is hidden unless the store is configured.
+
 ```bash
 A2ALAB_OPENTRONS_URL=http://<robot-host>:31950 mise run ot2-simulator-health
 A2ALAB_OPENTRONS_URL=http://<robot-host>:31950 mise run a2a-lab-ot2 -- list-tasks

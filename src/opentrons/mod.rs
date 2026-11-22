@@ -4,6 +4,7 @@ mod camera;
 mod client;
 mod inventory;
 mod model;
+mod protocol_source;
 mod provider;
 mod stream;
 
