@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: a2a-lab-compliance-${{ github.ref }}
@@ -24,6 +25,11 @@ jobs:
         with:
           toolchain: 1.98.1
           targets: wasm32-unknown-unknown
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: ". -> target"
+          key: ${{ runner.os }}-${{ runner.arch }}
       - name: Build agent image
         run: |
           set -euo pipefail
@@ -52,6 +58,12 @@ jobs:
         with:
           toolchain: 1.98.1
           targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: ". -> target"
+          key: ${{ runner.os }}-${{ runner.arch }}
 
       - name: Build deterministic fixture
         run: cargo build --locked --bin a2a-lab-ot2
