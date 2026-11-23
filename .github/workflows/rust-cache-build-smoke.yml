@@ -1,0 +1,55 @@
+name: Rust cache build smoke
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  debug-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: 1.98.1
+          targets: wasm32-unknown-unknown
+      - name: Cache Rust build
+        id: cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: ". -> target"
+          key: ${{ runner.os }}-${{ runner.arch }}
+      - name: Build agent
+        run: cargo build --locked --bin a2a-lab-ot2
+      - name: Report cache result
+        run: echo "cache-hit=${{ steps.cache.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Require a cache hit when rerun
+        if: github.run_attempt > 1
+        run: test "${{ steps.cache.outputs.cache-hit }}" = "true"
+
+  release-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-unknown-linux-gnu,wasm32-unknown-unknown
+      - name: Cache Rust build
+        id: cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: ". -> target"
+          key: x86_64-unknown-linux-gnu
+      - name: Build release agent
+        run: cargo build --locked --release --bin a2a-lab-ot2 --target x86_64-unknown-linux-gnu
+      - name: Report cache result
+        run: echo "cache-hit=${{ steps.cache.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Require a cache hit when rerun
+        if: github.run_attempt > 1
+        run: test "${{ steps.cache.outputs.cache-hit }}" = "true"
