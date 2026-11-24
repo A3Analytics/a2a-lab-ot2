@@ -20,6 +20,12 @@ Do not run `cargo`, `uv`, `make`, or `curl` from README/CI instructions. Use `mi
 
 Simulator pin: Opentrons git tag `v10.0.0` only. Never `edge`, `latest`, or a branch. The simulator runs as a Linux Docker image so robot-server has `journalctl` / journald.
 
+### Devkit dependency
+
+- Pin `a2a-lab-dev-kit` to a Git commit available from its upstream repository. Never leave a sibling-checkout `path` dependency or `[patch]` override in the checked-in Cargo configuration.
+- Keep temporary sibling overrides in local, untracked Cargo configuration. Disable the override before final verification and make sure `Cargo.lock` records the pinned Git source.
+- After changing the devkit pin, verify with `mise exec -- cargo metadata --locked --format-version 1` without local overrides. CI builds from a standalone OT2 checkout.
+
 ### Rust build targets and cache
 
 - Reuse existing Cargo targets. Add integration test cases to an existing test file or to a module it imports from a subdirectory of `tests/`. Cargo auto-discovers top-level Rust test files as separate executables. Add a new Cargo target only when the user explicitly requests one.
