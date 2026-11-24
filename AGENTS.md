@@ -20,6 +20,14 @@ Do not run `cargo`, `uv`, `make`, or `curl` from README/CI instructions. Use `mi
 
 Simulator pin: Opentrons git tag `v10.0.0` only. Never `edge`, `latest`, or a branch. The simulator runs as a Linux Docker image so robot-server has `journalctl` / journald.
 
+### Rust build targets and cache
+
+- Reuse existing Cargo targets. Add integration test cases to an existing test file or to a module it imports from a subdirectory of `tests/`. Cargo auto-discovers top-level Rust test files as separate executables. Add a new Cargo target only when the user explicitly requests one.
+- Use the existing `mise` tasks and their configured target directories. Native check, Clippy, and test tasks share `target/quality`. Keep the existing Docker and cross-compilation outputs separate. Avoid extra target directories or ad hoc changes to features, profiles, toolchains, and `RUSTFLAGS`.
+- For focused Rust tests, run `mise run test -- --test <target> -E '<filter>'`. Run the full quality gate for final verification.
+- Before a cold full build or after unexpected cache growth, check `du -sh target` and `df -h .`. If `target` exceeds 50 GB or free space drops below 50 GB, diagnose the growth before another full build.
+- When cleaning, make sure builds and tests are idle. Preview scoped cleanup with `mise exec -- cargo clean --dry-run --profile dev --target-dir target/quality`. Preserve deployment binaries, simulator data, and reports.
+
 ## Cursor skills
 
 Repo-specific agent skills live in `.cursor/skills/`:
