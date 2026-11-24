@@ -1,9 +1,8 @@
 //! Live typed evaluator that loads full-frame stills and evaluates them through
 //! the devkit [`TypedLabPredicateJevAdapter`].
 //!
-//! The adapter is the only production HTTP path. It posts the generic image
-//! decision contract with [`ImageDecisionHttpClient`]. Omitted model ROI is the
-//! full source image. Answer boxes come back in original source coordinates.
+//! The adapter is the only production HTTP path. It posts named questions through
+//! [`TypeSafeSystemOneClient`]. Omitted model ROI is the full source image.
 //! This module does not append a typed ledger record and does not call Luna or
 //! chat.
 
@@ -13,13 +12,12 @@ use std::sync::Arc;
 use a2a_lab_dev_kit::{
     CredentialReference, FrameDecisionEvaluationFailure, FrameDecisionEvaluationRequest,
     FrameDecisionEvaluator, FrameDecisionEvaluatorLimits, FrameDecisionEvaluatorProviderConfig,
-    FrameRoiTransform, Image, ImageDecisionHttpClient, ImageDescriptor, ImageId, ImageSourceId,
-    ImageTransportConfig, JsonObject, KeyedFrameDecisionEvaluation, SavedFrameId,
+    FrameRoiTransform, Image, ImageDescriptor, ImageId, ImageSourceId, ImageTransportConfig,
+    JsonObject, KeyedFrameDecisionEvaluation, SavedFrameId, TypeSafeSystemOneClient,
     TypedLabPredicateJevAdapter,
 };
 
 use super::media::JevDecisionMedia;
-use crate::videos::semantic_indexing::credentials::credential_env_configured;
 
 const DEFAULT_JEV_DECISION_URL: &str = "https://api.typesafe.ai/v1/systemone";
 
@@ -46,7 +44,7 @@ pub fn jev_api_base() -> String {
 pub struct TypeSafeJevFrameDecisionEvaluator<M: JevDecisionMedia> {
     config: FrameDecisionEvaluatorProviderConfig,
     limits: FrameDecisionEvaluatorLimits,
-    client: ImageDecisionHttpClient,
+    client: TypeSafeSystemOneClient,
     media: Arc<M>,
 }
 
@@ -63,12 +61,12 @@ impl<M: JevDecisionMedia + 'static> TypeSafeJevFrameDecisionEvaluator<M> {
                 message: "live Jev calls require A2ALAB_JEV_LIVE=1".to_owned(),
             });
         }
-        if credentials.is_none_or(|reference| !credential_env_configured(reference)) {
+        let Some(api_key) = configured_api_key(credentials) else {
             return Err(FrameDecisionEvaluationFailure::ProviderUnavailable {
                 message: "TypeSafe API credentials are not configured".to_owned(),
             });
-        }
-        let client = decision_client(jev_api_base(), limits)?;
+        };
+        let client = decision_client(jev_api_base(), &api_key, limits)?;
         Ok(Self::new(config, limits, media, client))
     }
 
@@ -79,7 +77,7 @@ impl<M: JevDecisionMedia + 'static> TypeSafeJevFrameDecisionEvaluator<M> {
         media: Arc<M>,
         endpoint: impl Into<String>,
     ) -> Result<Self, FrameDecisionEvaluationFailure> {
-        let client = decision_client(endpoint.into(), limits)?;
+        let client = decision_client(endpoint.into(), "test-key", limits)?;
         Ok(Self::new(config, limits, media, client))
     }
 
@@ -87,7 +85,7 @@ impl<M: JevDecisionMedia + 'static> TypeSafeJevFrameDecisionEvaluator<M> {
         config: FrameDecisionEvaluatorProviderConfig,
         limits: FrameDecisionEvaluatorLimits,
         media: Arc<M>,
-        client: ImageDecisionHttpClient,
+        client: TypeSafeSystemOneClient,
     ) -> Self {
         Self {
             config,
@@ -153,16 +151,33 @@ impl<M: JevDecisionMedia + Send + Sync + 'static> FrameDecisionEvaluator
     }
 }
 
+fn configured_api_key(credentials: Option<&CredentialReference>) -> Option<String> {
+    let referenced = credentials.and_then(|reference| nonempty_env(reference.env_var()));
+    referenced.or_else(|| nonempty_env("TYPESAFE_API_KEY"))
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().and_then(|value| {
+        let value = value.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_owned())
+        }
+    })
+}
+
 fn decision_client(
     endpoint: String,
+    api_key: &str,
     limits: FrameDecisionEvaluatorLimits,
-) -> Result<ImageDecisionHttpClient, FrameDecisionEvaluationFailure> {
+) -> Result<TypeSafeSystemOneClient, FrameDecisionEvaluationFailure> {
     let http_limits = TypedLabPredicateJevAdapter::http_limits(limits).map_err(|error| {
         FrameDecisionEvaluationFailure::ProviderUnavailable {
             message: error.to_string(),
         }
     })?;
-    ImageDecisionHttpClient::new(endpoint, http_limits).map_err(|error| {
+    TypeSafeSystemOneClient::new(endpoint, api_key, http_limits).map_err(|error| {
         FrameDecisionEvaluationFailure::ProviderUnavailable {
             message: error.to_string(),
         }

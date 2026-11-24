@@ -326,12 +326,17 @@ where
     I: ImageProvider,
     V: VideoProvider,
 {
-    let Some(client) = crate::lab_config::resolve_image_decision_client(inputs)? else {
+    let Some(path) = crate::lab_config::selected_config_path(inputs)? else {
         return Ok(service);
     };
-    let Some(settings) = client.config().agentcore().cloned() else {
-        return Ok(service.with_image_decision_client(client));
+    let loaded = a2a_lab_dev_kit::LoadedLabConfig::load(&path)?;
+    let Some(client_config) = loaded.config.image_decision.clone() else {
+        return Ok(service);
     };
+    let Some(settings) = client_config.agentcore().cloned() else {
+        return service.resolve_image_decision_from_loaded(&loaded);
+    };
+    let client = a2a_lab_dev_kit::ResolvedImageDecisionClient::from_config(client_config);
     let executor = crate::images::AgentCoreImageDecisionExecutor::<
         crate::images::SdkAgentCoreInvoker,
     >::connect(

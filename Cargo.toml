@@ -108,3 +108,6 @@ rsa = { version = "0.9.10", features = ["pem"] }
 [[bin]]
 name = "a2a-lab-ot2"
 path = "src/bin/a2a-lab-ot2.rs"
+
+[patch."https://github.com/A3Analytics/a2a-lab-dev-kit-rs"]
+a2a-lab-dev-kit = { path = "../a2a-lab-dev-kit-rs" }

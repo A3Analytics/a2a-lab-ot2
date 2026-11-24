@@ -139,6 +139,16 @@ Source `camera` is off unless `--camera-index` or `A2ALAB_CAMERA_INDEX` is set. 
 
 `A2ALAB_CONFIG` selects a JSON file. An explicit `--config` path wins. Setting neither keeps the flag and environment behavior above. Samples and the precedence, duration, migration, and container rules are in [A2A-LAB configuration file](<backlog/docs/technical/configuration/doc-6 - A2A-LAB-configuration-file.md>).
 
+The selected file is the base layer. The devkit then deep-merges the sibling `<stem>.secret.<ext>` beside it, and `TYPESAFE_API_KEY` replaces only `typesafe.api_key`. Later sources win. A missing sibling is skipped. For `a2a-lab-v2-luna.json` the sibling is `a2a-lab-v2-luna.secret.json` in the same directory:
+
+```json
+{
+  "typesafe": {
+    "api_key": "replace-with-your-typesafe-key"
+  }
+}
+```
+
 ```bash
 export A2ALAB_CONFIG="$PWD/.mise/examples/combined.json"
 mise run a2a-lab-ot2 -- config validate
