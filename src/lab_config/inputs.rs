@@ -105,6 +105,7 @@ pub struct LabConfigCliValues {
     pub model_provider: ModelProvider,
     pub model: Option<String>,
     pub bedrock_model: Option<String>,
+    pub preamble: Option<String>,
     pub external_camera_index: Option<u32>,
     pub external_camera_description: String,
     pub camera_index: Option<u32>,
@@ -122,6 +123,7 @@ pub struct LabConfigInputs {
     pub model_provider: ExplicitSetting<ModelProvider>,
     pub model: ExplicitSetting<Option<String>>,
     pub bedrock_model: ExplicitSetting<Option<String>>,
+    pub preamble: ExplicitSetting<Option<String>>,
     pub external_camera_index: ExplicitSetting<Option<u32>>,
     pub external_camera_description: ExplicitSetting<String>,
     pub camera_index: ExplicitSetting<Option<u32>>,
@@ -144,6 +146,7 @@ impl Default for LabConfigInputs {
             model_provider: ExplicitSetting::default_value(ModelProvider::Bedrock),
             model: ExplicitSetting::unset(None),
             bedrock_model: ExplicitSetting::unset(None),
+            preamble: ExplicitSetting::unset(None),
             external_camera_index: ExplicitSetting::unset(None),
             external_camera_description: ExplicitSetting::default_value(
                 DEFAULT_EXTERNAL_CAMERA_DESCRIPTION.to_owned(),

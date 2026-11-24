@@ -660,6 +660,7 @@ async fn spawn_adapter_endpoint(succeed: bool) -> (String, Arc<Mutex<Vec<serde_j
 
 async fn adapter_decide(State(state): State<AdapterMock>, body: Bytes) -> impl IntoResponse {
     let payload = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    let answers = named_noul_answers(&payload, 0.94);
     state.seen.lock().expect("seen requests").push(payload);
     if !state.succeed {
         return StatusCode::GATEWAY_TIMEOUT.into_response();
@@ -667,15 +668,26 @@ async fn adapter_decide(State(state): State<AdapterMock>, body: Bytes) -> impl I
     (
         StatusCode::OK,
         [(CONTENT_TYPE, "application/json")],
-        serde_json::json!({
-            "answers": [{
-                "probability": 0.94,
-                "model_box": {"bounds": [0.1, 0.2, 0.3, 0.4]}
-            }]
-        })
-        .to_string(),
+        serde_json::json!({ "answers": answers }).to_string(),
     )
         .into_response()
+}
+
+fn named_noul_answers(
+    payload: &serde_json::Value,
+    noul: f32,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut answers = serde_json::Map::new();
+    let Some(questions) = payload.get("questions").and_then(|value| value.as_object()) else {
+        return answers;
+    };
+    for name in questions.keys() {
+        answers.insert(
+            name.clone(),
+            serde_json::json!({"type": "noul", "noul": noul}),
+        );
+    }
+    answers
 }
 
 fn adapter_worker(
@@ -748,9 +760,17 @@ async fn adapter_worker_commits_three_predicates_and_replays_idempotently() {
         let requests = seen.lock().expect("seen requests");
         assert_eq!(requests.len(), 3);
         for payload in requests.iter() {
-            assert!(payload["model_input"].get("roi").is_none());
-            assert_eq!(payload["image"]["descriptor"]["width"], 320);
-            assert_eq!(payload["image"]["descriptor"]["height"], 240);
+            assert!(payload.get("model_input").is_none());
+            assert!(payload["assets"].as_object().is_some_and(|assets| {
+                assets
+                    .values()
+                    .any(|asset| asset["data_base64"].is_string())
+            }));
+            assert!(
+                payload["questions"]
+                    .as_object()
+                    .is_some_and(|questions| !questions.is_empty())
+            );
         }
     }
     let manifest = store.get_manifest_frame(&frame_id).await.unwrap();

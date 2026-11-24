@@ -568,3 +568,151 @@ fn bootstrap_installs_logging_when_section_present() {
     assert!(logging_installed());
     drop(bootstrap);
 }
+
+fn load_chat(name: &str, chat: &str) -> LoadedLabConfig {
+    let dir = std::env::temp_dir().join(format!(
+        "a2a-lab-ot2-preamble-{name}-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    load_config_file(
+        &format!(r#"{{"schema_version":1,"chat":{chat}}}"#),
+        &dir.join("a2a-lab.json"),
+    )
+}
+
+#[test]
+fn preamble_file_yields_to_environment_and_cli_without_changing_model_selection() {
+    let file_text = "from file\n";
+    let loaded = load_chat(
+        "layers",
+        &format!(
+            r#"{{"provider":"openai","model":"file-model","preamble":{}}}"#,
+            serde_json::to_string(file_text).unwrap()
+        ),
+    );
+    let from_file = resolve(&LabConfigInputs::default(), Some(&loaded)).unwrap();
+    assert_eq!(from_file.chat.preamble, file_text);
+    assert_eq!(from_file.chat.provider, ModelProvider::OpenAi);
+    assert_eq!(from_file.chat.model, "file-model");
+
+    let env_text = " from env ";
+    let from_env = resolve(
+        &LabConfigInputs {
+            preamble: ExplicitSetting::env(Some(env_text.to_owned())),
+            ..LabConfigInputs::default()
+        },
+        Some(&loaded),
+    )
+    .unwrap();
+    assert_eq!(from_env.chat.preamble, env_text);
+    assert_eq!(from_env.chat.model, "file-model");
+
+    let cli_text = "\tfrom cli";
+    let from_cli = resolve(
+        &LabConfigInputs {
+            preamble: ExplicitSetting::cli(Some(cli_text.to_owned())),
+            model: ExplicitSetting::cli(Some("cli-model".to_owned())),
+            ..LabConfigInputs::default()
+        },
+        Some(&loaded),
+    )
+    .unwrap();
+    assert_eq!(from_cli.chat.preamble, cli_text);
+    assert_eq!(from_cli.chat.provider, ModelProvider::OpenAi);
+    assert_eq!(from_cli.chat.model, "cli-model");
+}
+
+#[test]
+fn explicit_blank_preamble_stays_blank() {
+    let loaded = load_chat(
+        "blank-base",
+        r#"{"provider":"openai","model":"file-model","preamble":"from file"}"#,
+    );
+    let blank_cli = resolve(
+        &LabConfigInputs {
+            preamble: ExplicitSetting::cli(Some(String::new())),
+            ..LabConfigInputs::default()
+        },
+        Some(&loaded),
+    )
+    .unwrap();
+    assert_eq!(blank_cli.chat.preamble, "");
+    assert_eq!(blank_cli.chat.model, "file-model");
+
+    let whitespace = " \t\n";
+    let blank_env = resolve(
+        &LabConfigInputs {
+            preamble: ExplicitSetting::env(Some(whitespace.to_owned())),
+            ..LabConfigInputs::default()
+        },
+        Some(&loaded),
+    )
+    .unwrap();
+    assert_eq!(blank_env.chat.preamble, whitespace);
+
+    let file_blank = load_chat(
+        "file-blank",
+        r#"{"provider":"anthropic","model":"kept","preamble":""}"#,
+    );
+    let from_file_blank = resolve(&LabConfigInputs::default(), Some(&file_blank)).unwrap();
+    assert_eq!(from_file_blank.chat.preamble, "");
+    assert_eq!(from_file_blank.chat.provider, ModelProvider::Anthropic);
+    assert_eq!(from_file_blank.chat.model, "kept");
+
+    let file_whitespace = load_chat(
+        "file-whitespace",
+        &format!(
+            r#"{{"preamble":{}}}"#,
+            serde_json::to_string(whitespace).unwrap()
+        ),
+    );
+    let from_file_whitespace =
+        resolve(&LabConfigInputs::default(), Some(&file_whitespace)).unwrap();
+    assert_eq!(from_file_whitespace.chat.preamble, whitespace);
+    assert_eq!(
+        from_file_whitespace.chat.model,
+        crate::DEFAULT_BEDROCK_MODEL
+    );
+}
+
+#[test]
+fn omitted_preamble_uses_builtin_and_keeps_model_selection() {
+    let omitted = load_chat(
+        "omitted",
+        r#"{"provider":"openai","model":"from-chat-file"}"#,
+    );
+    let from_omitted = resolve(&LabConfigInputs::default(), Some(&omitted)).unwrap();
+    assert_eq!(from_omitted.chat.preamble, crate::BUILTIN_PREAMBLE);
+    assert_eq!(from_omitted.chat.provider, ModelProvider::OpenAi);
+    assert_eq!(from_omitted.chat.model, "from-chat-file");
+
+    let defaults = resolve(&LabConfigInputs::default(), None).unwrap();
+    assert_eq!(defaults.chat.preamble, crate::BUILTIN_PREAMBLE);
+    assert_eq!(defaults.chat.model, crate::DEFAULT_BEDROCK_MODEL);
+
+    let legacy = crate::lab_config::ServeChatLegacyInputs {
+        model_provider: ModelProvider::Bedrock,
+        model: None,
+        bedrock_model: Some("legacy-bedrock".to_owned()),
+    };
+    let explicit_blank = LabConfigInputs {
+        preamble: ExplicitSetting::cli(Some(String::new())),
+        ..LabConfigInputs::default()
+    };
+    let served = crate::lab_config::serve_chat_settings(&explicit_blank, &legacy, None).unwrap();
+    assert_eq!(served.preamble, "");
+    assert_eq!(served.model, crate::DEFAULT_BEDROCK_MODEL);
+    let kept_model = LabConfigInputs {
+        preamble: ExplicitSetting::cli(Some(" \t".to_owned())),
+        bedrock_model: ExplicitSetting::env(Some("legacy-bedrock".to_owned())),
+        ..LabConfigInputs::default()
+    };
+    let served_model = crate::lab_config::serve_chat_settings(&kept_model, &legacy, None).unwrap();
+    assert_eq!(served_model.preamble, " \t");
+    assert_eq!(served_model.model, "legacy-bedrock");
+    let omitted_serve =
+        crate::lab_config::serve_chat_settings(&LabConfigInputs::default(), &legacy, None).unwrap();
+    assert_eq!(omitted_serve.preamble, crate::BUILTIN_PREAMBLE);
+    assert_eq!(omitted_serve.model, "legacy-bedrock");
+}

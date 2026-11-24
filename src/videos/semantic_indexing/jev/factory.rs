@@ -72,7 +72,8 @@ pub fn build_live_decision_worker(
         limits,
         media,
         semantic.decisions.credentials(),
-    )?;
+    )?
+    .with_preamble(semantic.decisions.preamble().map(str::to_owned));
     Ok(DecisionEvaluationWorker::new(
         FrameDecisionEvaluationRouter::new(evaluator),
         config,

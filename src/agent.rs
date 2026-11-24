@@ -22,7 +22,8 @@ use tokio::sync::Mutex;
 
 use crate::memory::ConversationStore;
 
-const PREAMBLE: &str = "\
+/// Built-in OT-2 chat preamble used when no preamble is configured.
+pub const BUILTIN_PREAMBLE: &str = "\
 You operate an Opentrons OT-2 through the lab tools. Answer from tool results and this conversation. \
 Call list_tasks before start_task and use only a task id from that list. \
 For a named recording angle, call list_video_sources and use the exact source id it returns. \
@@ -115,10 +116,10 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
     value.filter(|text| !text.trim().is_empty())
 }
 
-/// Records the provider and model passed to the serve agent factory (tests).
+/// Records the provider, model, and preamble passed to the serve agent factory (tests).
 #[derive(Debug, Default, Clone)]
 pub struct RecordingServeAgentFactory {
-    recorded: Arc<StdMutex<Option<(ModelProvider, String)>>>,
+    recorded: Arc<StdMutex<Option<(ModelProvider, String, String)>>>,
 }
 
 impl RecordingServeAgentFactory {
@@ -130,8 +131,13 @@ impl RecordingServeAgentFactory {
         }
     }
 
-    /// Stores `provider` and `model` once; errors if called again.
-    pub fn record(&self, provider: ModelProvider, model: &str) -> Result<(), A2aLabError> {
+    /// Stores `provider`, `model`, and `preamble` once; errors if called again.
+    pub fn record(
+        &self,
+        provider: ModelProvider,
+        model: &str,
+        preamble: &str,
+    ) -> Result<(), A2aLabError> {
         let mut slot = self
             .recorded
             .lock()
@@ -142,12 +148,12 @@ impl RecordingServeAgentFactory {
                 "factory invoked more than once",
             ));
         }
-        *slot = Some((provider, model.to_owned()));
+        *slot = Some((provider, model.to_owned(), preamble.to_owned()));
         Ok(())
     }
 
-    /// Returns the recorded pair, if any.
-    pub fn take_recorded(&self) -> Result<Option<(ModelProvider, String)>, A2aLabError> {
+    /// Returns the recorded provider, model, and preamble, if any.
+    pub fn take_recorded(&self) -> Result<Option<(ModelProvider, String, String)>, A2aLabError> {
         self.recorded
             .lock()
             .map_err(|error| A2aLabError::unavailable(format!("record serve agent: {error}")))
@@ -185,12 +191,14 @@ impl LabAgent {
     /// Connects `model` to the MCP server at `mcp_url` and stores turns in `store`.
     pub async fn connect(
         model: impl CompletionModel + 'static,
+        preamble: impl Into<String>,
         mcp_url: &str,
         store: ConversationStore,
     ) -> Result<Self, A2aLabError> {
+        let preamble = preamble.into();
         let (tools, sink, mcp) = connect_mcp(mcp_url).await?;
         let agent = AgentBuilder::new(model)
-            .preamble(PREAMBLE)
+            .preamble(&preamble)
             .default_max_turns(MAX_TURNS)
             .memory(store)
             .rmcp_tools(tools, sink)
@@ -203,10 +211,11 @@ impl LabAgent {
         })
     }
 
-    /// Builds an agent for `provider` and `model_id`.
+    /// Builds an agent for `provider`, `model_id`, and the exact `preamble`.
     pub async fn from_provider(
         provider: ModelProvider,
         model_id: &str,
+        preamble: &str,
         mcp_url: &str,
         store: ConversationStore,
     ) -> Result<Self, A2aLabError> {
@@ -215,7 +224,8 @@ impl LabAgent {
                 let profile = bedrock_profile();
                 let client = bedrock_client(&profile).await;
                 let mut agent =
-                    Self::connect(client.completion_model(model_id), mcp_url, store).await?;
+                    Self::connect(client.completion_model(model_id), preamble, mcp_url, store)
+                        .await?;
                 agent.label = format!(
                     "bedrock model {model_id} using AWS profile {profile} and AWS_REGION or that profile's region"
                 );
@@ -228,7 +238,8 @@ impl LabAgent {
                     ))
                 })?;
                 let mut agent =
-                    Self::connect(client.completion_model(model_id), mcp_url, store).await?;
+                    Self::connect(client.completion_model(model_id), preamble, mcp_url, store)
+                        .await?;
                 agent.label = format!("openai model {model_id}");
                 Ok(agent)
             }
@@ -239,7 +250,8 @@ impl LabAgent {
                     ))
                 })?;
                 let mut agent =
-                    Self::connect(client.completion_model(model_id), mcp_url, store).await?;
+                    Self::connect(client.completion_model(model_id), preamble, mcp_url, store)
+                        .await?;
                 agent.label = format!("anthropic model {model_id}");
                 Ok(agent)
             }

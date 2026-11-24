@@ -7,8 +7,8 @@ use std::time::Duration;
 use a2a_lab_dev_kit::{
     A2aLabError, AgentCoreImageDecisionSettings, Image, ImageDecisionExecutor,
     ImageDecisionHttpLimits, ImageDecisionPrimitiveAnswer, ImageDecisionProviderError,
-    ImageDecisionQuestions, ImageDecisionRequest, ImageDecisionResult, ImageTransportConfig,
-    SourceImageDecisionResult,
+    ImageDecisionQuestion, ImageDecisionQuestions, ImageDecisionRequest, ImageDecisionResult,
+    ImageTransportConfig, MAX_IMAGE_DECISION_QUESTION_CHARS, SourceImageDecisionResult,
 };
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -95,12 +95,24 @@ impl AgentCoreInvoker for SdkAgentCoreInvoker {
 pub struct AgentCoreImageDecisionExecutor<I> {
     invoker: I,
     limits: ImageDecisionHttpLimits,
+    preamble: Option<String>,
 }
 
 impl<I> AgentCoreImageDecisionExecutor<I> {
     /// Builds an executor around an already connected invoker.
     pub fn new(invoker: I, limits: ImageDecisionHttpLimits) -> Self {
-        Self { invoker, limits }
+        Self {
+            invoker,
+            limits,
+            preamble: None,
+        }
+    }
+
+    /// Stores the exact preamble. Blank text is kept and does not change questions.
+    #[must_use]
+    pub fn with_preamble(mut self, preamble: Option<String>) -> Self {
+        self.preamble = preamble;
+        self
     }
 }
 
@@ -150,11 +162,12 @@ where
         if !supported_media_type(image.descriptor().media_type()) {
             return Err(invalid_answer("image media type is not supported"));
         }
+        let questions = apply_preamble(self.preamble.as_deref(), questions)?;
         let encoded = base64::engine::general_purpose::STANDARD.encode(image.data());
         let body = RuntimeRequest {
             state: "",
             images: vec![encoded],
-            questions,
+            questions: &questions,
         };
         let payload = serde_json::to_vec(&body)
             .map_err(|_| invalid_answer("agentcore request json is invalid"))?;
@@ -173,7 +186,7 @@ where
         }
         let parsed: RuntimeResponse = serde_json::from_slice(&response)
             .map_err(|_| invalid_answer("agentcore response json is invalid"))?;
-        SourceImageDecisionResult::from_questions(questions, parsed.into_answers()?)
+        SourceImageDecisionResult::from_questions(&questions, parsed.into_answers()?)
     }
 }
 
@@ -251,6 +264,57 @@ impl RuntimeAnswer {
                 })
             }
         }
+    }
+}
+
+fn apply_preamble(
+    preamble: Option<&str>,
+    questions: &ImageDecisionQuestions,
+) -> Result<ImageDecisionQuestions, ImageDecisionProviderError> {
+    let Some(preamble) =
+        preamble.filter(|text| text.chars().any(|character| !character.is_whitespace()))
+    else {
+        return Ok(questions.clone());
+    };
+    let mut composed = ImageDecisionQuestions::new();
+    for (name, question) in questions {
+        let outbound = format!("{preamble}\n{}", question_instructions(question));
+        if !(1..=MAX_IMAGE_DECISION_QUESTION_CHARS).contains(&outbound.chars().count()) {
+            return Err(limit_exceeded(
+                "question",
+                "question exceeds the configured maximum",
+            ));
+        }
+        composed.insert(name.clone(), question_with_instructions(question, outbound));
+    }
+    Ok(composed)
+}
+
+fn question_instructions(question: &ImageDecisionQuestion) -> &str {
+    match question {
+        ImageDecisionQuestion::Choice { instructions, .. }
+        | ImageDecisionQuestion::Score { instructions, .. }
+        | ImageDecisionQuestion::Noul { instructions, .. } => instructions,
+    }
+}
+
+fn question_with_instructions(
+    question: &ImageDecisionQuestion,
+    instructions: String,
+) -> ImageDecisionQuestion {
+    match question {
+        ImageDecisionQuestion::Choice { criteria, .. } => ImageDecisionQuestion::Choice {
+            instructions,
+            criteria: criteria.clone(),
+        },
+        ImageDecisionQuestion::Score { criteria, .. } => ImageDecisionQuestion::Score {
+            instructions,
+            criteria: criteria.clone(),
+        },
+        ImageDecisionQuestion::Noul { criteria, .. } => ImageDecisionQuestion::Noul {
+            instructions,
+            criteria: criteria.clone(),
+        },
     }
 }
 

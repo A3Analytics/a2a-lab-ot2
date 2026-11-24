@@ -26,7 +26,8 @@ pub fn uses_resolved_chat_configuration(inputs: &LabConfigInputs) -> Result<bool
     }
     Ok(inputs.model_provider.is_explicit()
         || inputs.model.is_explicit()
-        || inputs.bedrock_model.is_explicit())
+        || inputs.bedrock_model.is_explicit()
+        || inputs.preamble.is_explicit())
 }
 
 /// CLI values used when chat is not resolved from file or explicit overrides.
@@ -55,7 +56,11 @@ pub fn serve_chat_settings(
         legacy.model.as_deref(),
         legacy.bedrock_model.as_deref(),
     );
-    Ok(ResolvedChatSettings { provider, model })
+    Ok(ResolvedChatSettings {
+        provider,
+        model,
+        preamble: crate::agent::BUILTIN_PREAMBLE.to_owned(),
+    })
 }
 
 /// Builds the serve agent after resolving chat settings, invoking `factory` exactly once.
@@ -68,11 +73,18 @@ pub async fn build_serve_lab_agent<F, Fut, A>(
     preresolved: Option<&ResolvedLabConfig>,
 ) -> Result<(A, ResolvedChatSettings), A2aLabError>
 where
-    F: FnOnce(ModelProvider, String, String, crate::ConversationStore) -> Fut,
+    F: FnOnce(ModelProvider, String, String, String, crate::ConversationStore) -> Fut,
     Fut: Future<Output = Result<A, A2aLabError>>,
 {
     let chat = serve_chat_settings(inputs, legacy, preresolved)?;
-    let built = factory(chat.provider, chat.model.clone(), mcp_url.to_owned(), store).await?;
+    let built = factory(
+        chat.provider,
+        chat.model.clone(),
+        chat.preamble.clone(),
+        mcp_url.to_owned(),
+        store,
+    )
+    .await?;
     Ok((built, chat))
 }
 
@@ -149,6 +161,11 @@ mod tests {
             ..LabConfigInputs::default()
         };
         assert!(uses_resolved_chat_configuration(&with_model).unwrap());
+        let with_preamble = LabConfigInputs {
+            preamble: ExplicitSetting::cli(Some(String::new())),
+            ..LabConfigInputs::default()
+        };
+        assert!(uses_resolved_chat_configuration(&with_preamble).unwrap());
         let clap_default_provider = LabConfigInputs::default();
         assert!(!uses_resolved_chat_configuration(&clap_default_provider).unwrap());
     }
@@ -186,10 +203,10 @@ mod tests {
             &legacy,
             "http://127.0.0.1:9/mcp",
             store,
-            |provider, model, _mcp_url, _store| {
+            |provider, model, preamble, _mcp_url, _store| {
                 let hook = hook.clone();
                 async move {
-                    hook.record(provider, &model)?;
+                    hook.record(provider, &model, &preamble)?;
                     Err::<crate::LabAgent, _>(A2aLabError::unavailable(
                         "test factory stops before provider",
                     ))
@@ -201,7 +218,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             recorder.take_recorded().unwrap(),
-            Some((expected.provider, expected.model))
+            Some((expected.provider, expected.model, expected.preamble))
         );
     }
 }

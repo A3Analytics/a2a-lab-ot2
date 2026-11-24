@@ -361,13 +361,14 @@ async fn decision_append_keeps_chat_factory_single_invocation() {
         &legacy,
         "http://127.0.0.1:9/mcp",
         store,
-        move |provider, model, _url, store| {
+        move |provider, model, preamble, _url, store| {
             let hook = hook.clone();
             async move {
-                hook.record(provider, &model)?;
+                hook.record(provider, &model, &preamble)?;
                 a2a_lab_ot2::LabAgent::from_provider(
                     provider,
                     &model,
+                    &preamble,
                     "http://127.0.0.1:9/mcp",
                     store,
                 )
@@ -534,13 +535,13 @@ fn bits(bounds: [f32; 4]) -> [u32; 4] {
 fn invalid_image_decision_configuration_stays_on_the_lab_error() {
     let inputs = config_inputs(
         "image-decision-invalid",
-        r#"{"schema_version":1,"image_decision":{"endpoint":"http://127.0.0.1:9/decide","model":"jev-1.14.0"}}"#,
+        r#"{"schema_version":1,"image_decision":{"endpoint":"http://127.0.0.1:9/decide","model":"jev-1.14.0","extra":true}}"#,
     );
     let error = resolve_image_decision_client(&inputs).unwrap_err();
     assert!(matches!(
         error,
         a2a_lab_dev_kit::A2aLabError::Invalid {
-            field: "image_decision.endpoint",
+            field: "image_decision",
             ..
         }
     ));

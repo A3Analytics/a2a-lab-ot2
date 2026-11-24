@@ -83,7 +83,8 @@ pub async fn run_jev_smoke(
     let media = Arc::new(EvidenceJpegDecisionMedia::new(dvr));
     let evaluator =
         TypeSafeJevFrameDecisionEvaluator::connect_live(config.clone(), limits, media, credentials)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?
+            .with_preamble(semantic.decisions.preamble().map(str::to_owned));
     let request = build_smoke_request(&manifest.frame().clone(), evaluation_id)?;
     let mut router = FrameDecisionEvaluationRouter::new(evaluator);
     let responses = router

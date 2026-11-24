@@ -84,6 +84,9 @@ struct Cli {
     /// Bedrock model id used when `--model` is omitted and the provider is Bedrock
     #[arg(long, env = "A2ALAB_BEDROCK_MODEL")]
     bedrock_model: Option<String>,
+    /// Chat preamble. Omitted uses the built-in OT-2 preamble. An empty value stays blank.
+    #[arg(long, env = "A2ALAB_PREAMBLE")]
+    preamble: Option<String>,
     /// Rig messages retained for each A2A context
     #[arg(long, env = "A2ALAB_HISTORY_LIMIT", default_value_t = 40)]
     history_limit: usize,
@@ -599,6 +602,7 @@ fn lab_config_cli_values(cli: &Cli) -> LabConfigCliValues {
         model_provider: ModelProvider::from(cli.model_provider),
         model: cli.model.clone(),
         bedrock_model: cli.bedrock_model.clone(),
+        preamble: cli.preamble.clone(),
         external_camera_index: cli.external_camera_index,
         external_camera_description: cli.external_camera_description.clone(),
         camera_index: cli.camera_index,
@@ -617,6 +621,7 @@ fn lab_config_inputs(cli: &Cli, matches: &ArgMatches) -> LabConfigInputs {
         model_provider: explicit_setting(matches, "model_provider", values.model_provider),
         model: explicit_option(matches, "model", values.model),
         bedrock_model: explicit_option(matches, "bedrock_model", values.bedrock_model),
+        preamble: explicit_option(matches, "preamble", values.preamble),
         external_camera_index: explicit_option(
             matches,
             "external_camera_index",
@@ -950,8 +955,8 @@ async fn serve(
         &legacy_chat,
         DEFAULT_MCP_URL,
         store,
-        |provider, model, mcp_url, store| async move {
-            LabAgent::from_provider(provider, &model, &mcp_url, store).await
+        |provider, model, preamble, mcp_url, store| async move {
+            LabAgent::from_provider(provider, &model, &preamble, &mcp_url, store).await
         },
         preresolved,
     )
@@ -962,7 +967,8 @@ async fn serve(
     let _mcp_lab = mcp_lab;
     let mut a2a = A2aServer::new(&service)
         .with_message_handler(Arc::new(agent) as Arc<dyn AgentMessageHandler>)
-        .with_web_ui();
+        .with_web_ui()
+        .with_default_chat_preamble(a2a_lab_ot2::BUILTIN_PREAMBLE);
     if let Some(path) = selected_config_path(config_inputs)? {
         let config_store =
             LabConfigStore::open(path).map_err(|error| startup_error("config store", error))?;

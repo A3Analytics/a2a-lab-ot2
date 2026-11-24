@@ -1,4 +1,4 @@
-const DEVKIT_REVISION: &str = "cc46b6dc112b7455c761ad1abeb24f280d8e4f9e";
+const DEVKIT_REVISION: &str = "21d6541c0ccd8604ebebfde66dd7df49a8cecc9e";
 const DEVKIT_URL: &str = "https://github.com/A3Analytics/a2a-lab-dev-kit-rs";
 const TCK_REVISION: &str = "1fd47d5c73e6fa3f7bd6505d75e43ee68cae33fd";
 const TCK_URL: &str = "https://github.com/A3Analytics/a2a-lab-tck";

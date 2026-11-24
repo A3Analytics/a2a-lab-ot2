@@ -19,8 +19,8 @@ pub mod time;
 pub mod videos;
 
 pub use agent::{
-    DEFAULT_ANTHROPIC_MODEL, DEFAULT_BEDROCK_MODEL, DEFAULT_OPENAI_MODEL, LabAgent, ModelProvider,
-    RecordingServeAgentFactory, selected_model,
+    BUILTIN_PREAMBLE, DEFAULT_ANTHROPIC_MODEL, DEFAULT_BEDROCK_MODEL, DEFAULT_OPENAI_MODEL,
+    LabAgent, ModelProvider, RecordingServeAgentFactory, selected_model,
 };
 pub use cameras::{OrbbecStream, SessionPump, SharedSession, StreamingDevice};
 pub use fixture::{

@@ -298,3 +298,103 @@ async fn unsupported_media_and_oversized_requests_do_not_invoke_the_runtime() {
     ));
     assert!(!invoked.load(Ordering::SeqCst));
 }
+
+fn answer_body() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "answers": {
+            "next": {
+                "type": "choice",
+                "choice": "retry",
+                "probabilities": {"retry": 0.8, "stop": 0.2},
+                "confidence": 0.6
+            },
+            "severity": {
+                "type": "score",
+                "score": 1.0,
+                "legend": {"0": "low", "1": "high"},
+                "probabilities": {"0": 0.2, "1": 0.8},
+                "confidence": 0.6
+            },
+            "tip_attached": {"type": "noul", "noul": 0.75}
+        }
+    }))
+    .unwrap()
+}
+
+async fn captured_questions(preamble: Option<String>) -> serde_json::Value {
+    let payload = Arc::new(Mutex::new(None));
+    let executor = AgentCoreImageDecisionExecutor::new(
+        ScriptedInvoker {
+            payload: Arc::clone(&payload),
+            result: Ok(answer_body()),
+        },
+        limits(8192, 4096),
+    )
+    .with_preamble(preamble);
+    executor
+        .decide_questions(&image("image/jpeg"), &questions())
+        .await
+        .unwrap();
+    serde_json::from_slice(&payload.lock().expect("payload").clone().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn agentcore_preamble_is_prepended_exactly_and_blank_text_is_unchanged() {
+    let configured = captured_questions(Some("  IMAGE-PREAMBLE".to_owned())).await;
+    assert_eq!(
+        configured["questions"]["tip_attached"]["instructions"],
+        "  IMAGE-PREAMBLE\nIs a pipette tip attached?"
+    );
+    assert_eq!(
+        configured["questions"]["next"]["instructions"],
+        "  IMAGE-PREAMBLE\nWhat should happen next?"
+    );
+    assert_eq!(
+        configured["questions"]["next"]["criteria"]["retry"],
+        "try again"
+    );
+    assert_eq!(
+        configured["questions"]["severity"]["instructions"],
+        "  IMAGE-PREAMBLE\nHow severe is the fault?"
+    );
+    assert!(
+        !configured.to_string().contains("CHAT-PREAMBLE")
+            && !configured.to_string().contains("DECISION-PREAMBLE")
+    );
+
+    let blank = captured_questions(Some(String::new())).await;
+    let whitespace = captured_questions(Some(" \t\n".to_owned())).await;
+    let omitted = captured_questions(None).await;
+    assert_eq!(
+        blank["questions"]["tip_attached"]["instructions"],
+        "Is a pipette tip attached?"
+    );
+    assert_eq!(whitespace, omitted);
+    assert_eq!(
+        omitted["questions"]["next"]["instructions"],
+        "What should happen next?"
+    );
+    let serve = include_str!("../src/videos/serve.rs");
+    assert!(serve.contains(".with_preamble(client.config().preamble().map(str::to_owned))"));
+}
+
+#[tokio::test]
+async fn agentcore_preamble_hits_the_question_limit_before_the_runtime() {
+    let invoked = Arc::new(AtomicBool::new(false));
+    let executor = AgentCoreImageDecisionExecutor::new(
+        RecordingInvoker {
+            invoked: Arc::clone(&invoked),
+        },
+        limits(8, 4096),
+    )
+    .with_preamble(Some("P".repeat(4_096)));
+    let error = executor
+        .decide_questions(&image("image/jpeg"), &questions())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ImageDecisionProviderError::LimitExceeded { ref limit, .. } if limit == "question"
+    ));
+    assert!(!invoked.load(Ordering::SeqCst));
+}

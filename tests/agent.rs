@@ -7,8 +7,8 @@ use a2a_lab_dev_kit::{
     MemoryTasks, TaskDefinition, TaskId,
 };
 use a2a_lab_ot2::{
-    ConversationStore, DEFAULT_ANTHROPIC_MODEL, DEFAULT_BEDROCK_MODEL, DEFAULT_OPENAI_MODEL,
-    LabAgent, ModelProvider, selected_model,
+    BUILTIN_PREAMBLE, ConversationStore, DEFAULT_ANTHROPIC_MODEL, DEFAULT_BEDROCK_MODEL,
+    DEFAULT_OPENAI_MODEL, LabAgent, ModelProvider, selected_model,
 };
 use rig::completion::Message;
 use rig::memory::ConversationMemory;
@@ -146,7 +146,9 @@ async fn agent_answers_text_and_keeps_contexts_apart() {
         MockTurn::text("alpha again"),
     ]);
     let watched = model.clone();
-    let agent = LabAgent::connect(model, &url, store).await.expect("agent");
+    let agent = LabAgent::connect(model, BUILTIN_PREAMBLE, &url, store)
+        .await
+        .expect("agent");
 
     let first = agent
         .handle(request("token-alpha", "ctx-a"))
@@ -189,7 +191,9 @@ async fn agent_calls_mcp_tool_and_reloads_history() {
     ]);
     {
         let store = ConversationStore::open(&path, 40).await.expect("store");
-        let agent = LabAgent::connect(model, &url, store).await.expect("agent");
+        let agent = LabAgent::connect(model, BUILTIN_PREAMBLE, &url, store)
+            .await
+            .expect("agent");
         let reply = agent
             .handle(request("which tasks", "ctx-tools"))
             .await
@@ -206,7 +210,7 @@ async fn agent_calls_mcp_tool_and_reloads_history() {
 
     let model = MockCompletionModel::new([MockTurn::text("still listed")]);
     let watched = model.clone();
-    let agent = LabAgent::connect(model, &url, store)
+    let agent = LabAgent::connect(model, BUILTIN_PREAMBLE, &url, store)
         .await
         .expect("reloaded agent");
     let reply = agent
@@ -230,7 +234,9 @@ async fn agent_serializes_turns_in_one_context() {
         MockTurn::text("second reply"),
     ]);
     let watched = model.clone();
-    let agent = LabAgent::connect(model, &url, store).await.expect("agent");
+    let agent = LabAgent::connect(model, BUILTIN_PREAMBLE, &url, store)
+        .await
+        .expect("agent");
     let (left, right) = tokio::join!(
         agent.handle(request("token-one", "ctx-lock")),
         agent.handle(request("token-two", "ctx-lock")),
@@ -253,4 +259,63 @@ async fn agent_serializes_turns_in_one_context() {
     assert!(!rendered[0].contains(second_token));
     assert!(rendered[1].contains(first_token));
     assert!(rendered[1].contains(second_token));
+}
+
+#[tokio::test]
+async fn exact_and_blank_preambles_reach_agent_builder() {
+    let url = mcp_url().await;
+    let marker = "PREAMBLE-MARKER \t kept";
+    let store = ConversationStore::open(&temp_db(), 40)
+        .await
+        .expect("store");
+    let model = MockCompletionModel::new([MockTurn::text("ok")]);
+    let watched = model.clone();
+    let agent = LabAgent::connect(model, marker, &url, store)
+        .await
+        .expect("agent");
+    agent
+        .handle(request("hello", "ctx-preamble"))
+        .await
+        .expect("reply");
+    let rendered = format!("{:?}", watched.requests()[0]);
+    assert!(
+        rendered.contains("System { content: \"PREAMBLE-MARKER \\t kept\" }"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("You operate an Opentrons"), "{rendered}");
+
+    let store = ConversationStore::open(&temp_db(), 40)
+        .await
+        .expect("store");
+    let model = MockCompletionModel::new([MockTurn::text("ok")]);
+    let watched = model.clone();
+    let agent = LabAgent::connect(model, "", &url, store)
+        .await
+        .expect("blank agent");
+    agent
+        .handle(request("hello", "ctx-blank"))
+        .await
+        .expect("blank reply");
+    let rendered = format!("{:?}", watched.requests()[0]);
+    assert!(!rendered.contains("You operate an Opentrons"), "{rendered}");
+
+    let whitespace = " \t\n";
+    let store = ConversationStore::open(&temp_db(), 40)
+        .await
+        .expect("store");
+    let model = MockCompletionModel::new([MockTurn::text("ok")]);
+    let watched = model.clone();
+    let agent = LabAgent::connect(model, whitespace, &url, store)
+        .await
+        .expect("whitespace agent");
+    agent
+        .handle(request("hello", "ctx-ws"))
+        .await
+        .expect("whitespace reply");
+    let rendered = format!("{:?}", watched.requests()[0]);
+    assert!(
+        rendered.contains("System { content: \" \\t\\n\" }"),
+        "whitespace preamble missing from {rendered}"
+    );
+    assert!(!rendered.contains("You operate an Opentrons"), "{rendered}");
 }

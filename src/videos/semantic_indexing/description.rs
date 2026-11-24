@@ -260,4 +260,23 @@ mod tests {
         let request = build_description_request(&model, encoded_jpeg_image(b"jpeg"));
         assert_eq!(request.temperature, None);
     }
+
+    #[test]
+    fn description_preamble_stays_the_retrieval_prompt() {
+        let model = rig::providers::openai::Client::builder()
+            .api_key("test")
+            .build()
+            .expect("test client")
+            .completion_model("test-model");
+        let request = build_description_request(&model, encoded_jpeg_image(b"jpeg"));
+        let preambles: Vec<_> = request
+            .chat_history
+            .iter()
+            .filter_map(|message| match message {
+                rig::completion::Message::System { content } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(preambles, [DESCRIPTION_PROMPT]);
+    }
 }

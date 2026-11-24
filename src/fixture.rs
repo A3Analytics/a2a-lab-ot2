@@ -173,7 +173,7 @@ impl FixtureServer {
             invocations: Arc::clone(&model_invocations),
         };
         let mcp_url = format!("http://{mcp_address}/mcp");
-        let agent = match LabAgent::connect(model, &mcp_url, store).await {
+        let agent = match LabAgent::connect(model, crate::BUILTIN_PREAMBLE, &mcp_url, store).await {
             Ok(agent) => agent,
             Err(error) => {
                 robot_task.abort();

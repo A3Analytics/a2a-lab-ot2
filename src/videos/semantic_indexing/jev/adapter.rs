@@ -95,6 +95,13 @@ impl<M: JevDecisionMedia + 'static> TypeSafeJevFrameDecisionEvaluator<M> {
         }
     }
 
+    /// Stores the exact semantic decision preamble. Blank text is kept and does not change questions.
+    #[must_use]
+    pub fn with_preamble(mut self, preamble: Option<String>) -> Self {
+        self.client = self.client.with_preamble(preamble);
+        self
+    }
+
     async fn bind_frames(
         &self,
         requests: &[FrameDecisionEvaluationRequest],

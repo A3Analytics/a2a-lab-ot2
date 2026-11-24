@@ -188,7 +188,7 @@ async fn decide(State(state): State<MockState>, body: Bytes) -> impl IntoRespons
     state.calls.fetch_add(1, Ordering::SeqCst);
     let payload: serde_json::Value =
         serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-    state.bodies.lock().await.push(payload);
+    state.bodies.lock().await.push(payload.clone());
     match state.mode {
         MockMode::Malformed => {
             return (
@@ -202,21 +202,24 @@ async fn decide(State(state): State<MockState>, body: Bytes) -> impl IntoRespons
         MockMode::Unavailable => return StatusCode::TOO_MANY_REQUESTS.into_response(),
         MockMode::Ok | MockMode::Absent => {}
     }
-    let probability = if state.mode == MockMode::Absent {
+    let noul = if state.mode == MockMode::Absent {
         0.04
     } else {
         0.94
     };
+    let mut answers = serde_json::Map::new();
+    if let Some(questions) = payload.get("questions").and_then(|value| value.as_object()) {
+        for name in questions.keys() {
+            answers.insert(
+                name.clone(),
+                serde_json::json!({"type": "noul", "noul": noul}),
+            );
+        }
+    }
     (
         StatusCode::OK,
         [(CONTENT_TYPE, "application/json")],
-        serde_json::json!({
-            "answers": [{
-                "probability": probability,
-                "model_box": {"bounds": [0.3, 0.2, 0.6, 0.5]}
-            }]
-        })
-        .to_string(),
+        serde_json::json!({ "answers": answers }).to_string(),
     )
         .into_response()
 }
@@ -236,17 +239,23 @@ fn evaluator(
 
 fn assert_full_image(payload: &serde_json::Value, jpeg: &[u8]) {
     assert_eq!(
-        payload["model_input"]["model"],
+        payload["model"],
         a2a_lab_dev_kit::DEFAULT_JEV_MODEL_REVISION
     );
-    assert!(payload["model_input"].get("roi").is_none());
-    let encoded = payload["image"]["data"].as_str().unwrap();
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
+    assert!(payload.get("model_input").is_none());
+    assert_eq!(asset_bytes(payload), jpeg);
+    assert_eq!(payload["questions"]["pipette_tip_attached"]["type"], "noul");
+}
+
+fn asset_bytes(payload: &serde_json::Value) -> Vec<u8> {
+    let encoded = payload["assets"]
+        .as_object()
+        .and_then(|assets| assets.values().next())
+        .and_then(|asset| asset["data_base64"].as_str())
         .unwrap();
-    assert_eq!(bytes, jpeg);
-    assert_eq!(payload["image"]["descriptor"]["width"], 320);
-    assert_eq!(payload["image"]["descriptor"]["height"], 280);
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap()
 }
 
 #[tokio::test]
@@ -300,25 +309,18 @@ async fn three_pilot_predicates_evaluate_without_a_local_client() {
             .all(|item| item.outcome() == Some(DecisionOutcome::Present))
     );
     let seen = bodies.lock().await;
-    let questions: Vec<_> = seen
+    let names: Vec<_> = seen
         .iter()
-        .map(|payload| payload["question"].as_str().unwrap_or_default())
+        .flat_map(|payload| {
+            payload["questions"]
+                .as_object()
+                .into_iter()
+                .flat_map(|questions| questions.keys().cloned())
+        })
         .collect();
-    assert!(
-        questions
-            .iter()
-            .any(|question| question.contains("lab.pipette_tip_attached"))
-    );
-    assert!(
-        questions
-            .iter()
-            .any(|question| question.contains("lab.foreign_object_present"))
-    );
-    assert!(
-        questions
-            .iter()
-            .any(|question| question.contains("lab.plate_misaligned"))
-    );
+    assert!(names.iter().any(|name| name == "pipette_tip_attached"));
+    assert!(names.iter().any(|name| name == "foreign_object_present"));
+    assert!(names.iter().any(|name| name == "plate_misaligned"));
 }
 
 #[tokio::test]
@@ -333,11 +335,8 @@ async fn box_and_noul_map_without_proving_presence_from_box_alone() {
     let batch = router.evaluate_frames(vec![request]).await.unwrap();
     let keyed = &batch[0];
     let structured = keyed.structured_output().unwrap();
-    let bounds = structured.evidence_box().unwrap().bounds();
-    assert!((bounds[0] - 0.3).abs() < 0.02);
-    assert!((bounds[1] - 0.2).abs() < 0.02);
-    assert!((bounds[2] - 0.6).abs() < 0.02);
-    assert!((bounds[3] - 0.5).abs() < 0.02);
+    assert!(structured.evidence_box().is_none());
+    assert!(structured.noul_probability().unwrap() > 0.9);
     assert_eq!(keyed.outcome(), Some(DecisionOutcome::Present));
 }
 
@@ -375,12 +374,13 @@ async fn absent_foreign_returns_box_without_present_outcome() {
     let batch = router.evaluate_frames(vec![request]).await.unwrap();
     let keyed = &batch[0];
     let structured = keyed.structured_output().unwrap();
-    assert!(structured.evidence_box().is_some());
+    assert!(structured.evidence_box().is_none());
+    assert!(structured.noul_probability().unwrap() < 0.1);
     assert_eq!(keyed.outcome(), Some(DecisionOutcome::Absent));
 }
 
 #[tokio::test]
-async fn box_coordinates_map_through_model_input_crop() {
+async fn full_frame_upload_keeps_roi_off_the_request() {
     let (endpoint, bodies) = spawn_mock(MockMode::Ok).await;
     let jpeg = encode_jpeg(320, 280, 13);
     let mut media = InjectedJevDecisionMedia::new();
@@ -410,28 +410,57 @@ async fn box_coordinates_map_through_model_input_crop() {
     let batch = router.evaluate_frames(vec![request]).await.unwrap();
     let seen = bodies.lock().await;
     let payload = &seen[0];
-    let encoded = payload["image"]["data"].as_str().unwrap();
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .unwrap();
-    assert_eq!(bytes, jpeg);
-    assert_eq!(
-        payload["model_input"]["roi"]["bounds"],
-        serde_json::json!([0.2, 0.2, 0.8, 0.8])
+    assert!(payload.get("model_input").is_none());
+    assert_eq!(asset_bytes(payload), jpeg);
+    assert_eq!(batch[0].outcome(), Some(DecisionOutcome::Present));
+    assert!(
+        batch[0]
+            .structured_output()
+            .unwrap()
+            .evidence_box()
+            .is_none()
     );
-    let bounds = batch[0]
-        .structured_output()
-        .unwrap()
-        .evidence_box()
-        .unwrap()
-        .bounds();
-    assert!((bounds[0] - 0.38).abs() < 0.02);
-    assert!((bounds[1] - 0.32).abs() < 0.02);
-    assert!((bounds[2] - 0.56).abs() < 0.02);
-    assert!((bounds[3] - 0.5).abs() < 0.02);
 }
 
 #[test]
 fn smoke_requires_opt_in_env() {
     assert!(!a2a_lab_ot2::videos::semantic_indexing::jev_smoke_enabled());
+}
+
+async fn jev_instructions(preamble: Option<&str>) -> String {
+    let (endpoint, bodies) = spawn_mock(MockMode::Ok).await;
+    let jpeg = encode_jpeg(320, 280, 9);
+    let mut media = InjectedJevDecisionMedia::new();
+    let request = pipette_request("jev-preamble", b"preamble");
+    media.insert_frame(request.target(), jpeg);
+    let evaluator =
+        evaluator(&endpoint, Arc::new(media)).with_preamble(preamble.map(str::to_owned));
+    let mut router = FrameDecisionEvaluationRouter::new(evaluator);
+    router.evaluate_frames(vec![request]).await.unwrap();
+    let seen = bodies.lock().await;
+    seen[0]["questions"]["pipette_tip_attached"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn semantic_decision_preamble_is_prepended_before_the_predicate_question() {
+    assert_eq!(
+        jev_instructions(Some("DECISION-PREAMBLE")).await,
+        "DECISION-PREAMBLE\npipette tip attached"
+    );
+    assert_eq!(
+        jev_instructions(Some("  DECISION-PREAMBLE")).await,
+        "  DECISION-PREAMBLE\npipette tip attached"
+    );
+    let plain = jev_instructions(None).await;
+    assert_eq!(jev_instructions(Some("")).await, plain);
+    assert_eq!(jev_instructions(Some(" \t\n")).await, plain);
+    assert_eq!(plain, "pipette tip attached");
+    let factory = include_str!("../src/videos/semantic_indexing/jev/factory.rs");
+    let smoke = include_str!("../src/videos/semantic_indexing/jev/smoke.rs");
+    let wiring = ".with_preamble(semantic.decisions.preamble().map(str::to_owned))";
+    assert!(factory.contains(wiring));
+    assert!(smoke.contains(wiring));
 }

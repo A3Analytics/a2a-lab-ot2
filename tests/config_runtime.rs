@@ -207,10 +207,10 @@ async fn assert_factory_records_openai(inputs: &LabConfigInputs, dir: &Path) {
         &legacy_chat(),
         "http://127.0.0.1:9/mcp",
         store,
-        move |provider, model, _url, _store| {
+        move |provider, model, preamble, _url, _store| {
             let hook = hook.clone();
             async move {
-                hook.record(provider, &model)?;
+                hook.record(provider, &model, &preamble)?;
                 Err::<(), _>(a2a_lab_dev_kit::A2aLabError::unavailable(
                     "stop before paid provider",
                 ))
@@ -222,7 +222,11 @@ async fn assert_factory_records_openai(inputs: &LabConfigInputs, dir: &Path) {
     assert!(built.is_err());
     assert_eq!(
         recorder.take_recorded().unwrap(),
-        Some((ModelProvider::OpenAi, "gpt-test".to_owned()))
+        Some((
+            ModelProvider::OpenAi,
+            "gpt-test".to_owned(),
+            a2a_lab_ot2::BUILTIN_PREAMBLE.to_owned()
+        ))
     );
 }
 
@@ -544,7 +548,7 @@ async fn malformed_file_fails_before_chat_or_capture_side_effects() {
         &legacy_chat(),
         "http://127.0.0.1:9/mcp",
         store,
-        move |_provider, _model, _url, _store| {
+        move |_provider, _model, _preamble, _url, _store| {
             let flag = Arc::clone(&flag);
             async move {
                 flag.store(true, Ordering::SeqCst);

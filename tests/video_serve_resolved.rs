@@ -10,12 +10,13 @@ use a2a_lab_dev_kit::videos::{
     RawCameraSample, SelectedCaptureProfile,
 };
 use a2a_lab_dev_kit::{
-    DvrVideoProvider, GetVideoTimelineRequest, ListVideoSourcesRequest, PageRequest, VideoProvider,
-    VideoSourceId,
+    DvrVideoProvider, GetVideoTimelineRequest, ImageProvider, ListImageSourcesRequest,
+    ListVideoSourcesRequest, PageRequest, VideoProvider, VideoSourceId,
 };
 use a2a_lab_ot2::{
-    ClapValueSource, ExplicitSetting, LabConfigInputs, LiveCameraInputFormat, LiveVideoInjections,
-    open_resolved_video_catalog, resolve_lab_config, uses_resolved_video_configuration,
+    ClapValueSource, ExplicitSetting, ImageServeConfig, LabConfigInputs, LiveCameraInputFormat,
+    LiveVideoInjections, image_catalog, open_resolved_video_catalog, resolve_lab_config,
+    uses_resolved_video_configuration,
 };
 
 fn temp_root(name: &str) -> PathBuf {
@@ -297,4 +298,76 @@ async fn restart_keeps_timeline_for_same_ids_and_dvr_root() {
         .unwrap();
     assert_eq!(recovered.source_id().as_str(), "persist");
     second.shutdown();
+}
+
+#[tokio::test]
+async fn configured_source_descriptions_are_unchanged_on_image_and_video_lists() {
+    let dir = temp_root("descriptions");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a2a-lab.json");
+    let overview = "  Overview  ";
+    let close_up = "Close-up\tkept";
+    let document = format!(
+        r#"{{"schema_version":1,"videos":{{"sources":[
+            {{"id":"bench","name":"Bench","description":{},"format":"mjpeg","width":1280,"height":720,"capture_rate":5,"device_index":4}},
+            {{"id":"detail","name":"Detail","description":{},"format":"mjpeg","width":1280,"height":720,"capture_rate":5,"device_index":6}}
+        ],"fps":5}}}}"#,
+        serde_json::to_string(overview).unwrap(),
+        serde_json::to_string(close_up).unwrap()
+    );
+    load_config(&document, &path);
+    let inputs = LabConfigInputs {
+        config_path: ExplicitSetting::cli(Some(path)),
+        ..LabConfigInputs::default()
+    };
+    let resolved = resolve_lab_config(&inputs).unwrap();
+    let images = ImageServeConfig::new(None, None, 5, 5, 64 * 1024)
+        .unwrap()
+        .with_native_video_sources(&resolved.video.sources);
+    let image_page = image_catalog("http://127.0.0.1:9", &images, None, None, None)
+        .unwrap()
+        .list_image_sources(ListImageSourcesRequest::new(page()).unwrap())
+        .await
+        .unwrap();
+    let frame = jpeg(720, 1280);
+    let negotiated = SelectedCaptureProfile::negotiated(
+        CaptureMode::new(CaptureFormat::Mjpeg, 1280, 720).expect("mode"),
+        CaptureRate::fps(5).expect("rate"),
+        CaptureRate::fps(5).expect("out"),
+    );
+    let camera = |body: Vec<u8>| ScriptCamera {
+        formats: vec![profile(CaptureFormat::Mjpeg, 1280, 720, 5)],
+        raw: RawCameraSample::new(CaptureFormat::Mjpeg, 1280, 720, 0, body),
+        negotiated,
+    };
+    let catalog = open_resolved_video_catalog(
+        &resolved.video,
+        LiveVideoInjections::none()
+            .with_color_camera("bench", Box::new(camera(frame.clone())))
+            .with_color_camera("detail", Box::new(camera(frame))),
+    )
+    .await
+    .unwrap()
+    .expect("catalog");
+    let video_page = catalog
+        .provider()
+        .list_video_sources(ListVideoSourcesRequest::new(page()).unwrap())
+        .await
+        .unwrap();
+    for (id, description) in [("bench", overview), ("detail", close_up)] {
+        let image = image_page
+            .items()
+            .iter()
+            .find(|source| source.id.as_str() == id)
+            .unwrap_or_else(|| panic!("missing image source {id}"));
+        let video = video_page
+            .items()
+            .iter()
+            .find(|source| source.id().as_str() == id)
+            .unwrap_or_else(|| panic!("missing video source {id}"));
+        assert_eq!(image.description, description);
+        assert_eq!(video.description(), description);
+    }
+    catalog.shutdown();
+    let _ = fs::remove_dir_all(&dir);
 }

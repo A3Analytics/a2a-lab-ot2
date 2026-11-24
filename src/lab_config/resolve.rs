@@ -22,11 +22,13 @@ use crate::videos::{
 
 use super::inputs::{LabConfigInputs, SettingProvenance};
 
-/// Resolved chat provider and model id.
+/// Resolved chat provider, model id, and preamble.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedChatSettings {
     pub provider: ModelProvider,
     pub model: String,
+    /// Exact preamble text. Omitted input uses [`crate::agent::BUILTIN_PREAMBLE`].
+    pub preamble: String,
 }
 
 /// Resolved DVR storage path and how it was chosen.
@@ -120,7 +122,25 @@ fn resolve_chat(
         None
     };
     let model = selected_model(provider, merged_model.as_deref(), bedrock_override);
-    ResolvedChatSettings { provider, model }
+    let preamble = resolve_preamble(inputs, loaded);
+    ResolvedChatSettings {
+        provider,
+        model,
+        preamble,
+    }
+}
+
+fn resolve_preamble(inputs: &LabConfigInputs, loaded: Option<&LoadedLabConfig>) -> String {
+    if inputs.preamble.is_explicit() {
+        return inputs.preamble.value.clone().unwrap_or_default();
+    }
+    if let Some(preamble) = loaded
+        .and_then(|loaded| loaded.config.chat.as_ref())
+        .and_then(|chat| chat.preamble.clone())
+    {
+        return preamble;
+    }
+    crate::agent::BUILTIN_PREAMBLE.to_owned()
 }
 
 fn resolve_video(

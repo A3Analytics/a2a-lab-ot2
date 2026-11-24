@@ -1,5 +1,6 @@
 /target
 /backlog/
+.cargo/config.toml
 qemu_*.core
 .a2a-lab-ot2
 .cache

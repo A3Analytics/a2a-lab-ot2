@@ -4,7 +4,9 @@ use std::fs;
 use std::process::Command;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_a2a-lab-ot2"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_a2a-lab-ot2"));
+    command.env_remove("A2ALAB_PREAMBLE");
+    command
 }
 
 #[test]
@@ -60,4 +62,35 @@ fn a2alab_config_env_selects_file_with_spaces() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn serve_help_accepts_preamble_flag_and_env() {
+    let output = bin().arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--preamble"));
+    assert!(help.contains("A2ALAB_PREAMBLE"));
+    assert!(!help.to_ascii_lowercase().contains("system prompt"));
+}
+
+#[test]
+fn explicit_blank_preamble_flag_and_env_validate() {
+    for (args, env) in [
+        (vec!["--preamble", "", "config", "validate"], None),
+        (vec!["--preamble", " \t", "config", "validate"], None),
+        (vec!["config", "validate"], Some("")),
+        (vec!["config", "validate"], Some(" \t\n")),
+    ] {
+        let mut command = bin();
+        if let Some(value) = env {
+            command.env("A2ALAB_PREAMBLE", value);
+        }
+        let output = command.args(&args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "args={args:?} env={env:?} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

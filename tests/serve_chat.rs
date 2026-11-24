@@ -29,10 +29,10 @@ async fn record_once(
         store,
         {
             let hook = hook.clone();
-            move |provider, model, _url, _store| {
+            move |provider, model, preamble, _url, _store| {
                 let hook = hook.clone();
                 async move {
-                    hook.record(provider, &model)?;
+                    hook.record(provider, &model, &preamble)?;
                     Err::<a2a_lab_ot2::LabAgent, _>(a2a_lab_dev_kit::A2aLabError::unavailable(
                         "stop before paid provider",
                     ))
@@ -58,7 +58,7 @@ async fn factory_records_legacy_no_file_chat_once() {
     assert!(result.is_err());
     assert_eq!(
         recorder.take_recorded().unwrap(),
-        Some((expected.provider, expected.model))
+        Some((expected.provider, expected.model, expected.preamble))
     );
 }
 
@@ -86,7 +86,7 @@ async fn factory_records_file_only_chat_once() {
     assert!(result.is_err());
     assert_eq!(
         recorder.take_recorded().unwrap(),
-        Some((expected.provider, expected.model))
+        Some((expected.provider, expected.model, expected.preamble))
     );
 }
 
@@ -107,7 +107,7 @@ async fn factory_records_explicit_override_once() {
     assert!(result.is_err());
     assert_eq!(
         recorder.take_recorded().unwrap(),
-        Some((expected.provider, expected.model))
+        Some((expected.provider, expected.model, expected.preamble))
     );
 }
 

@@ -346,7 +346,8 @@ where
         client.config().max_request_bytes(),
         client.config().max_response_bytes(),
     )
-    .await?;
+    .await?
+    .with_preamble(client.config().preamble().map(str::to_owned));
     Ok(service
         .with_image_decision_client(client)
         .with_image_decision_executor(std::sync::Arc::new(executor)))
